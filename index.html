@@ -31,6 +31,7 @@
   input[type=range] { width: 100%; }
   .row { display: flex; gap: 6px; }
   .row > * { flex: 1; }
+  #modeRow button { padding: 7px 4px; font-size: 13px; }
   button { padding: 7px 10px; border-radius: 6px; border: 1px solid var(--line); background: #2c2c3a;
     color: var(--text); cursor: pointer; font: inherit; }
   button:hover:not(:disabled) { background: #383850; }
@@ -70,9 +71,15 @@
     <div class="row" id="modeRow">
       <button data-mode="pen" class="on">✎ Pen</button>
       <button data-mode="points">• Points</button>
+      <button data-mode="trees">🌳 Trees</button>
       <button data-mode="pan">✋ Pan</button>
     </div>
     <div id="modeHint" class="hint" style="margin-top:4px">Pen: hold the mouse button and drag along the roads. Draw in several strokes if you like; each continues the route.</div>
+    <div id="treeOpts" hidden style="margin-top:6px">
+      <label>Canopy size: <b id="canopyVal">10</b> m across
+        <input id="canopy" type="range" min="3" max="25" step="1" value="10"></label>
+      <button id="clearTreesBtn" style="width:100%">Clear all trees</button>
+    </div>
     <div class="row" style="margin-top:6px">
       <button id="undoBtn">Undo</button>
       <button id="clearBtn">Clear</button>
@@ -187,31 +194,39 @@ function pointKind(t) {
   return 'other';
 }
 function areaKind(t) {
-  return t.leisure || t.landuse || t.natural ||
-    (t.amenity === 'parking' ? 'parking' : null) ||
+  return t.leisure || t.landuse || t.natural || t.amenity ||
     (t.highway ? 'pedestrian' : null) || 'area';
 }
 function buildQuery(routeLatLngs, radius) {
   const poly = downsample(routeLatLngs, 20).map(p => p[0].toFixed(6) + ',' + p[1].toFixed(6)).join(',');
   // Grab the ways (.w) and nodes (.n) near the route once each, then filter those sets by tag.
-  // v1-v3 used "nwr", which also pulls in RELATIONS: huge objects like the state border and
-  // suburb boundaries. The server had to build their whole shapes just to test "near", which
-  // made even tiny scans time out. The tool never used relations, so they're left out now.
   // [timeout] and [maxsize] are RESERVATIONS: Overpass queues requests by how much time and
   // memory they ask for, and refuses big ones when busy ("dispatcher timeout"). A route scan
-  // needs ~2 s and a few MB, so ask small. Tested 2026-10-14: 60 s / default memory got refused
-  // 2 out of 3 times; 25 s / 64 MB worked 4 out of 4 in ~2 s.
+  // needs a few seconds and a few MB, so ask small. Tested 2026-10-14: 60 s / default memory got
+  // refused 2 out of 3 times; 25 s / 64 MB worked 4 out of 4.
+  //
+  // Multipolygons (v7): big or holey shapes (the South Bank lagoon, the river, parklands) are
+  // stored as RELATIONS made of several ways. Finding relations with "around" is very slow (the
+  // server builds every big boundary's full shape just to test distance: that caused the v1-v3
+  // timeouts). "rel(bw.w)" instead asks "which relations use the ways we already found?",
+  // which is a cheap lookup. Their full shapes come back and get trimmed to the scan area later.
   return `[out:json][timeout:25][maxsize:67108864];
 way(around:${radius},${poly})->.w;
 node(around:${radius},${poly})->.n;
+rel(bw.w)["type"="multipolygon"]->.r;
 (
   way.w["highway"];
   way.w["building"];
-  way.w["leisure"~"^(park|garden|pitch|playground|recreation_ground|golf_course|track)$"];
-  way.w["landuse"~"^(grass|recreation_ground|forest|meadow|village_green|cemetery)$"];
-  way.w["natural"~"^(water|wood|scrub)$"];
-  way.w["amenity"="parking"];
+  way.w["leisure"];
+  way.w["landuse"];
+  way.w["natural"];
+  way.w["amenity"];
   way.w["waterway"];
+  rel.r["building"];
+  rel.r["leisure"];
+  rel.r["landuse"];
+  rel.r["natural"];
+  rel.r["amenity"];
   node.n["natural"="tree"];
   node.n["highway"~"^(street_lamp|traffic_signals|stop|give_way|bus_stop)$"];
   node.n["power"="pole"];
@@ -220,17 +235,131 @@ node(around:${radius},${poly})->.n;
 out geom;`;
 }
 
+// ---- shape helpers (v7) ----
+const samePt = (a, b) => Math.abs(a[0] - b[0]) < 1e-7 && Math.abs(a[1] - b[1]) < 1e-7;
+
+// Multipolygon pieces arrive as separate lines. Join them end to end into closed rings.
+// Lines that never close (the relation was only partly downloaded) are dropped.
+function assembleRings(lines) {
+  const pool = lines.filter(l => l.length >= 2).map(l => l.slice());
+  const rings = [];
+  while (pool.length) {
+    let ring = pool.shift();
+    for (let guard = 0; !samePt(ring[0], ring[ring.length - 1]) && guard < 100000; guard++) {
+      const end = ring[ring.length - 1];
+      const idx = pool.findIndex(l => samePt(l[0], end) || samePt(l[l.length - 1], end));
+      if (idx < 0) break;
+      let next = pool.splice(idx, 1)[0];
+      if (!samePt(next[0], end)) next = next.slice().reverse();
+      ring = ring.concat(next.slice(1));
+    }
+    if (ring.length >= 4 && samePt(ring[0], ring[ring.length - 1])) rings.push(ring);
+  }
+  return rings;
+}
+
+// Trim a polygon to a rectangle (Sutherland-Hodgman). Used so a giant shape like the
+// Brisbane River only keeps the part inside your scan area.
+function clipRect(poly, b) {
+  const edges = [
+    [p => p[0] >= b.minX, (a, c) => [b.minX, a[1] + (b.minX - a[0]) / (c[0] - a[0]) * (c[1] - a[1])]],
+    [p => p[0] <= b.maxX, (a, c) => [b.maxX, a[1] + (b.maxX - a[0]) / (c[0] - a[0]) * (c[1] - a[1])]],
+    [p => p[1] >= b.minY, (a, c) => [a[0] + (b.minY - a[1]) / (c[1] - a[1]) * (c[0] - a[0]), b.minY]],
+    [p => p[1] <= b.maxY, (a, c) => [a[0] + (b.maxY - a[1]) / (c[1] - a[1]) * (c[0] - a[0]), b.maxY]]
+  ];
+  let out = poly;
+  for (const [inside, cross] of edges) {
+    const inp = out; out = [];
+    for (let i = 0; i < inp.length; i++) {
+      const cur = inp[i], prev = inp[(i + inp.length - 1) % inp.length];
+      if (inside(cur)) { if (!inside(prev)) out.push(cross(prev, cur)); out.push(cur); }
+      else if (inside(prev)) out.push(cross(prev, cur));
+    }
+    if (!out.length) return [];
+  }
+  const res = [];
+  for (const p of out) {
+    const q = [round2(p[0]), round2(p[1])];
+    const prev = res[res.length - 1];
+    if (!prev || prev[0] !== q[0] || prev[1] !== q[1]) res.push(q);
+  }
+  if (res.length > 1 && res[0][0] === res[res.length - 1][0] && res[0][1] === res[res.length - 1][1]) res.pop();
+  return res.length >= 3 ? res : [];
+}
+
+// Is point p inside polygon poly? (ray casting)
+function pointInPoly(p, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, yi] = poly[i], [xj, yj] = poly[j];
+    if ((yi > p[1]) !== (yj > p[1]) && p[0] < (xj - xi) * (p[1] - yi) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+// Points every `step` metres along a line (for OSM "tree_row" lines).
+function pointsAlong(xy, step) {
+  const out = [];
+  let carry = 0;
+  for (let i = 1; i < xy.length; i++) {
+    const [ax, ay] = xy[i - 1], [bx, by] = xy[i];
+    const len = Math.hypot(bx - ax, by - ay);
+    let d = carry;
+    while (d <= len) {
+      const t = len ? d / len : 0;
+      out.push([round2(ax + (bx - ax) * t), round2(ay + (by - ay) * t)]);
+      d += step;
+    }
+    carry = d - len;
+  }
+  return out;
+}
+
 // Turns the raw Overpass response into the kartmap format.
-// Returns { out: <the JSON we export>, preview: <lat/lon shapes for drawing on the map> }
+// Returns { out: <the JSON we export>, preview: <shapes for drawing on the map> }
 function buildOutput(data, o) {
   const origin = o.route[0];
   const P = makeProjector(origin[0], origin[1]);
   const res = { roads: [], buildings: [], areas: [], waterways: [], points: [] };
   const preview = [];
+  let skipped = 0;
   const bb = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
   const grow = ([x, y]) => {
     if (x < bb.minX) bb.minX = x; if (x > bb.maxX) bb.maxX = x;
     if (y < bb.minY) bb.minY = y; if (y > bb.maxY) bb.maxY = y;
+  };
+
+  // The track itself, with consecutive duplicate points removed.
+  const routeXY = [];
+  for (const p of o.route) {
+    const q = P(p[0], p[1]);
+    const prev = routeXY[routeXY.length - 1];
+    if (!prev || prev[0] !== q[0] || prev[1] !== q[1]) routeXY.push(q);
+  }
+  // Areas get trimmed to this box: the route's extent plus the scan radius plus 50 m.
+  const pad = (o.radius || 100) + 50;
+  const clipBox = {
+    minX: Math.min(...routeXY.map(p => p[0])) - pad, maxX: Math.max(...routeXY.map(p => p[0])) + pad,
+    minY: Math.min(...routeXY.map(p => p[1])) - pad, maxY: Math.max(...routeXY.map(p => p[1])) + pad
+  };
+
+  const addArea = (id, t, name, outer, holes) => {
+    const polygon = clipRect(outer, clipBox);
+    if (!polygon.length) return;
+    const h = (holes || []).map(r => clipRect(r, clipBox)).filter(r => r.length);
+    const kind = areaKind(t);
+    const a = { id, kind, name, polygon };
+    if (h.length) a.holes = h;
+    res.areas.push(a);
+    polygon.forEach(grow);
+    preview.push({ cat: 'area', kind, xy: [polygon, ...h] });
+  };
+  const addTrees = (xy, source, idBase) => {
+    pointsAlong(xy, 8).forEach((pos, i) => {
+      res.points.push({ id: idBase + '-' + i, kind: 'tree', source, pos });
+      grow(pos);
+      preview.push({ cat: 'point', kind: 'tree', xy: pos });
+    });
   };
 
   for (const el of (data.elements || [])) {
@@ -241,17 +370,46 @@ function buildOutput(data, o) {
       if (el.lat == null) continue;
       const pos = P(el.lat, el.lon); grow(pos);
       const kind = pointKind(t);
-      res.points.push({ id: 'n' + el.id, kind, pos });
-      preview.push({ cat: 'point', kind, latlng: [el.lat, el.lon] });
+      res.points.push({ id: 'n' + el.id, kind, source: 'osm', pos });
+      preview.push({ cat: 'point', kind, xy: pos });
       continue;
     }
+
+    if (el.type === 'relation') {
+      // Join the member lines into rings: "outer" rings are the shape, "inner" rings are holes.
+      const lines = { outer: [], inner: [] };
+      for (const m of (el.members || [])) {
+        if (m.type !== 'way' || !m.geometry) continue;
+        const ll = m.geometry.filter(Boolean).map(g => [g.lat, g.lon]);
+        (m.role === 'inner' ? lines.inner : lines.outer).push(ll);
+      }
+      const toXY = ring => ring.slice(0, -1).map(p => P(p[0], p[1]));
+      const outers = assembleRings(lines.outer).map(toXY);
+      const inners = assembleRings(lines.inner).map(toXY);
+      if (!outers.length) { skipped++; continue; }
+      outers.forEach((outer, i) => {
+        const id = 'r' + el.id + (outers.length > 1 ? '-' + (i + 1) : '');
+        const holes = outers.length === 1 ? inners : inners.filter(r => pointInPoly(r[0], outer));
+        if (t.building) {
+          const [height, heightSource] = buildingHeight(t);
+          const b = { id, kind: t.building, name, height, heightSource, footprint: outer.map(p => p.slice()) };
+          if (holes.length) b.holes = holes;
+          res.buildings.push(b);
+          outer.forEach(grow);
+          preview.push({ cat: 'building', xy: [outer, ...holes] });
+        } else {
+          addArea(id, t, name, outer, holes);
+        }
+      });
+      continue;
+    }
+
     if (el.type !== 'way' || !el.geometry) continue;
     const ll = el.geometry.filter(Boolean).map(g => [g.lat, g.lon]);
     if (ll.length < 2) continue;
     const first = ll[0], last = ll[ll.length - 1];
     const closed = ll.length > 3 && first[0] === last[0] && first[1] === last[1];
     const xy = ll.map(p => P(p[0], p[1]));
-    xy.forEach(grow);
     const ring = closed ? xy.slice(0, -1) : xy;   // polygons: drop the repeated closing point
     const id = 'w' + el.id;
 
@@ -259,27 +417,22 @@ function buildOutput(data, o) {
       if (!closed) continue;
       const [height, heightSource] = buildingHeight(t);
       res.buildings.push({ id, kind: t.building, name, height, heightSource, footprint: ring });
-      preview.push({ cat: 'building', latlngs: ll });
+      ring.forEach(grow);
+      preview.push({ cat: 'building', xy: [ring] });
     } else if (t.highway && !(closed && t.area === 'yes')) {
       const [width, widthSource] = roadWidth(t);
       res.roads.push({ id, kind: t.highway, name, width, widthSource, points: xy });
-      preview.push({ cat: 'road', kind: t.highway, latlngs: ll });
+      xy.forEach(grow);
+      preview.push({ cat: 'road', kind: t.highway, xy });
     } else if (t.waterway && !closed) {
       res.waterways.push({ id, kind: t.waterway, name, points: xy });
-      preview.push({ cat: 'waterway', latlngs: ll });
+      xy.forEach(grow);
+      preview.push({ cat: 'waterway', xy });
+    } else if (t.natural === 'tree_row' && !closed) {
+      addTrees(xy, 'osm-tree_row', id);
     } else if (closed) {
-      const kind = areaKind(t);
-      res.areas.push({ id, kind, name, polygon: ring });
-      preview.push({ cat: 'area', kind, latlngs: ll });
+      addArea(id, t, name, ring, null);
     }
-  }
-
-  // The track itself, with consecutive duplicate points removed.
-  const routeXY = [];
-  for (const p of o.route) {
-    const q = P(p[0], p[1]);
-    const prev = routeXY[routeXY.length - 1];
-    if (!prev || prev[0] !== q[0] || prev[1] !== q[1]) routeXY.push(q);
   }
   routeXY.forEach(grow);
 
@@ -294,12 +447,14 @@ function buildOutput(data, o) {
       axes: 'x = east, y = north. In Godot: Vector3(x, 0, -y)',
       scanRadius: o.radius,
       bbox: { minX: round2(bb.minX), minY: round2(bb.minY), maxX: round2(bb.maxX), maxY: round2(bb.maxY) },
+      areasTrimmedTo: { minX: round2(clipBox.minX), minY: round2(clipBox.minY), maxX: round2(clipBox.maxX), maxY: round2(clipBox.maxY) },
       elevation: null,
       attribution: '© OpenStreetMap contributors, ODbL',
       counts: {
         roads: res.roads.length, buildings: res.buildings.length,
         buildingsWithRealHeight: res.buildings.filter(b => b.heightSource !== 'default').length,
-        areas: res.areas.length, waterways: res.waterways.length, points: res.points.length
+        areas: res.areas.length, waterways: res.waterways.length, points: res.points.length,
+        manualTrees: 0, skippedIncompleteShapes: skipped
       }
     },
     route: {
@@ -317,6 +472,25 @@ function buildOutput(data, o) {
     points: res.points
   };
   return { out, preview };
+}
+
+// Adds your hand-placed trees to a scan result at export time, so placing trees never
+// needs a re-scan. Returns a new object; the scan result itself is left untouched.
+function withManualTrees(out, trees) {
+  const P = makeProjector(out.meta.origin.lat, out.meta.origin.lon);
+  const manual = trees.map((t, i) => ({ id: 'm' + (i + 1), kind: 'tree', source: 'manual', canopy: t.canopy, pos: P(t.lat, t.lon) }));
+  return {
+    ...out,
+    meta: { ...out.meta, counts: { ...out.meta.counts, manualTrees: manual.length } },
+    points: out.points.concat(manual),
+    manualTrees: trees.map(t => ({ lat: t.lat, lon: t.lon, canopy: t.canopy }))   // so Load JSON can bring them back
+  };
+}
+
+// lat/lon from [east, north] metres (the reverse of makeProjector), for drawing the preview.
+function makeUnprojector(lat0, lon0) {
+  const R = 6378137, k = Math.PI / 180, c = Math.cos(lat0 * k);
+  return ([x, y]) => [lat0 + y / (R * k), lon0 + x / (R * k * c)];
 }
 
 // JSON that's still readable: one feature per line instead of one number per line.
@@ -422,21 +596,24 @@ const els = {
   undoBtn: $('undoBtn'), clearBtn: $('clearBtn'), snap: $('snap'), loop: $('loop'),
   routeInfo: $('routeInfo'), name: $('name'), radius: $('radius'), radiusVal: $('radiusVal'),
   width: $('width'), scanBtn: $('scanBtn'), status: $('status'), stats: $('stats'),
-  exportBtn: $('exportBtn'), loadBtn: $('loadBtn'), loadFile: $('loadFile')
+  exportBtn: $('exportBtn'), loadBtn: $('loadBtn'), loadFile: $('loadFile'),
+  treeOpts: $('treeOpts'), canopy: $('canopy'), canopyVal: $('canopyVal'), clearTreesBtn: $('clearTreesBtn')
 };
 
 // ---- state ----
 let waypoints = [];        // your clicks, [lat, lon]
 let routeLatLngs = [];     // the final path (snapped to roads, or straight lines)
 let routeSnapped = false;
-let scanResult = null;     // export-ready data from the last scan
-let mode = 'pen';          // 'pen' | 'points' | 'pan'
+let scanResult = null;     // export-ready data from the last scan (OSM only; your trees are added at export)
+let scanPreview = [];      // shapes from the last scan, for redrawing
+let trees = [];            // trees you placed: { lat, lon, canopy (metres across) }
+let mode = 'pen';          // 'pen' | 'points' | 'trees' | 'pan'
 let routeReq = 0;          // ignores old routing replies if you click faster than the server answers
-let history = [];          // earlier copies of `waypoints`, so Undo can step back a whole action
+let history = [];          // earlier copies of { waypoints, trees }, so Undo can step back a whole action
 
-// Call BEFORE changing waypoints, so Undo can restore what was there.
+// Call BEFORE changing waypoints or trees, so Undo can restore what was there.
 function remember() {
-  history.push(waypoints.map(p => p.slice()));
+  history.push({ waypoints: waypoints.map(p => p.slice()), trees: trees.map(t => ({ ...t })) });
   if (history.length > 50) history.shift();
 }
 
@@ -594,11 +771,42 @@ async function snapMatch(pts, isCurrent) {
 
 // ---- Points mode: each click adds a point ----
 map.on('click', e => {
-  if (mode !== 'points') return;
-  remember();
-  waypoints.push([e.latlng.lat, e.latlng.lng]);
-  rebuildRoute();
+  if (mode === 'points') {
+    remember();
+    waypoints.push([e.latlng.lat, e.latlng.lng]);
+    rebuildRoute();
+  } else if (mode === 'trees') {
+    remember();
+    trees.push({ lat: e.latlng.lat, lon: e.latlng.lng, canopy: +els.canopy.value });
+    renderTrees();
+  }
 });
+
+// ---- Trees mode ----
+// Trees are drawn at their real size (the circle is the canopy), so you can match them
+// to the satellite view. They're separate from the route: adding or removing trees never
+// needs a re-scan; they're added to the file when you export.
+const treeLayer = L.layerGroup().addTo(map);
+function renderTrees() {
+  treeLayer.clearLayers();
+  trees.forEach((t, i) => {
+    const c = L.circle([t.lat, t.lon], {
+      radius: t.canopy / 2, color: '#1b4332', weight: 2, fillColor: '#40916c', fillOpacity: 0.55
+    }).bindTooltip(`Tree ${i + 1}: ${t.canopy} m canopy. Right-click to remove.`);
+    c.on('contextmenu', ev => { L.DomEvent.stop(ev); remember(); trees.splice(i, 1); renderTrees(); });
+    c.addTo(treeLayer);
+  });
+  showStats();
+  save();
+}
+els.canopy.oninput = () => { els.canopyVal.textContent = els.canopy.value; save(); };
+els.clearTreesBtn.onclick = () => {
+  if (!trees.length) return;
+  remember();
+  trees = [];
+  renderTrees();
+  setStatus('Trees cleared. Press Undo if that was a mistake.');
+};
 
 // ---- Pen mode: hold and drag ----
 // Uses "pointer events", which cover mouse, pen and touch in one go.
@@ -648,14 +856,16 @@ function finishStroke() {
 const MODE_HINTS = {
   pen: 'Pen: hold the mouse button and drag along the roads. Draw in several strokes if you like; each continues the route.',
   points: 'Points: click to add a point. Good for a few corners; snapping fills in the roads between them.',
+  trees: 'Trees: click to place a tree. Switch to Satellite (top-right) to see the real ones. Right-click a tree to remove it.',
   pan: 'Pan: drag to move the map. Nothing gets drawn.'
 };
 function setMode(m) {
   mode = m;
   for (const b of els.modeRow.querySelectorAll('button')) b.classList.toggle('on', b.dataset.mode === m);
   els.modeHint.textContent = MODE_HINTS[m];
+  els.treeOpts.hidden = m !== 'trees';
   els.map.classList.toggle('pen', m === 'pen');
-  els.map.classList.toggle('drawing', m === 'points');
+  els.map.classList.toggle('drawing', m === 'points' || m === 'trees');
   if (m === 'pen') map.dragging.disable(); else map.dragging.enable();   // in Pen mode, dragging draws instead of panning
 }
 els.modeRow.addEventListener('click', e => { const b = e.target.closest('button'); if (b) setMode(b.dataset.mode); });
@@ -663,8 +873,12 @@ setMode('pen');
 
 els.undoBtn.onclick = () => {
   if (!history.length) { setStatus('Nothing to undo.'); return; }
-  waypoints = history.pop();
-  rebuildRoute();
+  const prev = history.pop();
+  const routeChanged = JSON.stringify(prev.waypoints) !== JSON.stringify(waypoints);
+  waypoints = prev.waypoints;
+  trees = prev.trees;
+  renderTrees();
+  if (routeChanged) rebuildRoute();   // only a route change needs re-snapping (and a re-scan)
 };
 els.clearBtn.onclick = () => {
   if (!waypoints.length) return;
@@ -751,8 +965,9 @@ async function scan() {
     loop: els.loop.checked && waypoints.length >= 3, snapped: routeSnapped, name: els.name.value.trim()
   });
   scanResult = out;
+  scanPreview = preview;
   drawPreview(preview);
-  showStats(out);
+  showStats();
   els.exportBtn.disabled = false;
   const partial = data.remark && /error|timed out|out of memory/i.test(data.remark);
   if (partial) setStatus('Scan finished but the server warned the data may be incomplete: ' + data.remark, 'warn');
@@ -760,29 +975,49 @@ async function scan() {
 }
 els.scanBtn.onclick = scan;
 
-const AREA_COLOURS = { water: '#4ea8de', parking: '#adb5bd', pedestrian: '#ced4da', cemetery: '#95d5b2' };
+// Preview colours by area type. Anything not listed is drawn as generic green.
+const AREA_COLOURS = {
+  water: '#4ea8de', swimming_pool: '#00b4d8', water_park: '#00b4d8', beach: '#e9c46a', sand: '#e9c46a',
+  parking: '#adb5bd', pedestrian: '#ced4da', cemetery: '#95d5b2',
+  residential: '#d6ccc2', commercial: '#cdb4db', retail: '#cdb4db', industrial: '#b8b8b8'
+};
+// Big "zoning" areas (whole suburbs) are drawn faintly so they don't hide everything else.
+const FAINT = new Set(['residential', 'commercial', 'retail', 'industrial']);
 function drawPreview(preview) {
   featureLayer.clearLayers();
-  for (const f of preview) {
-    if (f.cat === 'building') L.polygon(f.latlngs, { color: '#495057', weight: 1, fillColor: '#6c757d', fillOpacity: 0.7 }).addTo(featureLayer);
-    else if (f.cat === 'area') { const c = AREA_COLOURS[f.kind] || '#52b788'; L.polygon(f.latlngs, { color: c, weight: 1, fillColor: c, fillOpacity: 0.35 }).addTo(featureLayer); }
-    else if (f.cat === 'road') L.polyline(f.latlngs, { color: /footway|path|cycleway|steps/.test(f.kind) ? '#bc6c25' : '#343a40', weight: 2, opacity: 0.8 }).addTo(featureLayer);
-    else if (f.cat === 'waterway') L.polyline(f.latlngs, { color: '#4ea8de', weight: 2 }).addTo(featureLayer);
-    else if (f.cat === 'point') L.circleMarker(f.latlng, { radius: 3, weight: 0, fillOpacity: 0.9, fillColor: f.kind === 'tree' ? '#2d6a4f' : '#ffb703' }).addTo(featureLayer);
+  if (!scanResult) return;
+  const U = makeUnprojector(scanResult.meta.origin.lat, scanResult.meta.origin.lon);
+  const LL = rings => rings.map(r => r.map(U));
+  // Faint zoning first, then areas, then everything else on top.
+  const order = f => f.cat === 'area' ? (FAINT.has(f.kind) ? 0 : 1) : 2;
+  for (const f of preview.slice().sort((a, b) => order(a) - order(b))) {
+    if (f.cat === 'building') L.polygon(LL(f.xy), { color: '#495057', weight: 1, fillColor: '#6c757d', fillOpacity: 0.7 }).addTo(featureLayer);
+    else if (f.cat === 'area') {
+      const c = AREA_COLOURS[f.kind] || '#52b788';
+      L.polygon(LL(f.xy), { color: c, weight: 1, fillColor: c, fillOpacity: FAINT.has(f.kind) ? 0.12 : 0.45 })
+        .bindTooltip(f.kind).addTo(featureLayer);
+    }
+    else if (f.cat === 'road') L.polyline(f.xy.map(U), { color: /footway|path|cycleway|steps/.test(f.kind) ? '#bc6c25' : '#343a40', weight: 2, opacity: 0.8 }).addTo(featureLayer);
+    else if (f.cat === 'waterway') L.polyline(f.xy.map(U), { color: '#4ea8de', weight: 2 }).addTo(featureLayer);
+    else if (f.cat === 'point') L.circleMarker(U(f.xy), { radius: 3, weight: 0, fillOpacity: 0.9, fillColor: f.kind === 'tree' ? '#2d6a4f' : '#ffb703' }).addTo(featureLayer);
   }
 }
-function showStats(out) {
+function showStats() {
+  if (!scanResult) return;
+  const out = withManualTrees(scanResult, trees);
   const c = out.meta.counts;
   const size = new Blob([prettyJSON(out)]).size;
   const rows = [
     ['Track length', (out.route.length / 1000).toFixed(2) + ' km'],
     ['Buildings', `${c.buildings} (${c.buildingsWithRealHeight} with real height)`],
     ['Roads / paths', c.roads],
-    ['Parks, water, car parks', c.areas],
+    ['Parks, water, pools, land', c.areas],
     ['Creeks / drains', c.waterways],
-    ['Trees, poles, signs', c.points],
+    ['Trees, poles, signs (OSM)', c.points - c.manualTrees],
+    ['Trees you placed', c.manualTrees],
     ['File size', (size / 1024).toFixed(0) + ' KB']
   ];
+  if (c.skippedIncompleteShapes) rows.push(['Shapes skipped (incomplete in OSM)', c.skippedIncompleteShapes]);
   els.stats.className = '';
   els.stats.innerHTML = rows.map(([k, v]) => `<div><span>${k}</span><b>${v}</b></div>`).join('');
 }
@@ -790,8 +1025,9 @@ function showStats(out) {
 // ---- export / load ----
 els.exportBtn.onclick = () => {
   if (!scanResult) return;
-  const safe = (scanResult.meta.name || 'route').replace(/[^a-z0-9_-]+/gi, '-').toLowerCase();
-  const blob = new Blob([prettyJSON(scanResult)], { type: 'application/json' });
+  const final = withManualTrees(scanResult, trees);
+  const safe = (final.meta.name || 'route').replace(/[^a-z0-9_-]+/gi, '-').toLowerCase();
+  const blob = new Blob([prettyJSON(final)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = `kartmap_${safe}_${new Date().toISOString().slice(0, 10)}.json`;
@@ -808,6 +1044,8 @@ els.loadFile.onchange = async () => {
     if (j.format !== 'kartmap' || !j.route || !Array.isArray(j.route.waypoints)) throw new Error('not a kartmap export (missing route waypoints)');
     remember();
     waypoints = j.route.waypoints;
+    trees = Array.isArray(j.manualTrees) ? j.manualTrees.map(t => ({ lat: t.lat, lon: t.lon, canopy: t.canopy || 10 })) : [];
+    renderTrees();
     els.loop.checked = !!j.route.closed;
     els.snap.checked = !!j.route.snappedToRoads;
     if (j.route.width) els.width.value = j.route.width;
@@ -825,8 +1063,8 @@ els.loadFile.onchange = async () => {
 function save() {
   try {
     localStorage.setItem('kartmap-v1', JSON.stringify({
-      waypoints, snap: els.snap.checked, loop: els.loop.checked,
-      radius: els.radius.value, width: els.width.value, name: els.name.value
+      waypoints, trees, snap: els.snap.checked, loop: els.loop.checked,
+      radius: els.radius.value, width: els.width.value, name: els.name.value, canopy: els.canopy.value
     }));
   } catch (e) { /* storage blocked: tool still works, it just won't remember */ }
 }
@@ -838,6 +1076,8 @@ function save() {
   if (s.radius) { els.radius.value = s.radius; els.radiusVal.textContent = s.radius; }
   if (s.width) els.width.value = s.width;
   if (s.name) els.name.value = s.name;
+  if (s.canopy) { els.canopy.value = s.canopy; els.canopyVal.textContent = s.canopy; }
+  if (Array.isArray(s.trees)) { trees = s.trees; renderTrees(); }
   if (Array.isArray(s.waypoints) && s.waypoints.length) {
     waypoints = s.waypoints;
     map.fitBounds(waypoints, { padding: [40, 40], maxZoom: 17 });
