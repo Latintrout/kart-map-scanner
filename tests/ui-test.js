@@ -62,7 +62,12 @@ const overpass = { elements: [
       if (u.includes('spatial-img.information.qld.gov.au')) return route.fulfill({ body: aerial, contentType: 'image/png', headers: { 'access-control-allow-origin': '*' } });
       if (u.includes('commons.wikimedia.org/w/api.php')) {
         const q = new URL(u).searchParams, cors = { 'access-control-allow-origin': '*' };
-        if (q.get('list') === 'search') return route.fulfill({ body: JSON.stringify({ query: { search: q.get('srsearch') === 'Streets Beach' ? [{ title: 'File:Streets Beach test.jpg' }] : [] } }), contentType: 'application/json', headers: cors });
+        if (q.get('list') === 'geosearch') {
+          // only Streets Beach (6 m east, 6 m north of the map centre) has a photo within 100 m... GOMA sits 65 m away, so give it a far-off result list
+          const [glat, glon] = q.get('gscoord').split('|').map(Number);
+          const near = Math.abs(glat - (la + 6 / 111320)) < 2e-5 && Math.abs(glon - (lo + 6 / (111320 * Math.cos(la * Math.PI / 180)))) < 2e-5;
+          return route.fulfill({ body: JSON.stringify({ query: { geosearch: near ? [{ title: 'File:Riverside.svg', dist: 3 }, { title: 'File:Streets Beach test.jpg', dist: 20 }] : [] } }), contentType: 'application/json', headers: cors });
+        }
         return route.fulfill({ body: JSON.stringify({ query: { pages: { 1: { title: 'File:Streets Beach test.jpg', imageinfo: [{ url: 'http://img.test/full.jpg', thumburl: 'http://img.test/thumb.jpg', descriptionurl: 'https://commons.wikimedia.org/wiki/File:Streets_Beach_test.jpg', extmetadata: { LicenseShortName: { value: 'CC BY-SA 4.0' }, Artist: { value: '<a href="x">Tester</a>' } } }] } } } }), contentType: 'application/json', headers: cors });
       }
       if (u.includes('img.test')) return route.fulfill({ body: aerial, contentType: 'image/png' });
@@ -161,7 +166,7 @@ const overpass = { elements: [
       j3.buildings.some(b => b.sampledRoofColour === '#b03a2e') && j3.meta.imagery && j3.meta.imagery.licence === 'CC BY-SA' && /Queensland/.test(j3.meta.attribution) &&
       j3.meta.groundImage && j3.meta.groundImage.file === 'kartmap_ui-test_ground.png' && png.readUInt32BE(16) === j3.meta.groundImage.width, JSON.stringify(j3.meta.groundImage));
     const sb = j3.landmarks.find(l => l.name === 'Streets Beach');
-    check('v8.3 export: landmark photo with licence, author and "search" warning', sb.photos && sb.photos[0].licence === 'CC BY-SA 4.0' && sb.photos[0].author === 'Tester' && sb.photosFrom === 'search', JSON.stringify(sb));
+    check('v8.3 export: landmark photo with licence, author and "nearby" warning', sb.photos && sb.photos[0].licence === 'CC BY-SA 4.0' && sb.photos[0].author === 'Tester' && sb.photosFrom === 'nearby', JSON.stringify(sb));
     check('v8.3 file still version 2 (loader-compatible)', j3.version === 2);
   }
   check('no script errors during the whole run', errors.length === 0, errors.join('; '));

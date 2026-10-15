@@ -115,7 +115,7 @@ function runScannerTests(lib) {
   else check('v8.1 functions present', false, 'smoothLine not found (running against v8?)');
   if (has('loaderContractProblems')) runV82(lib, check, same);
   else check('v8.2 functions present', false, 'loaderContractProblems not found (running against v8.1?)');
-  if (has('mergeOverture')) runV83(lib, check, same);
+  if (has('mergeOverture', 'rankNearbyPhotos')) runV83(lib, check, same);
   else check('v8.3 functions present', false, 'mergeOverture not found (running against v8.2?)');
 
   return results;
@@ -439,6 +439,9 @@ function runV83(lib, check, same) {
     sources: '[{"dataset":"OpenStreetMap","record_id":"w103130220@3","property":""},{"dataset":"Microsoft ML Buildings","property":"/properties/height"}]' }, [[[153.1, -27.6], [153.1001, -27.6], [153.1001, -27.6001], [153.1, -27.6]]]);
   const f3 = lib.overtureFeature({ id: 'e', height: 60, '@height_source': 'OpenStreetMap', sources: '[{"dataset":"OpenStreetMap","record_id":"w26253751@6","property":""}]' }, [[[153.1, -27.6], [153.1001, -27.6], [153.1001, -27.6001], [153.1, -27.6]]]);
   check('v8.3 live-test fix: an ML height is labelled ML even when @height_source says OpenStreetMap', f2.heightFrom === 'Microsoft ML Buildings' && f2.osmId === 'w103130220' && f3.heightFrom === 'OpenStreetMap', f2.heightFrom + ' / ' + f3.heightFrom);
+
+  const ranked = lib.rankNearbyPhotos('Streets Beach', [{ title: 'File:Brisbane river.jpg', dist: 10 }, { title: 'File:Map.svg', dist: 5 }, { title: 'File:Streets Beach lagoon.jpg', dist: 80 }, { title: 'File:Ferry.JPG', dist: 40 }]);
+  check('v8.3 live-test fix: nearby photos naming the landmark come first, then nearest; no maps/svg', JSON.stringify(ranked) === JSON.stringify(['File:Streets Beach lagoon.jpg', 'File:Brisbane river.jpg', 'File:Ferry.JPG']), JSON.stringify(ranked));
 
   // --- aerial colours ---
   const tiles = lib.planImageTiles({ south: -27.49, west: 153.01, north: -27.47, east: 153.04 }, 1.0, 4096, 2048);

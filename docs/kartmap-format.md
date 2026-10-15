@@ -158,7 +158,7 @@ Each: `{ id, name, kind, pos, ref?, wikidata?, wikipedia? }`
 - `pos` is `[x, y]` in metres (for shapes, roughly their centre).
 - `ref` points to the building, area or prop in this file that it belongs to, so the game can swap that generic piece for a hand-made model. No `ref` means it's only a named spot.
 - `wikidata` and `wikipedia` (when present) help find reference photos.
-- **(v8.3)** `photos`: up to 3 reference photos from Wikimedia Commons, `[{ file, thumb, page, licence, author }]`, after "Find landmark photos". `photosFrom` is `wikidata` (the landmark's own photo) or `search` (found by name: check it's the right place). For modelling reference only; if a photo is used in the game itself, credit the author and follow its licence (`page` has the details).
+- **(v8.3)** `photos`: up to 3 reference photos from Wikimedia Commons, `[{ file, thumb, page, licence, author }]`, after "Find landmark photos". `photosFrom` is `wikidata` (the landmark's own photo) or `nearby` (Commons photos geotagged within 100 m, ones naming the landmark first: may show a neighbour). For modelling reference only; if a photo is used in the game itself, credit the author and follow its licence (`page` has the details).
 - Unnamed things are never landmarks.
 
 ## race (v8.1)

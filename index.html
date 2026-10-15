@@ -977,6 +977,14 @@ function groundImagePlan(bbox, metresPerPixel, maxPx) {
 
 // ---- landmark photos ----
 // Reads a Wikimedia Commons imageinfo answer into [{file, thumb, page, licence, author}].
+// Orders Commons geosearch hits ({title, dist}) for a landmark: files whose name shares a word
+// with the landmark's name first, then nearest first. Returns file titles.
+function rankNearbyPhotos(name, hits) {
+  const words = String(name || '').toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length > 2 && !/^(the|and|of)$/.test(w));
+  const score = h => words.filter(w => h.title.toLowerCase().includes(w)).length;
+  return hits.filter(h => /\.(jpe?g|png|webp|tiff?)$/i.test(h.title))
+    .sort((a, b) => score(b) - score(a) || a.dist - b.dist).map(h => h.title);
+}
 function parseCommonsImageInfo(json) {
   const strip = s => String(s || '').replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
   const out = [];
@@ -2008,21 +2016,25 @@ async function findLandmarkPhotos() {
   const list = scanResult.landmarks.slice(0, 60);
   let done = 0, found = 0;
   const api = (base, params) => fetch(base + '?' + new URLSearchParams({ format: 'json', origin: '*', ...params })).then(r => { if (!r.ok) throw new Error('replied ' + r.status); return r.json(); });
+  const U = makeUnprojector(scanResult.meta.origin.lat, scanResult.meta.origin.lon);
   const one = async l => {
-    let titles = [], from = 'search';
+    let titles = [], from = 'nearby';
     if (l.wikidata) {
       const j = await api('https://www.wikidata.org/w/api.php', { action: 'wbgetclaims', entity: l.wikidata, property: 'P18' });
       titles = ((j.claims && j.claims.P18) || []).map(c => 'File:' + c.mainsnak.datavalue.value).slice(0, 3);
       if (titles.length) from = 'wikidata';
     }
     if (!titles.length) {
-      const j = await api('https://commons.wikimedia.org/w/api.php', { action: 'query', list: 'search', srnamespace: '6', srlimit: '3', srsearch: l.name });
-      titles = ((j.query && j.query.search) || []).map(s => s.title);
+      // Photos geotagged within 100 m, ones naming the landmark first. (v8.3 live test: a plain name
+      // search gave "The Edge" in Brasília and an English "St Clement", so search by place, not name.)
+      const [lat, lon] = U(l.pos);
+      const j = await api('https://commons.wikimedia.org/w/api.php', { action: 'query', list: 'geosearch', gsnamespace: '6', gsradius: '100', gslimit: '20', gscoord: lat + '|' + lon });
+      titles = rankNearbyPhotos(l.name, (j.query && j.query.geosearch) || []).slice(0, 3);
     }
     if (!titles.length) return;
     const info = await api('https://commons.wikimedia.org/w/api.php', { action: 'query', prop: 'imageinfo', iiprop: 'url|extmetadata', iiurlwidth: '640', titles: titles.join('|') });
     l.photos = parseCommonsImageInfo(info).slice(0, 3);
-    l.photosFrom = from;   // 'wikidata' = the landmark's own photo; 'search' = found by name, check it's the right place
+    l.photosFrom = from;   // 'wikidata' = the landmark's own photo; 'nearby' = taken within 100 m, may show a neighbour
     if (l.photos.length) found++;
   };
   try {
@@ -2130,7 +2142,7 @@ function showStats() {
 // v8.3: small reference photos under a landmark, each linking to its Commons page (author + licence there).
 function photoHtml(l, esc) {
   if (!l.photos || !l.photos.length) return '';
-  const warn = l.photosFrom === 'search' ? '<div class="hint">Found by name search, check it is the right place.</div>' : '';
+  const warn = l.photosFrom === 'nearby' ? '<div class="hint">Photos taken nearby: check they show this landmark.</div>' : '';
   return `<div class="lm-photos">${l.photos.map(p => `<a href="${esc(p.page)}" target="_blank" rel="noopener" title="${esc((p.author || '') + ' · ' + (p.licence || ''))}"><img src="${esc(p.thumb)}" alt="${esc(l.name)}" loading="lazy"></a>`).join('')}</div>${warn}`;
 }
 
