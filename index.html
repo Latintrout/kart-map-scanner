@@ -825,12 +825,17 @@ function attributionFor(used) {
 function overtureFeature(props, coords) {
   let ring = coords;
   while (Array.isArray(ring) && Array.isArray(ring[0]) && Array.isArray(ring[0][0])) ring = ring[0];   // outer ring of (multi)polygon
-  let osmId = null;
+  let osmId = null, heightDataset = null;
   try {
     const src = typeof props.sources === 'string' ? JSON.parse(props.sources) : (props.sources || []);
-    for (const s of src) if (/openstreetmap/i.test(s.dataset || '') && s.record_id) { osmId = String(s.record_id).split('@')[0]; break; }
+    for (const s of src) if (!osmId && /openstreetmap/i.test(s.dataset || '') && s.record_id) osmId = String(s.record_id).split('@')[0];
+    // The height's real origin is the source entry for "/properties/height". The tile's own
+    // "@height_source" field says "OpenStreetMap" even when that entry says Microsoft's ML model
+    // (found in the live South Bank test: 1388 of 1565 heights), so the entry wins.
+    const hs = src.find(s => /^\/properties\/height$/.test(s.property || ''));
+    if (hs) heightDataset = hs.dataset || 'unknown';
   } catch (e) { /* unreadable sources: treat as non-OSM */ }
-  let height = parseNum(props.height), from = props['@height_source'] || null;
+  let height = parseNum(props.height), from = heightDataset || props['@height_source'] || null;
   if (!height && parseNum(props.num_floors)) { height = round2(parseNum(props.num_floors) * 3); }
   return {
     id: String(props.id || ''), osmId, height: height ? round2(height) : null, heightFrom: from,

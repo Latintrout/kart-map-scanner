@@ -434,6 +434,11 @@ function runV83(lib, check, same) {
   check('v8.3 Overture credit added when used', /Overture/.test(lib.attributionFor({ overture: true, imagery: false })) && /OpenStreetMap/.test(lib.attributionFor({})));
   const f = lib.overtureFeature({ id: 'abc', height: 4.2, '@height_source': 'Microsoft ML Buildings', sources: '[{"dataset":"OpenStreetMap","record_id":"w584365517@2"}]', class: 'house' }, [[[153.1, -27.6], [153.1001, -27.6], [153.1001, -27.6001], [153.1, -27.6]]]);
   check('v8.3 Overture tile feature read correctly (OSM id from record_id, ring in lat/lon)', f.osmId === 'w584365517' && f.height === 4.2 && f.heightFrom === 'Microsoft ML Buildings' && f.ring[0][0] === -27.6 && f.ring[0][1] === 153.1 && f.cls === 'house', JSON.stringify(f));
+  // Real South Bank tile shape: "@height_source" says OpenStreetMap, but the height entry in sources is Microsoft's ML model.
+  const f2 = lib.overtureFeature({ id: 'd', height: 4.343635559082031, '@height_source': 'OpenStreetMap', '@geometry_source': 'OpenStreetMap',
+    sources: '[{"dataset":"OpenStreetMap","record_id":"w103130220@3","property":""},{"dataset":"Microsoft ML Buildings","property":"/properties/height"}]' }, [[[153.1, -27.6], [153.1001, -27.6], [153.1001, -27.6001], [153.1, -27.6]]]);
+  const f3 = lib.overtureFeature({ id: 'e', height: 60, '@height_source': 'OpenStreetMap', sources: '[{"dataset":"OpenStreetMap","record_id":"w26253751@6","property":""}]' }, [[[153.1, -27.6], [153.1001, -27.6], [153.1001, -27.6001], [153.1, -27.6]]]);
+  check('v8.3 live-test fix: an ML height is labelled ML even when @height_source says OpenStreetMap', f2.heightFrom === 'Microsoft ML Buildings' && f2.osmId === 'w103130220' && f3.heightFrom === 'OpenStreetMap', f2.heightFrom + ' / ' + f3.heightFrom);
 
   // --- aerial colours ---
   const tiles = lib.planImageTiles({ south: -27.49, west: 153.01, north: -27.47, east: 153.04 }, 1.0, 4096, 2048);
