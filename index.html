@@ -884,15 +884,19 @@ function mergeOverture(data, features) {
 // Splits an area into image requests the imagery server accepts (max width x height pixels),
 // at `metresPerPixel`. Boxes are in degrees (the server returns plain lat/lon images).
 function planImageTiles(box, metresPerPixel, maxW, maxH) {
+  // Square pixels in degrees. The imagery server keeps pixels square in degrees: if the box and
+  // size don't match, it quietly stretches the box (live test: 0.0181° of latitude came back as
+  // 0.0204°, so colours were read up to ~125 m off). So every tile here is exactly
+  // width × d by height × d degrees, and the last row/column may reach a little past the area.
   const midLat = (box.south + box.north) / 2;
-  const dLat = metresPerPixel / 111320, dLon = metresPerPixel / (111320 * Math.cos(midLat * Math.PI / 180));
-  const W = Math.max(1, Math.ceil((box.east - box.west) / dLon)), H = Math.max(1, Math.ceil((box.north - box.south) / dLat));
+  const d = metresPerPixel / (111320 * Math.cos(midLat * Math.PI / 180));   // ≈ metresPerPixel east-west, a bit finer north-south
+  const W = Math.max(1, Math.ceil((box.east - box.west) / d)), H = Math.max(1, Math.ceil((box.north - box.south) / d));
   const nx = Math.ceil(W / maxW), ny = Math.ceil(H / maxH);
+  const tw = Math.ceil(W / nx), th = Math.ceil(H / ny);
   const tiles = [];
   for (let i = 0; i < nx; i++) for (let j = 0; j < ny; j++) {
-    const w0 = box.west + (box.east - box.west) * i / nx, w1 = box.west + (box.east - box.west) * (i + 1) / nx;
-    const n0 = box.north - (box.north - box.south) * j / ny, s0 = box.north - (box.north - box.south) * (j + 1) / ny;
-    tiles.push({ west: w0, east: w1, north: n0, south: s0, width: Math.ceil(W / nx), height: Math.ceil(H / ny) });
+    const west = box.west + i * tw * d, north = box.north - j * th * d;
+    tiles.push({ west, east: west + tw * d, north, south: north - th * d, width: tw, height: th });
   }
   return tiles;
 }

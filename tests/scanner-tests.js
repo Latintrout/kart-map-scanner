@@ -445,6 +445,9 @@ function runV83(lib, check, same) {
   const cover = tiles.every(t => t.width <= 4096 && t.height <= 2048) &&
     Math.min(...tiles.map(t => t.west)) <= 153.01 && Math.max(...tiles.map(t => t.east)) >= 153.04 && Math.min(...tiles.map(t => t.south)) <= -27.49 && Math.max(...tiles.map(t => t.north)) >= -27.47;
   check('v8.3 aerial image requests stay within the server limit and cover the whole area', cover && tiles.length >= 1 && tiles.length <= 4, JSON.stringify(tiles.map(t => [t.width, t.height])));
+  // Live-test fix: the server keeps pixels square in degrees, so each tile's box must match its size exactly.
+  const sq = tiles.every(t => Math.abs((t.east - t.west) / t.width - (t.north - t.south) / t.height) < 1e-12);
+  check('v8.3 live-test fix: every aerial tile has square pixels in degrees (server would stretch it otherwise)', sq, JSON.stringify(tiles[0]));
   // a fake 100x100 aerial image: left half red roof colour, right half green; a building on the left half
   const W = 100, H = 100, data = new Uint8ClampedArray(W * H * 4);
   for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const i = (y * W + x) * 4; if (x < 50) { data[i] = 180 + (x % 3); data[i + 1] = 60; data[i + 2] = 50; } else { data[i] = 70; data[i + 1] = 140; data[i + 2] = 60; } data[i + 3] = 255; }
