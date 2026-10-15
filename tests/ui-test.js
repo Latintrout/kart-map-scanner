@@ -345,6 +345,32 @@ const overpass = { elements: [
     check('v12b no script errors on the second page', e2.length === 0, e2.join('; '));
     await p2.close();
   }
+  if (V >= 12.3) {
+    // ---------- v12c: elevation profile, minimap, track card ----------
+    await page.click('#scanBtn'); await page.waitForFunction(() => !document.getElementById('exportBtn').disabled && /Scan done/.test(document.getElementById('status').textContent), null, { timeout: 15000 });
+    check('v12c no profile before ground heights', !(await page.$('#profile')));
+    await page.click('#heightsBtn');
+    await page.waitForFunction(() => /Ground heights added/.test(document.getElementById('status').textContent), null, { timeout: 15000 });
+    check('v12c elevation profile appears with ground heights', await page.isVisible('#profile svg'));
+    await page.locator('#profile svg').scrollIntoViewIfNeeded();
+    const pb = await page.locator('#profile svg').boundingBox();
+    await page.mouse.move(pb.x + pb.width * 0.5, pb.y + pb.height / 2); await page.waitForTimeout(100);
+    const rd = await page.textContent('#profRead');
+    check('v12c profile hover shows distance and height', /^[\d.]+ km · [\d.]+ m$/.test(rd) && (await page.getAttribute('#profX', 'visibility')) === 'visible', JSON.stringify(rd) + ' visible:' + await page.isVisible('#profX') + ' ' + await page.isVisible('#profRead'));
+    const [mm] = await Promise.all([page.waitForEvent('download'), page.click('#minimapBtn')]);
+    const mf = path.join(__dirname, 'minimap.png'); await mm.saveAs(mf);
+    const mpng = fs.readFileSync(mf);
+    check('v12c minimap PNG 256×256', mpng.slice(1, 4).toString() === 'PNG' && mpng.readUInt32BE(16) === 256 && mpng.readUInt32BE(20) === 256 && /_minimap\.png$/.test(mm.suggestedFilename()));
+    const [cd] = await Promise.all([page.waitForEvent('download'), page.click('#cardBtn')]);
+    const cf = path.join(__dirname, 'card.png'); await cd.saveAs(cf);
+    const cpng = fs.readFileSync(cf);
+    check('v12c track card PNG 1200×630', cpng.slice(1, 4).toString() === 'PNG' && cpng.readUInt32BE(16) === 1200 && cpng.readUInt32BE(20) === 630 && /_card\.png$/.test(cd.suggestedFilename()));
+    if (process.env.SHOT4) { fs.copyFileSync(cf, process.env.SHOT4); fs.copyFileSync(mf, process.env.SHOT4.replace('.png', '-mini.png')); await page.locator('#profile').screenshot({ path: process.env.SHOT4.replace('.png', '-profile.png') }); }
+    const [jd] = await Promise.all([page.waitForEvent('download'), page.click('#exportBtn')]);
+    const jf = path.join(__dirname, 'export12c.json'); await jd.saveAs(jf);
+    const j12 = JSON.parse(fs.readFileSync(jf, 'utf8'));
+    check('v12c export has the minimap placement info', j12.meta.minimap && j12.meta.minimap.file === mm.suggestedFilename() && j12.meta.minimap.metresPerPixel > 0 && typeof j12.meta.minimap.minX === 'number');
+  }
   check('no script errors during the whole run', errors.length === 0, errors.join('; '));
   await ctx.close();
 
@@ -431,6 +457,14 @@ const overpass = { elements: [
     check('v9b phone: toast hides on tap', !(await pg.isVisible('#toast')));
     check('v9b phone: no script errors', ph.errors.length === 0, ph.errors.join('; '));
     await ph.ctx.close();
+  }
+  {
+    // ---------- every version: the last route comes back after a reload ----------
+    const r = await openPage('ok');
+    await r.page.evaluate(() => localStorage.setItem('kartmap-v1', JSON.stringify({ waypoints: [[-27.47, 153.02], [-27.471, 153.021], [-27.472, 153.02]], snap: false, loop: true, name: 'r' })));
+    await r.page.reload(); await r.page.waitForTimeout(1200);
+    check('reload brings back the last route', /^3 points/.test(await r.page.textContent('#routeInfo')) && r.errors.length === 0, await r.page.textContent('#routeInfo') + ' ' + r.errors.join('; '));
+    await r.ctx.close();
   }
   await browser.close();
   const failed = results.filter(r => !r.ok).length;

@@ -89,6 +89,11 @@
   #v3dHost.retro canvas { image-rendering: pixelated; }
   #v3dHelp { position: absolute; left: 8px; bottom: 8px; color: #fff; font-size: 12px; text-shadow: 0 0 3px #000; pointer-events: none; }
   .legend span { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin: 0 4px 0 8px; vertical-align: middle; }
+  /* v12c: elevation profile (one series: no legend, the heading names it) */
+  .profile { --series-1: #3987e5; --grid: #33334a; --ink-2: #9a9ab0; margin-top: 8px; position: relative; }
+  #stats .profile, #stats .profile div { display: block; }   /* not the two-column rows the other stats use */
+  .profile svg { width: 100%; height: 90px; display: block; touch-action: pan-y; }
+  .profile .readout { position: absolute; top: 18px; right: 4px; font-size: 11px; color: var(--text); background: #16161dcc; padding: 1px 5px; border-radius: 4px; pointer-events: none; }
 .lm-photos{display:flex;gap:4px;margin:3px 0 4px}.lm-photos img{width:64px;height:48px;object-fit:cover;border-radius:3px;border:1px solid #ccc}
 </style>
 </head>
@@ -202,6 +207,10 @@
     </div>
     <input id="loadFile" type="file" accept=".json,application/json" hidden>
     <button id="view3dBtn" style="width:100%;margin-top:6px" disabled>🧊 3D preview</button>
+    <div class="row" style="margin-top:6px">
+      <button id="minimapBtn" disabled title="A small picture of the track for the game's HUD">Minimap PNG</button>
+      <button id="cardBtn" disabled title="A picture of the track with its stats, for sharing">Track card PNG</button>
+    </div>
   </section>
 
   <section>
@@ -1385,7 +1394,7 @@ function buildOutput(data, o) {
     meta: {
       name: o.name || 'route',
       generated: o.now || new Date().toISOString(),
-      generator: 'kart-map-scanner v12b',
+      generator: 'kart-map-scanner v12c',
       origin: { lat: origin[0], lon: origin[1] },
       units: 'metres',
       axes: 'x = east, y = north. In Godot: Vector3(x, 0, -y)',
@@ -1822,6 +1831,37 @@ async function unpackTrack(s) {
   return trackFromLink(o);
 }
 
+// ======================================================================
+// v12c: elevation profile, minimap and track card (pure geometry)
+// ======================================================================
+// The height-along-the-lap line, fitted into a w × h box with `pad` pixels round it.
+function profileGeometry(out, w, h, pad) {
+  const cl = out.route.centerline;
+  if (!out.meta.elevation || !cl || !Array.isArray(cl.elevation) || cl.elevation.length < 2) return null;
+  const es = cl.elevation, sp = cl.spacing || 2, len = (es.length - 1) * sp;
+  const top = Math.max(2, Math.ceil(Math.max(...es)));   // at least 2 m tall so flat tracks don't look wild
+  const sx = d => pad + (w - 2 * pad) * d / len, sy = e => h - pad - (h - 2 * pad) * e / top;
+  const step = Math.max(1, Math.ceil(es.length / 400));   // at most ~400 corners in the drawing
+  const pts = [];
+  for (let i = 0; i < es.length; i += step) pts.push([round2(sx(i * sp)), round2(sy(es[i]))]);
+  if ((es.length - 1) % step) pts.push([round2(sx(len)), round2(sy(es[es.length - 1]))]);
+  const d = 'M' + pts.map(p => p.join(',')).join('L');
+  return { d, area: d + `L${round2(sx(len))},${round2(sy(0))}L${round2(sx(0))},${round2(sy(0))}Z`, top, len, spacing: sp, es, sx, sy };
+}
+// Fits the track into a size × size picture (north up), `pad` pixels from the edges.
+// Pixel (px, py) = ((x - minX) / mpp, (maxY - y) / mpp): the game can put kart dots on it with that.
+function minimapPlan(out, size, pad) {
+  const cl = out.route.centerline && out.route.centerline.points && out.route.centerline.points.length > 1 ? out.route.centerline.points : out.route.points;
+  const xs = cl.map(p => p[0]), ys = cl.map(p => p[1]);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  const mpp = Math.max(x1 - x0, y1 - y0, 1) / (size - 2 * pad);
+  const minX = round2((x0 + x1) / 2 - mpp * size / 2), maxY = round2((y0 + y1) / 2 + mpp * size / 2);
+  const P = p => [round2((p[0] - minX) / mpp), round2((maxY - p[1]) / mpp)];
+  const points = cl.map(P);
+  const a = points[0], b = points[Math.min(points.length - 1, 3)], L = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+  return { size, mpp: Math.round(mpp * 1000) / 1000, minX, maxY, points, start: a, dir: [round2((b[0] - a[0]) / L), round2((b[1] - a[1]) / L)], closed: !!out.route.closed, toPx: P };
+}
+
 // lat/lon from [east, north] metres (the reverse of makeProjector), for drawing the preview.
 function makeUnprojector(lat0, lon0) {
   const R = 6378137, k = Math.PI / 180, c = Math.cos(lat0 * k);
@@ -2050,6 +2090,7 @@ function invalidateScan() {
   els.exportBtn.disabled = true;
   els.sampleBtn.disabled = els.photosBtn.disabled = els.groundBtn.disabled = true;
   $('view3dBtn').disabled = true;
+  $('minimapBtn').disabled = $('cardBtn').disabled = true;
   $('heightsBtn').disabled = $('terrainBtn').disabled = true;
   demGrids = null;
   els.stats.textContent = 'Route or settings changed. Scan again to export.';
@@ -2411,6 +2452,7 @@ async function scan() {
   els.sampleBtn.disabled = els.groundBtn.disabled = false;
   els.photosBtn.disabled = !out.landmarks.length;
   $('view3dBtn').disabled = false;
+  $('minimapBtn').disabled = $('cardBtn').disabled = false;
   demGrids = null; $('heightsBtn').disabled = false; $('terrainBtn').disabled = true;
   const partial = data.remark && /error|timed out|out of memory/i.test(data.remark);
   const contract = loaderContractProblems(out);   // v8.2: would the game's loader choke on this file?
@@ -2666,7 +2708,7 @@ function showStats() {
     (q.notes.length ? `<ul style="margin:4px 0 0;padding-left:18px">${q.notes.map(n => `<li>${esc(n)}</li>`).join('')}</ul>` : '') + `</details>` : '';
   const probs = problemSpots(scanPreview);
   const probHtml = probs.length ? `<button id="nextProblemBtn" style="width:100%;margin-top:6px">Show problem on the map (${probs.length})</button>` : '';
-  els.stats.innerHTML = rows.map(([k, v]) => `<div><span>${k}</span><b>${v}</b></div>`).join('') + qHtml + probHtml +
+  els.stats.innerHTML = rows.map(([k, v]) => `<div><span>${k}</span><b>${v}</b></div>`).join('') + profileHtml(out) + qHtml + probHtml +
     (lm.length ? `<details style="margin-top:6px"><summary>Landmarks to model by hand (${lm.length})</summary>` +
       `<ul style="margin:4px 0 0;padding-left:18px">${lm.map(l => `<li>${esc(l.name)} <span class="hint">(${esc(l.kind)})</span>${photoHtml(l, esc)}</li>`).join('')}</ul></details>` : '');
 }
@@ -3268,6 +3310,119 @@ function showHelp(show) { $('helpCard').hidden = !show; }
 $('helpBtn').onclick = () => showHelp($('helpCard').hidden);
 $('helpClose').onclick = () => { showHelp(false); try { localStorage.setItem('kartmap-help-seen', '1'); } catch (e) {} };
 try { if (!localStorage.getItem('kartmap-help-seen') && !localStorage.getItem('kartmap-v1')) showHelp(true); } catch (e) { showHelp(true); }
+
+// ======================================================================
+// v12c (browser): elevation profile, minimap PNG, track card PNG
+// ======================================================================
+function profileHtml(out) {
+  const g = profileGeometry(out, 300, 90, 6);
+  if (!g) return '';
+  return `<div class="profile" id="profile"><div class="hint">Height along the lap (m above the lowest point)</div>
+    <svg viewBox="0 0 300 90" preserveAspectRatio="none" role="img" aria-label="Elevation profile: highest ${g.top} m">
+      <line x1="6" x2="294" y1="${round2(g.sy(0))}" y2="${round2(g.sy(0))}" stroke="var(--grid)" stroke-width="1"/>
+      <line x1="6" x2="294" y1="${round2(g.sy(g.top))}" y2="${round2(g.sy(g.top))}" stroke="var(--grid)" stroke-width="1" stroke-dasharray="2 3"/>
+      <path d="${g.area}" fill="var(--series-1)" fill-opacity="0.15"/>
+      <path d="${g.d}" fill="none" stroke="var(--series-1)" stroke-width="2" vector-effect="non-scaling-stroke" stroke-linejoin="round"/>
+      <line id="profX" y1="6" y2="84" stroke="var(--ink-2)" stroke-width="1" vector-effect="non-scaling-stroke" visibility="hidden"/>
+      <text x="8" y="${round2(g.sy(g.top)) + 10}" font-size="10" fill="var(--ink-2)">${g.top} m</text>
+    </svg><div class="readout" id="profRead" hidden></div></div>`;
+}
+// crosshair: snaps to the nearest track point under the pointer
+els.stats.addEventListener('pointermove', e => {
+  const svg = e.target.closest && e.target.closest('#profile svg');
+  if (!svg || !scanResult) return;
+  const g = profileGeometry(scanResult, 300, 90, 6);
+  if (!g) return;
+  const r = svg.getBoundingClientRect(), x = (e.clientX - r.left) / r.width * 300;
+  const i = Math.max(0, Math.min(g.es.length - 1, Math.round((x - 6) / 288 * (g.es.length - 1))));
+  const line = $('profX'), read = $('profRead');
+  line.setAttribute('x1', g.sx(i * g.spacing)); line.setAttribute('x2', g.sx(i * g.spacing)); line.setAttribute('visibility', 'visible');
+  read.hidden = false; read.textContent = `${(i * g.spacing / 1000).toFixed(2)} km · ${g.es[i].toFixed(1)} m`;
+});
+els.stats.addEventListener('pointerleave', () => { const l = $('profX'), r = $('profRead'); if (l) l.setAttribute('visibility', 'hidden'); if (r) r.hidden = true; });
+
+function savePng(canvas, file, after) {
+  canvas.toBlob(blob => {
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = file; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    if (after) after(blob);
+  }, 'image/png');
+}
+function drawTrackLine(g, mp, scale, opts) {
+  const pts = mp.points;
+  g.lineJoin = g.lineCap = 'round';
+  const path = () => { g.beginPath(); pts.forEach((p, i) => i ? g.lineTo(p[0] * scale, p[1] * scale) : g.moveTo(p[0] * scale, p[1] * scale)); if (mp.closed) g.closePath(); };
+  path(); g.strokeStyle = opts.edge; g.lineWidth = opts.width + 4 * scale; g.stroke();
+  path(); g.strokeStyle = opts.road; g.lineWidth = opts.width; g.stroke();
+  // start/finish: a short chequered bar across the track
+  const [sx, sy] = [mp.start[0] * scale, mp.start[1] * scale], [dx, dy] = mp.dir, half = opts.width * 1.1, n = 6;
+  for (let k = 0; k < n; k++) for (let row = 0; row < 2; row++) {
+    const t0 = -half + (2 * half) * k / n, t1 = -half + (2 * half) * (k + 1) / n, r0 = row * opts.width * 0.35 - opts.width * 0.35, r1 = r0 + opts.width * 0.35;
+    g.fillStyle = (k + row) % 2 ? '#ffffff' : '#111111';
+    g.beginPath();
+    for (const [t, r] of [[t0, r0], [t1, r0], [t1, r1], [t0, r1]]) g.lineTo(sx - dy * t + dx * r, sy + dx * t + dy * r);
+    g.fill();
+  }
+}
+function exportMinimap() {
+  if (!scanResult) return;
+  const out = withManualExtras(scanResult, trees, manualBuildings), size = 256;
+  const mp = minimapPlan(out, size, 12);
+  const cv = document.createElement('canvas'); cv.width = cv.height = size;
+  drawTrackLine(cv.getContext('2d'), mp, 1, { width: 5, road: '#ffffff', edge: '#111111' });
+  const safe = (out.meta.name || 'route').replace(/[^a-z0-9_-]+/gi, '-').toLowerCase(), file = `kartmap_${safe}_minimap.png`;
+  scanResult.meta.minimap = { file, size, metresPerPixel: mp.mpp, minX: mp.minX, maxY: mp.maxY, note: 'Kart at (x, y) is at pixel ((x - minX) / metresPerPixel, (maxY - y) / metresPerPixel). North is up. Transparent background.' };
+  savePng(cv, file, () => setStatus(`Minimap saved (${size}×${size}, ${mp.mpp} m per pixel). Export JSON again so the file says how to place karts on it.`, 'ok'));
+}
+function exportCard() {
+  if (!scanResult) return;
+  const out = withManualExtras(scanResult, trees, manualBuildings);
+  const W = 1200, H = 630, cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  const g = cv.getContext('2d');
+  g.fillStyle = '#16161d'; g.fillRect(0, 0, W, H);
+  // map square: faint buildings and the track
+  const S = 560, X0 = 35, Y0 = 35, mp = minimapPlan(out, S, 36);
+  g.fillStyle = '#20202a'; g.fillRect(X0, Y0, S, S);
+  g.save(); g.translate(X0, Y0); g.beginPath(); g.rect(0, 0, S, S); g.clip();
+  g.fillStyle = '#3a3a4a';
+  for (const b of out.buildings) { if (b.hasParts) continue; g.beginPath(); b.footprint.forEach((q, i) => { const p = mp.toPx(q); i ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1]); }); g.closePath(); g.fill(); }
+  g.fillStyle = '#2d6a4f';
+  for (const p of out.points) if (p.kind === 'tree') { const q = mp.toPx(p.pos); g.fillRect(q[0] - 1.5, q[1] - 1.5, 3, 3); }
+  drawTrackLine(g, mp, 1, { width: 9, road: '#e63946', edge: '#0b0b10' });
+  g.restore();
+  // text side
+  const font = (wt, px) => `${wt} ${px}px system-ui, "Segoe UI", sans-serif`;
+  g.fillStyle = '#9a9ab0'; g.font = font(600, 18); g.fillText('KART MAP SCANNER', 635, 70);
+  g.fillStyle = '#e8e8f0'; g.font = font(700, 46);
+  let name = out.meta.name || 'Untitled track';
+  while (g.measureText(name).width > 530 && name.length > 4) name = name.slice(0, -2) + '…';
+  g.fillText(name, 635, 125);
+  g.fillStyle = '#9a9ab0'; g.font = font(400, 18); g.fillText('Real streets, scanned from open map data', 635, 155);
+  const c = out.meta.counts, e = out.meta.elevation;
+  const stats = [['Length', (out.route.length / 1000).toFixed(2) + ' km'], ['Corners', (out.route.corners || []).length], ['Checkpoints', out.race ? out.race.checkpoints.length : 0],
+    ['Shortcuts', c.shortcuts || 0], ['Buildings', c.buildings + (c.manualBuildings || 0)], ['Trees', out.points.filter(p => p.kind === 'tree').length],
+    ['Landmarks', c.landmarks || 0], e ? ['Climb per lap', Math.round(e.climb) + ' m'] : ['Width', out.route.width + ' m']];
+  stats.forEach(([k, v], i) => {
+    const x = 635 + (i % 2) * 270, y = 215 + Math.floor(i / 2) * 68;
+    g.fillStyle = '#9a9ab0'; g.font = font(400, 16); g.fillText(k, x, y);
+    g.fillStyle = '#e8e8f0'; g.font = font(700, 30); g.fillText(String(v), x, y + 34);
+  });
+  const pg = profileGeometry(out, 530, 80, 4);
+  if (pg) {
+    g.save(); g.translate(635, 500);
+    g.fillStyle = 'rgba(57,135,229,0.18)'; g.fill(new Path2D(pg.area));
+    g.strokeStyle = '#3987e5'; g.lineWidth = 2; g.lineJoin = 'round'; g.stroke(new Path2D(pg.d));
+    g.fillStyle = '#9a9ab0'; g.font = font(400, 13); g.fillText(`Height along the lap · highest ${pg.top} m`, 4, -6);
+    g.restore();
+  }
+  g.fillStyle = '#6a6a80'; g.font = font(400, 12);
+  const credit = 'Map data © OpenStreetMap contributors' + (out.meta.overture ? ', Overture Maps' : '') + (out.meta.elevation || out.meta.imagery ? ', © State of Queensland (CC BY-SA)' : '');
+  g.fillText(credit, 635, 612);
+  const safe = (out.meta.name || 'route').replace(/[^a-z0-9_-]+/gi, '-').toLowerCase();
+  savePng(cv, `kartmap_${safe}_card.png`, () => setStatus('Track card saved (1200×630, a good size for sharing).', 'ok'));
+}
+$('minimapBtn').onclick = exportMinimap;
+$('cardBtn').onclick = exportCard;
 
 // ---- remember the last route between visits (optional; fails silently) ----
 function save() {

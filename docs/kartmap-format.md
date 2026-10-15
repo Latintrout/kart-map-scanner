@@ -1,6 +1,6 @@
 # kartmap file format (version 2)
 
-_Last updated for scanner v12a (2026-10-16). v9b, v11 and v12b made no format changes (v11's `.glb` is a separate preview model). **(v12a)** adds ground heights._ Fields marked **(v8)**, **(v8.1)**, **(v8.2)**, **(v8.3)** or **(v9a)** are newer than version 1. All are optional, so readers of version 1 files still work. Files say `"version": 2` from scanner v8.2 on, matching the "kartmap v2" the game's loader (brisbane-kart, `kartmap.gd`) was written for. That loader accepts versions 1 and 2 and **rejects anything higher**, so a future version 3 needs a loader update first._
+_Last updated for scanner v12c (2026-10-16). v9b, v11 and v12b made no format changes (v11's `.glb` is a separate preview model). **(v12a)** adds ground heights, **(v12c)** `meta.minimap`._ Fields marked **(v8)**, **(v8.1)**, **(v8.2)**, **(v8.3)** or **(v9a)** are newer than version 1. All are optional, so readers of version 1 files still work. Files say `"version": 2` from scanner v8.2 on, matching the "kartmap v2" the game's loader (brisbane-kart, `kartmap.gd`) was written for. That loader accepts versions 1 and 2 and **rejects anything higher**, so a future version 3 needs a loader update first._
 
 **Guesses are always marked.** Any field ending in `Source` (`heightSource`, `widthSource`, `roofShapeSource`) says where a value came from. The values `default`, `estimated`, `guess` and **(v8.3)** `ml-estimate` mean it's a guess: later data (LiDAR, hand edits) may replace guesses freely, but must never replace real values (`osm`, `levels`, `lanes`, `lidar`, **(v8.3)** `overture`, **(v9a)** `manual`).
 
@@ -47,6 +47,7 @@ into a level in the Godot kart game.
 | `bbox` | Extent of everything in the file, in metres |
 | `areasTrimmedTo` | Box that large areas (like the river) were cut to |
 | `counts` | Number of each feature type (v8 adds `barriers`, `landmarks`, `bridges`, `tunnels`) |
+| `minimap` | **(v12c)** Set after "Minimap PNG": `{ file, size, metresPerPixel, minX, maxY, note }`. A transparent, north-up picture of the track for the HUD. A kart at (x, y) is at pixel ((x − minX) / metresPerPixel, (maxY − y) / metresPerPixel) |
 | `elevation` | **(v12a)** `null`, or ground heights from the Queensland LiDAR terrain model: `{ source, service, licence: "CC BY-SA", attribution, base, units, groundOnly, metresPerSample, trackLowest, trackHighest, climb, descent, steepest: { grade, at }, bridgedPoints, counts, terrainFile?, terrainSpacing? }`. `base` = metres above sea level (AHD) of the track's lowest point; every other height is metres above `base`. `grade` is % over 20 m (+ uphill in race direction), `at` = metres along the centerline |
 | `generator` | **(v8)** Which scanner version made the file, e.g. `"kart-map-scanner v8.1"` |
 | `quality` | **(v8.1)** Report card: `heights` (% measured / estimated / default), `roofShapes` (% mapped / guessed), `buildingsOnTrack` (ids), `barriersOnTrack`, `propsOnTrack`, `treesTyped` (%), and `notes` (plain-English warnings) |

@@ -127,6 +127,8 @@ function runScannerTests(lib) {
   else check('v12a functions present', false, 'applyElevation not found (running against v11?)');
   if (has('trackForLink')) runV12b(lib, check, same);
   else check('v12b functions present', false, 'trackForLink not found (running against v12a?)');
+  if (has('minimapPlan')) runV12c(lib, check, same);
+  else check('v12c functions present', false, 'minimapPlan not found (running against v12b?)');
 
   return results;
 }
@@ -677,5 +679,28 @@ function runV12b(lib, check, same) {
   const bytes = new Uint8Array([0, 255, 62, 63, 250]);
   check('v12b base64 round trip', same(Array.from(lib.base64ToBytes(lib.bytesToBase64(bytes))), Array.from(bytes)));
   check('v12b link packing functions exist (tested end to end in the page test)', typeof lib.packTrack === 'function' && typeof lib.unpackTrack === 'function');
+}
+
+function runV12c(lib, check, same) {
+  const la = -27.49, lo = 153.0;
+  const off = (dx, dy) => ({ lat: la + dy / 111320, lon: lo + dx / (111320 * Math.cos(la * Math.PI / 180)) });
+  const llOff = (dx, dy) => { const o = off(dx, dy); return [o.lat, o.lon]; };
+  const loop = [llOff(0, 0), llOff(400, 0), llOff(400, 200), llOff(0, 200), llOff(0, 0)];   // 400 × 200 m
+  const { out } = lib.buildOutput({ elements: [] }, { route: loop, waypoints: loop.slice(0, 4), radius: 50, width: 8, loop: true, snapped: false, name: 'mm', now: 'X' });
+  const mp = lib.minimapPlan(out, 256, 12);
+  const inside = mp.points.every(p => p[0] >= 11.9 && p[0] <= 244.1 && p[1] >= 11.9 && p[1] <= 244.1);
+  const xs = mp.points.map(p => p[0]), ys = mp.points.map(p => p[1]);
+  const wPx = Math.max(...xs) - Math.min(...xs), hPx = Math.max(...ys) - Math.min(...ys);
+  check('v12c minimap: whole track inside the picture with its margin, shape kept (2:1)', inside && Math.abs(wPx / hPx - 2) < 0.08, JSON.stringify({ wPx, hPx }));
+  check('v12c minimap: metres per pixel and the kart-dot formula agree', Math.abs(mp.mpp - 400 / 232) < 0.01 && same(mp.toPx(out.route.centerline.points[0]), mp.start));
+  check('v12c minimap: north is up (the north edge is at the top)', Math.min(...ys) === mp.toPx([0, Math.max(...out.route.centerline.points.map(p => p[1]))])[1] || Math.abs(Math.min(...ys) - mp.toPx([0, Math.max(...out.route.centerline.points.map(p => p[1]))])[1]) < 0.02);
+  check('v12c profile: none without ground heights', lib.profileGeometry(out, 300, 90, 6) === null);
+  out.meta.elevation = { base: 5 };
+  out.route.centerline.elevation = out.route.centerline.points.map((p, i) => Math.round(i / out.route.centerline.points.length * 60) / 10);   // 0 → ~6 m
+  const g = lib.profileGeometry(out, 300, 90, 6);
+  check('v12c profile: fills the box left to right, highest point at the top line', g && g.top === 6 && g.sx(0) === 6 && Math.abs(g.sx(g.len) - 294) < 1e-6 && Math.abs(g.sy(6) - 6) < 1e-6 && /^M6,84/.test(g.d), g && g.d.slice(0, 30));
+  check('v12c profile: long tracks are thinned to ~400 corners', g.d.split('L').length <= 402);
+  out.route.centerline.elevation = out.route.centerline.points.map(() => 0.3);
+  check('v12c profile: a flat track is drawn at least 2 m tall (no fake drama)', lib.profileGeometry(out, 300, 90, 6).top === 2);
 }
 

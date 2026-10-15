@@ -50,7 +50,7 @@ els.push(N(150, 0, { highway: 'crossing', crossing: 'zebra' }), N(300, 60, { hig
 for (let i = 0; i < 15; i++) els.push(N(15 + i * 18, 190, { natural: 'tree', ...(i % 3 === 0 ? { genus: 'Archontophoenix' } : i % 3 === 1 ? { genus: 'Jacaranda', species: 'Jacaranda mimosifolia', leaf_type: 'broadleaved' } : {}) }));
 els.push(N(150, 3, { natural: 'tree', genus: 'Ficus' }));   // a tree in the road
 const data = { elements: els.map(e => { if (e.tags) for (const k of Object.keys(e.tags)) if (e.tags[k] === undefined) delete e.tags[k]; return e; }) };
-for (const [ver, file] of [['v8.1', '/home/claude/kart-map-scanner-v8.1.html'], ['v8.2', '/home/claude/kart-map-scanner-v8.2.html'], ['v8.3', '/home/claude/kart-map-scanner-v8.3.html'], ['v9a', '/home/claude/kart-map-scanner-v9a.html'], ['v11', '/home/claude/kart-map-scanner-v11.html']]) {
+for (const [ver, file] of [['v8.1', '/home/claude/kart-map-scanner-v8.1.html'], ['v8.2', '/home/claude/kart-map-scanner-v8.2.html'], ['v8.3', '/home/claude/kart-map-scanner-v8.3.html'], ['v9a', '/home/claude/kart-map-scanner-v9a.html'], ['v11', '/home/claude/kart-map-scanner-v11.html'], ['v12c', '/home/claude/kart-map-scanner-v12c.html']]) {
   const L = lib(file);
   let input = data, overture;
   if (ver === 'v8.3') {
@@ -64,14 +64,22 @@ for (const [ver, file] of [['v8.1', '/home/claude/kart-map-scanner-v8.1.html'], 
     console.log('overture stats', JSON.stringify(m.stats));
   }
   let raceRoute = route, raceExtra = {};
-  if (ver === 'v9a' || ver === 'v11') {   // reversed, start moved to the middle of the east side
+  if (ver === 'v9a' || ver === 'v11' || ver === 'v12c') {   // reversed, start moved to the middle of the east side
     raceRoute = L.orientRoute(route, { loop: true, reverse: true, start: ll(303, 100) });
     raceExtra = { reverse: true, start: raceRoute[0] };
   }
   let { out } = L.buildOutput(input, { overture, ...raceExtra, route: raceRoute, waypoints: route.slice(0, 4), radius: 300, width: 8, loop: true, snapped: true, name: 'harness ' + ver, now: '2026-10-15T00:00:00Z' });
-  if (ver === 'v9a' || ver === 'v11') {
+  if (ver === 'v9a' || ver === 'v11' || ver === 'v12c') {
     out = L.withManualExtras(out, [{ lat: ll(10, 100)[0], lon: ll(10, 100)[1], canopy: 8 }], [{ ring: [ll(-40, 60), ll(-20, 60), ll(-20, 80), ll(-40, 80)], height: 9, name: 'Drawn kiosk' }]);
     console.log('v9a start line', JSON.stringify(out.race.startLine.pos), 'dir', JSON.stringify(out.race.startLine.dir), 'contract', JSON.stringify(L.loaderContractProblems(out)));
+  }
+  if (ver === 'v12c') {
+    // ground heights from a fake terrain: 2 m per 100 m rise to the east
+    const W = 400, H = 400, d = new Float32Array(W * H);
+    for (let r = 0; r < H; r++) for (let c = 0; c < W; c++) d[r * W + c] = 5 + c * 0.04;
+    const e = L.applyElevation(out, [{ box: { south: la - 0.005, north: la + 0.005, west: lo - 0.005, east: lo + 0.005 }, width: W, height: H, data: d }], L.makeUnprojector, { metresPerSample: 2 });
+    out.meta.minimap = { file: 'x.png', size: 256, metresPerPixel: 2, minX: 0, maxY: 0 };
+    console.log('v12c elevation', JSON.stringify({ base: e.base, climb: e.climb, high: e.trackHighest }), 'contract', JSON.stringify(L.loaderContractProblems(out)));
   }
   if (ver === 'v8.3') {
     // aerial colours from a fake all-terracotta photo covering everything, plus a landmark photo

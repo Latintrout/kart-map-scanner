@@ -26,6 +26,7 @@ Draw a route on a real map, scan the area along it from free OpenStreetMap data,
 - **Share link**: one link opens your exact track on another device (PC → phone). Also Redo (Ctrl+Y), a 📏 measuring tape on the map, and a short "How it works" card (the ? button).
 - **Works on a phone**: map on top, panel below (the ▲/▼ button gives either more room). Draw with one finger, pinch with two, long-press to delete. "Show problem" jumps to anything sitting on the track.
 - **Ground heights** from Queensland's free LiDAR terrain model: hills along the track and under every building, total climb and steepest slope, and a terrain file for the game.
+- **Minimap and track card**: a HUD minimap PNG (with the numbers to place karts on it), a 1200×630 track card with stats and the height profile, and a hover-able height-along-the-lap chart.
 - **3D preview** after a scan: orbit around the level, "Fly the lap" at kart height, switch on retro pixels, or save a rough `.glb` model.
 - **Export / Load** the level file. The format is documented in `docs/kartmap-format.md`.
 
