@@ -124,7 +124,7 @@
 // ======================================================================
 // PURE-START  (no browser or Leaflet code in here, so it can be tested on its own)
 // ======================================================================
-const FORMAT_VERSION = 1;
+const FORMAT_VERSION = 2;
 
 // Fallbacks when OSM doesn't say how wide a road is (metres).
 const DEFAULT_ROAD_WIDTH = {
@@ -191,11 +191,52 @@ function pointKind(t) {
   if (t.highway) return t.highway;
   if (t.power === 'pole') return 'power_pole';
   if (t.amenity) return t.amenity;
+  if (t.attraction) return t.attraction;
+  if (t.tourism) return t.tourism;
+  if (t.leisure) return t.leisure;
+  if (t.man_made) return t.man_made;
   return 'other';
 }
 function areaKind(t) {
-  return t.leisure || t.landuse || t.natural || t.amenity ||
+  return t.leisure || t.landuse || t.natural || t.amenity || t.man_made ||
     (t.highway ? 'pedestrian' : null) || 'area';
+}
+// v2: the look of a thing, when OSM says. Only keys that are set are added.
+// Colours are OSM's own text: a name ("red") or a hex code ("#c0c0c0").
+function pick(t, keys) {
+  const o = {};
+  for (const [from, to, num] of keys) {
+    if (t[from] == null || t[from] === '') continue;
+    const v = num ? parseNum(t[from]) : t[from];
+    if (v != null) o[to] = v;
+  }
+  return o;
+}
+const BUILDING_LOOK = [
+  ['building:colour', 'colour'], ['roof:colour', 'roofColour'], ['building:material', 'material'],
+  ['roof:material', 'roofMaterial'], ['roof:shape', 'roofShape'], ['roof:height', 'roofHeight', true],
+  ['building:levels', 'levels', true], ['min_height', 'minHeight', true]
+];
+const POINT_LOOK = [
+  ['name', 'name'], ['species', 'species'], ['genus', 'genus'], ['leaf_type', 'leafType'],
+  ['leaf_cycle', 'leafCycle'], ['height', 'height', true], ['diameter_crown', 'canopy', true],
+  ['artwork_type', 'artworkType'], ['colour', 'colour']
+];
+function buildingFields(t) {
+  const look = pick(t, BUILDING_LOOK);
+  // A part that starts at an upper floor (an overhang, a tower on a podium).
+  if (look.minHeight == null && parseNum(t['building:min_level'])) look.minHeight = round2(parseNum(t['building:min_level']) * 3);
+  return look;
+}
+// v2: bridges, tunnels and stacking order on roads, paths and railways.
+function lineFields(t) {
+  const o = {};
+  if (t.bridge && t.bridge !== 'no') o.bridge = true;
+  if (t.tunnel && t.tunnel !== 'no') o.tunnel = true;
+  const layer = parseInt(t.layer, 10); if (isFinite(layer) && layer !== 0) o.layer = layer;
+  if (t.surface) o.surface = t.surface;
+  if (t.lit === 'yes') o.lit = true;
+  return o;
 }
 function buildQuery(routeLatLngs, radius) {
   const poly = downsample(routeLatLngs, 20).map(p => p[0].toFixed(6) + ',' + p[1].toFixed(6)).join(',');
@@ -222,6 +263,14 @@ rel(bw.w)["type"="multipolygon"]->.r;
   way.w["natural"];
   way.w["amenity"];
   way.w["waterway"];
+  way.w["building:part"];
+  way.w["barrier"~"^(hedge|wall|fence|retaining_wall|guard_rail|city_wall|handrail|kerb|bollard)$"];
+  way.w["man_made"~"^(bridge|pier|breakwater|groyne|tower|water_tower|lighthouse)$"];
+  way.w["tourism"~"^(attraction|artwork|museum|gallery|zoo|theme_park)$"];
+  way.w["attraction"];
+  way.w["railway"~"^(rail|light_rail|tram|subway|narrow_gauge|monorail|funicular)$"];
+  rel.r["building:part"];
+  rel.r["man_made"];
   rel.r["building"];
   rel.r["leisure"];
   rel.r["landuse"];
@@ -230,7 +279,12 @@ rel(bw.w)["type"="multipolygon"]->.r;
   node.n["natural"="tree"];
   node.n["highway"~"^(street_lamp|traffic_signals|stop|give_way|bus_stop)$"];
   node.n["power"="pole"];
-  node.n["amenity"~"^(bench|waste_basket)$"];
+  node.n["amenity"~"^(bench|waste_basket|fountain|drinking_water|toilets|bicycle_parking|cafe|restaurant|fast_food|ice_cream|bar|pub|telephone|post_box|shelter|bbq|clock|vending_machine|parking_meter)$"];
+  node.n["tourism"~"^(attraction|artwork|viewpoint|information|picnic_site)$"];
+  node.n["attraction"];
+  node.n["leisure"~"^(picnic_table|playground|fitness_station|bandstand)$"];
+  node.n["man_made"~"^(flagpole|mast|tower|lighthouse|surveillance)$"];
+  node.n["barrier"~"^(bollard|gate)$"];
 );
 out geom;`;
 }
@@ -287,6 +341,12 @@ function clipRect(poly, b) {
   return res.length >= 3 ? res : [];
 }
 
+function centroid(poly) {
+  let x = 0, y = 0;
+  for (const p of poly) { x += p[0]; y += p[1]; }
+  return [x / poly.length, y / poly.length];
+}
+
 // Is point p inside polygon poly? (ray casting)
 function pointInPoly(p, poly) {
   let inside = false;
@@ -320,7 +380,7 @@ function pointsAlong(xy, step) {
 function buildOutput(data, o) {
   const origin = o.route[0];
   const P = makeProjector(origin[0], origin[1]);
-  const res = { roads: [], buildings: [], areas: [], waterways: [], points: [] };
+  const res = { roads: [], buildings: [], areas: [], waterways: [], points: [], barriers: [], railways: [], landmarks: [] };
   const preview = [];
   let skipped = 0;
   const bb = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
@@ -370,7 +430,15 @@ function buildOutput(data, o) {
       if (el.lat == null) continue;
       const pos = P(el.lat, el.lon); grow(pos);
       const kind = pointKind(t);
-      res.points.push({ id: 'n' + el.id, kind, source: 'osm', pos });
+      if (t.barrier && !t.amenity && !t.tourism) {
+        res.points.push({ id: 'n' + el.id, kind: t.barrier, source: 'osm', pos });
+        preview.push({ cat: 'point', kind: t.barrier, xy: pos });
+        continue;
+      }
+      if (t.tourism === 'attraction' || t.attraction || t.tourism === 'artwork' || t.man_made === 'lighthouse') {
+        res.landmarks.push({ id: 'n' + el.id, kind: t.attraction || t.artwork_type || t.man_made || t.tourism, name, pos, ...pick(t, POINT_LOOK.slice(1)) });
+      }
+      res.points.push({ id: 'n' + el.id, kind, source: 'osm', pos, ...pick(t, POINT_LOOK) });
       preview.push({ cat: 'point', kind, xy: pos });
       continue;
     }
@@ -390,9 +458,10 @@ function buildOutput(data, o) {
       outers.forEach((outer, i) => {
         const id = 'r' + el.id + (outers.length > 1 ? '-' + (i + 1) : '');
         const holes = outers.length === 1 ? inners : inners.filter(r => pointInPoly(r[0], outer));
-        if (t.building) {
-          const [height, heightSource] = buildingHeight(t);
-          const b = { id, kind: t.building, name, height, heightSource, footprint: outer.map(p => p.slice()) };
+        if (t.building || t['building:part']) {
+          const [height, heightSource] = buildingHeight({ ...t, building: t.building || t['building:part'] });
+          const b = { id, kind: t.building || t['building:part'], name, height, heightSource, footprint: outer.map(p => p.slice()), ...buildingFields(t) };
+          if (!t.building) b.part = true;
           if (holes.length) b.holes = holes;
           res.buildings.push(b);
           outer.forEach(grow);
@@ -413,15 +482,38 @@ function buildOutput(data, o) {
     const ring = closed ? xy.slice(0, -1) : xy;   // polygons: drop the repeated closing point
     const id = 'w' + el.id;
 
-    if (t.building) {
+    if (t.building || t['building:part']) {
       if (!closed) continue;
-      const [height, heightSource] = buildingHeight(t);
-      res.buildings.push({ id, kind: t.building, name, height, heightSource, footprint: ring });
+      const kind = t.building || t['building:part'];
+      const [height, heightSource] = buildingHeight({ ...t, building: kind });
+      const b = { id, kind, name, height, heightSource, footprint: ring, ...buildingFields(t) };
+      if (!t.building) b.part = true;
+      res.buildings.push(b);
       ring.forEach(grow);
       preview.push({ cat: 'building', xy: [ring] });
+      if (t.tourism === 'attraction' || t.attraction) res.landmarks.push({ id, kind: t.attraction || t.tourism, name, footprint: ring });
+    } else if (t.barrier && !t.highway && !(closed && (t.landuse || t.leisure || t.natural))) {
+      const b = { id, kind: t.barrier, points: xy, ...pick(t, [['height', 'height', true], ['material', 'material'], ['colour', 'colour']]) };
+      res.barriers.push(b);
+      xy.forEach(grow);
+      preview.push({ cat: 'barrier', kind: t.barrier, xy });
+    } else if (t.railway && !closed) {
+      res.railways.push({ id, kind: t.railway, name, points: xy, ...lineFields(t) });
+      xy.forEach(grow);
+      preview.push({ cat: 'railway', xy });
+    } else if ((t.attraction || t.tourism === 'attraction' || t.tourism === 'artwork') && !t.highway) {
+      res.landmarks.push({ id, kind: t.attraction || t.artwork_type || t.tourism, name, ...(closed ? { footprint: ring } : { points: xy }) });
+      (closed ? ring : xy).forEach(grow);
+      if (closed && (t.leisure || t.landuse || t.natural || t.amenity || t.man_made)) addArea(id, t, name, ring, null);
+    } else if (t.man_made && !closed) {
+      // A pier or breakwater mapped as a line: kept as a path the game can draw.
+      const [width, widthSource] = [parseNum(t.width) || 4, parseNum(t.width) ? 'osm' : 'default'];
+      res.roads.push({ id, kind: t.man_made, name, width, widthSource, points: xy, ...lineFields(t) });
+      xy.forEach(grow);
+      preview.push({ cat: 'road', kind: t.man_made, xy });
     } else if (t.highway && !(closed && t.area === 'yes')) {
       const [width, widthSource] = roadWidth(t);
-      res.roads.push({ id, kind: t.highway, name, width, widthSource, points: xy });
+      res.roads.push({ id, kind: t.highway, name, width, widthSource, points: xy, ...lineFields(t) });
       xy.forEach(grow);
       preview.push({ cat: 'road', kind: t.highway, xy });
     } else if (t.waterway && !closed) {
@@ -435,6 +527,14 @@ function buildOutput(data, o) {
     }
   }
   routeXY.forEach(grow);
+
+  // A building drawn in parts (OSM "building:part") keeps its outline for maps; the game
+  // should draw the parts instead, so the outline is flagged.
+  const parts = res.buildings.filter(b => b.part);
+  for (const b of res.buildings) {
+    if (b.part) continue;
+    if (parts.some(p => pointInPoly(centroid(p.footprint), b.footprint))) b.hasParts = true;
+  }
 
   const out = {
     format: 'kartmap',
@@ -454,6 +554,9 @@ function buildOutput(data, o) {
         roads: res.roads.length, buildings: res.buildings.length,
         buildingsWithRealHeight: res.buildings.filter(b => b.heightSource !== 'default').length,
         areas: res.areas.length, waterways: res.waterways.length, points: res.points.length,
+        buildingParts: parts.length, barriers: res.barriers.length, railways: res.railways.length,
+        landmarks: res.landmarks.length,
+        buildingsWithColour: res.buildings.filter(b => b.colour || b.roofColour).length,
         manualTrees: 0, skippedIncompleteShapes: skipped
       }
     },
@@ -469,7 +572,10 @@ function buildOutput(data, o) {
     buildings: res.buildings,
     areas: res.areas,
     waterways: res.waterways,
-    points: res.points
+    points: res.points,
+    barriers: res.barriers,
+    railways: res.railways,
+    landmarks: res.landmarks
   };
   return { out, preview };
 }
@@ -999,6 +1105,8 @@ function drawPreview(preview) {
     }
     else if (f.cat === 'road') L.polyline(f.xy.map(U), { color: /footway|path|cycleway|steps/.test(f.kind) ? '#bc6c25' : '#343a40', weight: 2, opacity: 0.8 }).addTo(featureLayer);
     else if (f.cat === 'waterway') L.polyline(f.xy.map(U), { color: '#4ea8de', weight: 2 }).addTo(featureLayer);
+    else if (f.cat === 'barrier') L.polyline(f.xy.map(U), { color: f.kind === 'hedge' ? '#2d6a4f' : '#e5989b', weight: 2, dashArray: '3 3' }).bindTooltip(f.kind).addTo(featureLayer);
+    else if (f.cat === 'railway') L.polyline(f.xy.map(U), { color: '#7f5539', weight: 2, dashArray: '6 4' }).addTo(featureLayer);
     else if (f.cat === 'point') L.circleMarker(U(f.xy), { radius: 3, weight: 0, fillOpacity: 0.9, fillColor: f.kind === 'tree' ? '#2d6a4f' : '#ffb703' }).addTo(featureLayer);
   }
 }
@@ -1013,6 +1121,10 @@ function showStats() {
     ['Roads / paths', c.roads],
     ['Parks, water, pools, land', c.areas],
     ['Creeks / drains', c.waterways],
+    ['Building parts / with colours', `${c.buildingParts} / ${c.buildingsWithColour}`],
+    ['Hedges, walls, fences', c.barriers],
+    ['Railways', c.railways],
+    ['Landmarks', c.landmarks],
     ['Trees, poles, signs (OSM)', c.points - c.manualTrees],
     ['Trees you placed', c.manualTrees],
     ['File size', (size / 1024).toFixed(0) + ' KB']
