@@ -1,0 +1,329 @@
+// Kart Map Scanner: automated tests.
+// Every feature gets checked here, so a new version can't quietly break an old one.
+// Runs in the browser (open tests/index.html on the site) and in Node.
+//
+// runScannerTests(lib) -> [{ name, pass, detail }]
+// `lib` holds the scanner's data functions (the code between PURE-START and PURE-END in index.html).
+
+function runScannerTests(lib) {
+  const results = [];
+  const check = (name, pass, detail) => results.push({ name, pass: !!pass, detail: detail === undefined ? '' : String(detail) });
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const has = k => typeof lib[k] === 'function';
+  const lat0 = -27.6, lon0 = 153.13;
+
+  // ---------- v1: projection, building heights, road widths, export ----------
+  const P = lib.makeProjector(lat0, lon0);
+  check('v1 projection: 0.001° north ≈ 111.32 m', same(P(lat0 + 0.001, lon0), [0, 111.32]), JSON.stringify(P(lat0 + 0.001, lon0)));
+  check('v1 projection: 0.001° east ≈ 98.65 m', same(P(lat0, lon0 + 0.001), [98.65, 0]), JSON.stringify(P(lat0, lon0 + 0.001)));
+  check('v1 projection matches real distance within 0.2%', Math.abs(lib.dist([lat0, lon0], [lat0 + 0.001, lon0]) - 111.32) < 0.25);
+
+  const sq = (la, lo, d) => [[la, lo], [la, lo + d], [la + d, lo + d], [la + d, lo], [la, lo]].map(([lat, lon]) => ({ lat, lon }));
+  const fake = { elements: [
+    { type: 'way', id: 1, tags: { building: 'house' }, geometry: sq(lat0 + 0.0002, lon0 + 0.0002, 0.0001) },
+    { type: 'way', id: 2, tags: { building: 'yes', 'building:levels': '3' }, geometry: sq(lat0 + 0.0005, lon0, 0.0001) },
+    { type: 'way', id: 3, tags: { building: 'retail', height: '9.5 m' }, geometry: sq(lat0, lon0 + 0.0005, 0.0001) },
+    { type: 'way', id: 4, tags: { highway: 'residential', name: 'Test St' }, geometry: [{ lat: lat0, lon: lon0 }, { lat: lat0 + 0.001, lon: lon0 }] },
+    { type: 'way', id: 5, tags: { highway: 'primary', lanes: '4' }, geometry: [{ lat: lat0, lon: lon0 }, { lat: lat0, lon: lon0 + 0.001 }] },
+    { type: 'way', id: 6, tags: { leisure: 'park' }, geometry: sq(lat0 - 0.001, lon0, 0.0005) },
+    { type: 'way', id: 7, tags: { waterway: 'stream' }, geometry: [{ lat: lat0, lon: lon0 }, { lat: lat0 - 0.001, lon: lon0 }] },
+    { type: 'way', id: 8, tags: { building: 'house' }, geometry: [{ lat: lat0, lon: lon0 }, { lat: lat0 + 0.0001, lon: lon0 }] },
+    { type: 'node', id: 9, lat: lat0 + 0.0003, lon: lon0 + 0.0003, tags: { natural: 'tree' } },
+    { type: 'node', id: 10, lat: lat0, lon: lon0, tags: { highway: 'traffic_signals' } }
+  ] };
+  const route = [[lat0, lon0], [lat0 + 0.001, lon0], [lat0 + 0.001, lon0 + 0.001], [lat0, lon0]];
+  const r1 = lib.buildOutput(fake, { route, waypoints: route.slice(0, 3), radius: 100, width: 8, loop: true, snapped: false, name: 'test', now: 'X' }).out;
+  const c1 = r1.meta.counts;
+  check('v1 counts: 2 roads, 3 buildings, 1 area, 1 waterway, 2 points',
+    c1.roads === 2 && c1.buildings === 3 && c1.areas === 1 && c1.waterways === 1 && c1.points === 2, JSON.stringify(c1));
+  check('v1 building heights: default 5, levels 9, osm 9.5',
+    same(r1.buildings.map(b => [b.height, b.heightSource]), [[5, 'default'], [9, 'levels'], [9.5, 'osm']]), JSON.stringify(r1.buildings.map(b => [b.height, b.heightSource])));
+  check('v1 broken (unclosed) building is skipped, not crashed on', !r1.buildings.some(b => b.id === 'w8'));
+  check('v1 road widths: residential 6 default, primary 4 lanes = 12.8',
+    same(r1.roads.map(r => [r.kind, r.width, r.widthSource]), [['residential', 6, 'default'], ['primary', 12.8, 'lanes']]));
+  check('v1 route length 358.31 m', r1.route.length === 358.31, r1.route.length);
+  check('v1 route points in metres', same(r1.route.points, [[0, 0], [0, 111.32], [98.65, 111.32], [0, 0]]), JSON.stringify(r1.route.points));
+  check('v1 export is valid JSON', (() => { try { JSON.parse(lib.prettyJSON(r1)); return true; } catch (e) { return false; } })());
+  check('v1 format marker', r1.format === 'kartmap' && r1.version === 1);
+
+  // ---------- v4/v5: query ----------
+  const q = lib.buildQuery(route, 100);
+  check('v4 query never uses slow "nwr(around)"', !/nwr\(around/.test(q));
+  check('v5 query asks for a small server reservation on short routes', /\[timeout:25\]\[maxsize:67108864\]/.test(q), q.split('\n')[0]);
+
+  // ---------- v3: pen tool ----------
+  const stroke = []; for (let x = 0; x <= 300; x += 2) stroke.push([x, x % 6 === 0 ? 2 : -2]); for (let y = 0; y <= 200; y += 2) stroke.push([300 + (y % 4 ? 1 : -1), y]);
+  const simp = lib.simplify(stroke, 4);
+  check('v3 pen stroke: 252 wobbly points simplify to start, corner, end', same(simp, [[0, 2], [298, -2], [299, 200]]), JSON.stringify(simp));
+  const capped = lib.capPoints([...Array(250).keys()], 100);
+  check('v3 capPoints keeps first and last', capped.length === 100 && capped[0] === 0 && capped[99] === 249);
+  const dense = [...Array(20).keys()].map(i => [-27.6, 153.13 + i * 0.0003]);
+  const sparse = [[-27.6, 153.13], [-27.6, 153.135], [-27.605, 153.135]];
+  check('v3 snap method: pen strokes use match, clicks use route',
+    lib.chooseSnapMethod(dense) === 'match' && lib.chooseSnapMethod(sparse) === 'route' && lib.chooseSnapMethod(dense.slice(0, 2)) === 'route');
+
+  // ---------- v6: 10-point pieces for the match server ----------
+  for (const n of [5, 10, 11, 19, 27, 91]) {
+    const p = [...Array(n).keys()], ch = lib.chunkPoints(p, 10);
+    const ok = ch.every(c => c.length <= 10 && c.length >= 2) && ch.every((c, i) => i === 0 || c[0] === ch[i - 1][ch[i - 1].length - 1]) && ch[0][0] === 0 && ch.at(-1).at(-1) === n - 1;
+    check(`v6 ${n} points split into joined pieces of ≤10`, ok, ch.map(c => c.length).join(','));
+  }
+
+  // ---------- v7: multipolygons, trimming, tree rows, manual trees ----------
+  const ring = lib.assembleRings([[[0, 0], [0, 1]], [[1, 1], [0, 1]], [[1, 1], [1, 0], [0, 0]]]);
+  check('v7 joins 3 pieces (one reversed) into 1 closed shape', ring.length === 1 && same(ring[0][0], ring[0].at(-1)));
+  check('v7 never-closing pieces are dropped', lib.assembleRings([[[0, 0], [0, 1]], [[5, 5], [6, 6]]]).length === 0);
+  const box = { minX: 0, minY: 0, maxX: 100, maxY: 100 };
+  check('v7 trims a huge shape to the box', same(lib.clipRect([[-500, -500], [500, -500], [500, 500], [-500, 500]], box), [[0, 100], [0, 0], [100, 0], [100, 100]]));
+  check('v7 shape fully outside the box is removed', lib.clipRect([[200, 200], [300, 200], [300, 300]], box).length === 0);
+  check('v7 shape inside the box is unchanged', same(lib.clipRect([[10, 10], [20, 10], [20, 20]], box), [[10, 10], [20, 10], [20, 20]]));
+  check('v7 tree row: 40 m line gives a tree every 8 m', lib.pointsAlong([[0, 0], [20, 0], [40, 0]], 8).length === 6);
+
+  const la = -27.48, lo = 153.02, P2 = lib.makeProjector(la, lo);
+  const off = (dx, dy) => ({ lat: la + dy / 111320, lon: lo + dx / (111320 * Math.cos(la * Math.PI / 180)) });
+  const sqm = (x, y, s) => [off(x, y), off(x + s, y), off(x + s, y + s), off(x, y + s), off(x, y)];
+  const outer = sqm(20, 20, 60);
+  const rel = { elements: [
+    { type: 'relation', id: 8494, tags: { leisure: 'swimming_pool', type: 'multipolygon' }, members: [
+      { type: 'way', role: 'outer', geometry: outer.slice(0, 3) }, { type: 'way', role: 'outer', geometry: outer.slice(2) },
+      { type: 'way', role: 'inner', geometry: sqm(40, 40, 10) }] },
+    { type: 'relation', id: 7642164, tags: { natural: 'water', name: 'Brisbane River', type: 'multipolygon' }, members: [{ type: 'way', role: 'outer', geometry: sqm(-3000, -200, 6000) }] },
+    { type: 'relation', id: 999, tags: { landuse: 'grass', type: 'multipolygon' }, members: [{ type: 'way', role: 'outer', geometry: [off(0, 0), off(5, 5)] }] },
+    { type: 'way', id: 27951887, tags: { natural: 'beach' }, geometry: sqm(-30, 0, 20) },
+    { type: 'way', id: 5, tags: { natural: 'tree_row' }, geometry: [off(0, -10), off(24, -10)] }
+  ] };
+  const route2 = [[la, lo], [la + 0.0009, lo], [la + 0.0009, lo + 0.001], [la, lo]];
+  const r7 = lib.buildOutput(rel, { route: route2, waypoints: route2.slice(0, 3), radius: 100, width: 8, loop: true, snapped: false, name: 't', now: 'X' }).out;
+  const pool = r7.areas.find(a => a.id === 'r8494');
+  check('v7 lagoon (multipolygon pool) comes through with its island hole', pool && pool.kind === 'swimming_pool' && pool.holes && pool.holes.length === 1);
+  const river = r7.areas.find(a => a.id === 'r7642164'), T = r7.meta.areasTrimmedTo;
+  check('v7 river is trimmed to the scan area', river && river.polygon.every(p => p[0] >= T.minX - 0.5 && p[0] <= T.maxX + 0.5 && p[1] >= T.minY - 0.5 && p[1] <= T.maxY + 0.5));
+  check('v7 incomplete multipolygon is skipped and counted', r7.meta.counts.skippedIncompleteShapes === 1);
+  check('v7 tree row becomes 4 trees (24 m at 8 m spacing)', r7.points.filter(p => p.source === 'osm-tree_row').length === 4);
+  const fin = lib.withManualTrees(r7, [{ lat: la + 0.0003, lon: lo + 0.0003, canopy: 12 }]);
+  check('v7 manual trees are added at export', fin.meta.counts.manualTrees === 1 && fin.points.at(-1).source === 'manual' && fin.points.at(-1).canopy === 12);
+  check('v7 adding manual trees leaves the scan result untouched', fin.points.length === r7.points.length + 1);
+  check('v7 manual trees kept for reloading', same(fin.manualTrees, [{ lat: la + 0.0003, lon: lo + 0.0003, canopy: 12 }]));
+  const U = lib.makeUnprojector(la, lo), back = U(P2(la + 0.0012, lo + 0.0021));
+  check('v7 metres → lat/lon round trip within 5 cm', lib.dist(back, [la + 0.0012, lo + 0.0021]) < 0.05);
+
+  // ---------- v8 ----------
+  if (typeof lib.v8Tests === 'function') lib.v8Tests(check, same);   // placeholder hook, unused
+  if (has('extractLandmark')) runV8(lib, check, same);
+  else check('v8 functions present', false, 'extractLandmark not found (running against v7?)');
+  if (has('smoothLine')) runV81(lib, check, same);
+  else check('v8.1 functions present', false, 'smoothLine not found (running against v8?)');
+
+  return results;
+}
+
+function runV8(lib, check, same) {
+  const la = -27.48, lo = 153.02;
+  const off = (dx, dy) => ({ lat: la + dy / 111320, lon: lo + dx / (111320 * Math.cos(la * Math.PI / 180)) });
+  const sqm = (x, y, s) => [off(x, y), off(x + s, y), off(x + s, y + s), off(x, y + s), off(x, y)];
+  const route = [[la, lo], [la + 0.0009, lo], [la + 0.0009, lo + 0.001], [la, lo]];
+  const data = { elements: [
+    { type: 'way', id: 101, tags: { highway: 'footway', bridge: 'yes', layer: '1', name: 'Goodwill Bridge', surface: 'concrete' }, geometry: [off(0, 0), off(0, 50)] },
+    { type: 'way', id: 102, tags: { highway: 'busway', tunnel: 'yes', layer: '-1' }, geometry: [off(10, 0), off(10, 50)] },
+    { type: 'way', id: 103, tags: { highway: 'residential', surface: 'asphalt', lanes: '2' }, geometry: [off(20, 0), off(20, 50)] },
+    { type: 'way', id: 104, tags: { building: 'house', 'roof:shape': 'gabled', 'roof:colour': 'red', 'building:colour': '#ffffff', 'building:material': 'wood', 'building:levels': '1' }, geometry: sqm(30, 30, 10) },
+    { type: 'way', id: 105, tags: { barrier: 'fence', height: '1.8', material: 'metal' }, geometry: [off(0, 60), off(30, 60)] },
+    { type: 'way', id: 106, tags: { barrier: 'hedge' }, geometry: sqm(50, 50, 10) },
+    { type: 'way', id: 107, tags: { building: 'yes', name: 'Gallery of Modern Art', tourism: 'gallery', wikidata: 'Q5517975' }, geometry: sqm(60, 0, 20) },
+    { type: 'node', id: 201, lat: off(5, 5).lat, lon: off(5, 5).lon, tags: { leisure: 'picnic_table', covered: 'yes' } },
+    { type: 'node', id: 202, lat: off(6, 6).lat, lon: off(6, 6).lon, tags: { amenity: 'fountain', name: 'Big Fountain' } },
+    { type: 'node', id: 203, lat: off(7, 7).lat, lon: off(7, 7).lon, tags: { tourism: 'attraction', name: 'Streets Beach' } },
+    { type: 'node', id: 204, lat: off(8, 8).lat, lon: off(8, 8).lon, tags: { barrier: 'bollard' } },
+    { type: 'node', id: 205, lat: off(9, 9).lat, lon: off(9, 9).lon, tags: { natural: 'tree' } },
+    { type: 'node', id: 206, lat: off(9, 2).lat, lon: off(9, 2).lon, tags: { shop: 'cafe', name: 'Some Cafe' } }
+  ] };
+  const out = lib.buildOutput(data, { route, waypoints: route.slice(0, 3), radius: 100, width: 8, loop: true, snapped: false, name: 't', now: 'X' }).out;
+  const road = id => out.roads.find(r => r.id === id);
+  check('v8 bridges marked (bridge, layer 1, surface kept)', road('w101') && road('w101').bridge === true && road('w101').layer === 1 && road('w101').surface === 'concrete', JSON.stringify(road('w101')));
+  check('v8 tunnels marked (tunnel, layer -1)', road('w102') && road('w102').tunnel === true && road('w102').layer === -1);
+  check('v8 normal roads get no bridge/tunnel fields', road('w103') && !('bridge' in road('w103')) && !('tunnel' in road('w103')) && road('w103').surface === 'asphalt');
+  const b = out.buildings.find(x => x.id === 'w104');
+  check('v8 building looks kept (roof shape, colours, material)', b && b.roofShape === 'gabled' && b.roofColour === 'red' && b.colour === '#ffffff' && b.material === 'wood', JSON.stringify(b));
+  const fence = (out.barriers || []).find(x => x.id === 'w105');
+  check('v8 fences exported as barriers with height and material', fence && fence.kind === 'fence' && fence.height === 1.8 && fence.material === 'metal' && fence.points.length === 2);
+  check('v8 closed hedge is a barrier, not an area', (out.barriers || []).some(x => x.id === 'w106') && !out.areas.some(a => a.id === 'w106'));
+  const props = out.points;
+  check('v8 picnic tables kept as props', props.some(p => p.kind === 'picnic_table' && p.group === 'leisure'));
+  check('v8 bollards kept as props', props.some(p => p.kind === 'bollard' && p.group === 'barrier'));
+  check('v8 trees still kept', props.some(p => p.kind === 'tree' && p.source === 'osm'));
+  check('v8 shops are not props', !props.some(p => p.kind === 'cafe'));
+  const lm = out.landmarks || [];
+  check('v8 landmarks list: attraction, named fountain, named gallery building',
+    lm.some(l => l.name === 'Streets Beach') && lm.some(l => l.name === 'Big Fountain') && lm.some(l => l.name === 'Gallery of Modern Art' && l.ref === 'w107' && l.wikidata === 'Q5517975'), JSON.stringify(lm.map(l => l.name)));
+  check('v8 unnamed things are never landmarks', lm.every(l => l.name));
+  check('v8 fix: a café with a brand Wikidata link is not a landmark',
+    lib.extractLandmark({ name: 'Max Brenner Chocolate Bar', amenity: 'cafe', wikidata: 'Q1' }) === null &&
+    lib.extractLandmark({ name: 'Some Shop', shop: 'clothes', 'brand:wikidata': 'Q2', wikidata: 'Q2' }) === null);
+  check('v8 fix: a park or building with a Wikidata link still is',
+    lib.extractLandmark({ name: 'South Bank Parklands', leisure: 'park', wikidata: 'Q3' }) === 'park' &&
+    lib.extractLandmark({ name: 'State Library', building: 'yes', wikidata: 'Q4' }) === 'building');
+  check('v8 public artworks are landmarks', lib.extractLandmark({ name: 'Sisters', tourism: 'artwork' }) === 'artwork');
+  check('v8 landmark positions are in metres', lm.every(l => Array.isArray(l.pos) && l.pos.length === 2 && isFinite(l.pos[0])));
+  check('v8 new counts present', out.meta.counts.barriers === 2 && out.meta.counts.landmarks === lm.length && out.meta.counts.bridges === 1 && out.meta.counts.tunnels === 1, JSON.stringify(out.meta.counts));
+  check('v8 still format version 1', out.version === 1);
+
+  // Long-route reservation scaling
+  const r0 = lib.serverBudget(2000, 100), r1 = lib.serverBudget(2100, 300), r2 = lib.serverBudget(10000, 300), r3 = lib.serverBudget(200000, 300);
+  check('v8 short routes keep the small 25 s / 64 MB reservation', r0.timeout === 25 && r0.maxsize === 67108864, JSON.stringify(r0));
+  check('v8 South Bank size (2.1 km at 300 m) stays small', r1.maxsize === 67108864, JSON.stringify(r1));
+  check('v8 a 10 km route at 300 m asks for more', r2.maxsize > 67108864 && r2.timeout > 25, JSON.stringify(r2));
+  check('v8 reservation is capped (never asks for the moon)', r3.maxsize <= 536870912 && r3.timeout <= 120, JSON.stringify(r3));
+  const longRoute = [[la, lo], [la + 0.09, lo]];   // ~10 km
+  check('v8 query uses the scaled reservation', /\[maxsize:(\d+)\]/.exec(lib.buildQuery(longRoute, 300))[1] > 67108864);
+
+  // Outage message
+  const down = lib.explainScanFailure([{ host: 'overpass-api.de', status: 502 }, { host: 'b', kind: 'unreadable', seconds: 0.8 }]);
+  check('v8 outage: 502 is explained as the server being down (their side)', /down/i.test(down) && /overpass-api\.de\/api\/status/.test(down), down);
+  const busy = lib.explainScanFailure([{ host: 'a', status: 504 }, { host: 'b', kind: 'timeout', seconds: 40 }]);
+  check('v8 busy: timeouts are explained as busy, with shorten-route advice', /busy/i.test(busy) && /shorten|smaller/i.test(busy), busy);
+}
+
+function runV81(lib, check, same) {
+  const la = -27.48, lo = 153.02;
+  const off = (dx, dy) => ({ lat: la + dy / 111320, lon: lo + dx / (111320 * Math.cos(la * Math.PI / 180)) });
+  const llOff = (dx, dy) => { const o = off(dx, dy); return [o.lat, o.lon]; };
+  const rect = (x, y, w, h) => [off(x, y), off(x + w, y), off(x + w, y + h), off(x, y + h), off(x, y)];
+  const node = (id, dx, dy, tags) => ({ type: 'node', id, lat: off(dx, dy).lat, lon: off(dx, dy).lon, tags });
+  // A 200 x 200 m square loop starting at (0,0), going east, north, west, south.
+  const loop = [llOff(0, 0), llOff(200, 0), llOff(200, 200), llOff(0, 200), llOff(0, 0)];
+  const els = [
+    // building with a part (tower on a podium)
+    { type: 'way', id: 1, tags: { building: 'yes', 'building:levels': '2', name: 'Podium Tower' }, geometry: rect(60, 30, 40, 40) },
+    { type: 'way', id: 2, tags: { 'building:part': 'yes', 'building:levels': '30', 'building:min_level': '2' }, geometry: rect(70, 40, 20, 20) },
+    // three measured houses + one unmeasured house nearby; one unmeasured house far away
+    { type: 'way', id: 11, tags: { building: 'house', 'building:levels': '2' }, geometry: rect(20, 120, 10, 10) },
+    { type: 'way', id: 12, tags: { building: 'house', height: '7' }, geometry: rect(35, 120, 10, 10) },
+    { type: 'way', id: 13, tags: { building: 'house', 'building:levels': '2' }, geometry: rect(50, 120, 10, 10) },
+    { type: 'way', id: 14, tags: { building: 'house' }, geometry: rect(65, 120, 10, 10) },
+    { type: 'way', id: 15, tags: { building: 'house' }, geometry: rect(-250, -250, 10, 10) },
+    // big unmapped building, and a mapped roof
+    { type: 'way', id: 16, tags: { building: 'commercial' }, geometry: rect(120, 120, 40, 40) },
+    { type: 'way', id: 17, tags: { building: 'house', 'roof:shape': 'gabled' }, geometry: rect(20, 140, 10, 10) },
+    // building sitting on the track (east edge x=200)
+    { type: 'way', id: 18, tags: { building: 'retail', name: 'Central Cafes' }, geometry: rect(197, 80, 8, 8) },
+    // railways
+    { type: 'way', id: 21, tags: { railway: 'rail', bridge: 'yes', layer: '1', name: 'Main Line' }, geometry: [off(-50, -30), off(250, -30)] },
+    { type: 'way', id: 22, tags: { railway: 'abandoned' }, geometry: [off(-50, -40), off(250, -40)] },
+    { type: 'way', id: 23, tags: { railway: 'platform' }, geometry: rect(0, -35, 100, 3) },
+    // roads: steps with incline, one-way street, a zebra crossing way
+    { type: 'way', id: 31, tags: { highway: 'steps', incline: 'up' }, geometry: [off(100, 0), off(100, -10)] },
+    { type: 'way', id: 32, tags: { highway: 'residential', oneway: 'yes', sidewalk: 'both' }, geometry: [off(0, 0), off(200, 0)] },
+    { type: 'way', id: 33, tags: { highway: 'footway', footway: 'crossing', crossing: 'marked', 'crossing:markings': 'zebra' }, geometry: [off(50, -4), off(50, 4)] },
+    // shortcut path cutting the south-east corner diagonally: from (40,0) on the south side to (200,160) on
+    // the east side. Track distance 320 m, path 226 m: saves ~94 m.
+    { type: 'way', id: 41, tags: { highway: 'footway' }, geometry: [off(40, 0), off(120, 80), off(200, 160)] },
+    // a path that just runs along the track (not a shortcut)
+    { type: 'way', id: 42, tags: { highway: 'footway' }, geometry: [off(0, 205), off(100, 205), off(200, 205)] },
+    // fence crossing the track, fence far away
+    { type: 'way', id: 51, tags: { barrier: 'fence' }, geometry: [off(195, 150), off(205, 150)] },
+    // trees of each type
+    node(61, 10, 50, { natural: 'tree', genus: 'Archontophoenix' }),
+    node(62, 12, 50, { natural: 'tree', species: 'Corymbia citriodora' }),
+    node(63, 14, 50, { natural: 'tree', species: 'Ficus macrophylla', height: '18', diameter_crown: '20' }),
+    node(64, 16, 50, { natural: 'tree', genus: 'Araucaria' }),
+    node(65, 18, 50, { natural: 'tree', leaf_type: 'broadleaved' }),
+    node(66, 20, 50, { natural: 'tree' }),
+    // markings
+    node(71, 150, 0, { highway: 'crossing', crossing: 'zebra' }),
+    node(72, 150, 200, { highway: 'stop' }),
+    // a bench on the track and one far away
+    node(81, 200, 50, { amenity: 'bench' }),
+    node(82, 100, 150, { amenity: 'bench' })
+  ];
+  const r = lib.buildOutput({ elements: els }, { route: loop, waypoints: loop.slice(0, 4), radius: 300, width: 8, loop: true, snapped: false, name: 't', now: 'X' });
+  const out = r.out;
+  const B = id => out.buildings.find(b => b.id === id);
+
+  // --- building parts ---
+  const part = (out.buildingParts || []).find(p => p.id === 'w2');
+  check('v8.1 building parts exported (30 levels, starts at level 2)', part && part.height === 90 && part.minHeight === 6, JSON.stringify(part));
+  check('v8.1 part knows its parent building, parent knows it has parts', part && part.parent === 'w1' && B('w1').hasParts === true);
+  check('v8.1 building parts are not counted as buildings', !out.buildings.some(b => b.id === 'w2'));
+
+  // --- smarter heights ---
+  check('v8.1 unmeasured house next to measured ones gets their typical height (estimated)', B('w14').heightSource === 'estimated' && B('w14').height === 6, JSON.stringify([B('w14').height, B('w14').heightSource]));
+  check('v8.1 isolated unmeasured house keeps the default guess', B('w15').heightSource === 'default');
+  check('v8.1 measured heights are never changed', B('w12').height === 7 && B('w12').heightSource === 'osm');
+
+  // --- roof guesses ---
+  check('v8.1 small house gets a guessed hipped roof', B('w14').roofShape === 'hipped' && B('w14').roofShapeSource === 'guess');
+  check('v8.1 big building gets a guessed flat roof', B('w16').roofShape === 'flat' && B('w16').roofShapeSource === 'guess');
+  check('v8.1 mapped roof shape is kept and marked as mapped', B('w17').roofShape === 'gabled' && B('w17').roofShapeSource === 'osm');
+
+  // --- railways ---
+  const rail = out.railways || [];
+  check('v8.1 railway lines exported with bridge/layer', rail.length === 1 && rail[0].kind === 'rail' && rail[0].bridge === true && rail[0].layer === 1, JSON.stringify(rail.map(x => x.kind)));
+  check('v8.1 abandoned railways are left out', !rail.some(x => x.kind === 'abandoned'));
+  check('v8.1 platforms become areas', out.areas.some(a => a.id === 'w23' && a.kind === 'platform'));
+
+  // --- roads: steps, one-way, sidewalks, crossings ---
+  const road = id => out.roads.find(x => x.id === id);
+  check('v8.1 steps keep their up/down direction', road('w31').incline === 'up');
+  check('v8.1 one-way and sidewalks kept', road('w32').oneway === true && road('w32').sidewalk === 'both');
+  check('v8.1 crossing path is marked as a zebra', road('w33').crossing === 'zebra');
+
+  // --- trees ---
+  const tree = id => out.points.find(p => p.id === id);
+  check('v8.1 tree types: palm, eucalypt, fig, conifer, broadleaf',
+    tree('n61').treeType === 'palm' && tree('n62').treeType === 'eucalypt' && tree('n63').treeType === 'fig' && tree('n64').treeType === 'conifer' && tree('n65').treeType === 'broadleaf',
+    JSON.stringify([61, 62, 63, 64, 65].map(i => tree('n' + i) && tree('n' + i).treeType)));
+  check('v8.1 untagged tree has no type (game picks a default)', tree('n66') && !tree('n66').treeType);
+  check('v8.1 tree species, height and crown kept', tree('n63').species === 'Ficus macrophylla' && tree('n63').height === 18 && tree('n63').canopy === 20);
+
+  // --- markings ---
+  const mk = out.markings || [];
+  check('v8.1 zebra crossing node becomes a road marking', mk.some(m => m.kind === 'crossing' && m.style === 'zebra'));
+  check('v8.1 crossings are no longer duplicated as props', !out.points.some(p => p.kind === 'crossing'));
+  check('v8.1 stop sign gives a stop line marking (sign stays a prop)', mk.some(m => m.kind === 'stop_line') && out.points.some(p => p.kind === 'stop'));
+
+  // --- track flags ---
+  check('v8.1 building on the track is flagged', B('w18').onTrack === true && B('w18').trackDist === 0);
+  check('v8.1 building away from the track is not flagged, distance correct', !B('w16').onTrack && Math.abs(B('w16').trackDist - 40) < 0.5, B('w16').trackDist);
+  check('v8.1 bench on the track flagged, far bench not', tree('n81').onTrack === true && !tree('n82').onTrack && Math.abs(tree('n82').trackDist - 50) < 0.5);
+  check('v8.1 fence crossing the track is flagged', out.barriers.find(b => b.id === 'w51').onTrack === true);
+
+  // --- quality report ---
+  const q = out.meta.quality;
+  const h = q && q.heights;
+  check('v8.1 quality report: height shares add up to 100%', h && Math.abs(h.measured + h.estimated + h.default - 100) < 0.6, JSON.stringify(h));
+  check('v8.1 quality report names buildings blocking the track', q && q.notes.some(n => /Central Cafes/.test(n)) && q.buildingsOnTrack.includes('w18'), JSON.stringify(q && q.notes));
+
+  // --- smooth track line ---
+  const cl = out.route.centerline;
+  const gaps = cl.points.slice(1).map((p, i) => Math.hypot(p[0] - cl.points[i][0], p[1] - cl.points[i][1]));
+  check('v8.1 smooth track line evenly spaced (2 m)', gaps.every(g => Math.abs(g - cl.spacing) < 0.15), Math.min(...gaps).toFixed(2) + '..' + Math.max(...gaps).toFixed(2));
+  check('v8.1 smooth track line closes the loop', Math.hypot(cl.points[0][0] - cl.points.at(-1)[0], cl.points[0][1] - cl.points.at(-1)[1]) <= cl.spacing + 0.15);
+  check('v8.1 smoothing rounds corners only slightly (length within 3% of 800 m)', Math.abs(cl.length - 800) / 800 < 0.03, cl.length);
+  const corners = out.route.corners || [];
+  check('v8.1 square loop has 4 corners of about 90°', corners.length === 4 && corners.every(c => Math.abs(Math.abs(c.angle) - 90) < 15), JSON.stringify(corners.map(c => c.angle)));
+
+  // --- race layout ---
+  const race = out.race;
+  check('v8.1 checkpoints: 8 evenly spaced, first at the start', race && race.checkpoints.length === 8 && race.checkpoints[0].at === 0 && Math.abs(race.checkpoints[1].at - cl.length / 8) < 1, race && race.checkpoints.map(c => c.at).join(','));
+  check('v8.1 start grid: 8 slots behind the start line, inside the track', race && race.grid.length === 8 && race.grid.every(s => s.trackDist <= 4.01 && s.behind > 0), JSON.stringify(race && race.grid.map(s => [s.behind, s.trackDist])));
+  const sc = (race && race.shortcuts) || [];
+  check('v8.1 shortcut finder finds the corner-cutting path (saves ~90 m)', sc.length >= 1 && sc[0].via.includes('w41') && sc[0].saving > 60 && sc[0].saving < 100, JSON.stringify(sc.map(s => [s.via, s.saving])));
+  check('v8.1 a path that only runs alongside the track is not a shortcut (either direction)', !sc.some(s => s.via.includes('w42')));
+  check('v8.1 shortcuts never skip more than half a lap (that would be driving backwards)', sc.every(s => s.skips <= cl.length / 2 + 1));
+
+  // --- guesses are marked ---
+  check('v8.1 every building height says where it came from', out.buildings.every(b => ['osm', 'levels', 'estimated', 'default'].includes(b.heightSource)));
+  check('v8.1 still format version 1, generator v8.1', out.version === 1 && out.meta.generator === 'kart-map-scanner v8.1');
+
+  // --- speed: a South-Bank-sized scan must stay quick ---
+  const big = [];
+  for (let i = 0; i < 1500; i++) { const x = (i % 40) * 12 - 200, y = Math.floor(i / 40) * 12 - 200; big.push({ type: 'way', id: 1000 + i, tags: { building: i % 3 ? 'house' : 'yes', ...(i % 2 ? { 'building:levels': '2' } : {}) }, geometry: rect(x, y, 8, 8) }); }
+  for (let i = 0; i < 300; i++) big.push({ type: 'way', id: 5000 + i, tags: { highway: 'footway' }, geometry: [off(i * 3 - 400, -300), off(i * 3 - 400, 500)] });
+  for (let i = 0; i < 1200; i++) big.push(node(9000 + i, (i % 60) * 8 - 200, Math.floor(i / 60) * 8 - 50, { amenity: 'bench' }));
+  const t0 = Date.now();
+  lib.buildOutput({ elements: big }, { route: loop, waypoints: loop.slice(0, 4), radius: 300, width: 8, loop: true, snapped: false, name: 'big', now: 'X' });
+  const ms = Date.now() - t0;
+  check('v8.1 big scan (1,500 buildings, 300 paths, 1,200 props) processes in under 3 s', ms < 3000, ms + ' ms');
+}
+
+if (typeof module !== 'undefined') module.exports = { runScannerTests };
