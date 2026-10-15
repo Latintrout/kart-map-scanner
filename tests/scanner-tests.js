@@ -115,6 +115,8 @@ function runScannerTests(lib) {
   else check('v8.1 functions present', false, 'smoothLine not found (running against v8?)');
   if (has('loaderContractProblems')) runV82(lib, check, same);
   else check('v8.2 functions present', false, 'loaderContractProblems not found (running against v8.1?)');
+  if (has('mergeOverture')) runV83(lib, check, same);
+  else check('v8.3 functions present', false, 'mergeOverture not found (running against v8.2?)');
 
   return results;
 }
@@ -393,6 +395,75 @@ function runV82(lib, check, same) {
   broken.buildings.find(b => b.id === 'w2').hasParts = true; broken.buildings = broken.buildings.filter(b => !b.part);
   broken.landmarks[0].pos = undefined;
   check('v8.2 contract check catches a building whose parts are missing, and a landmark with no position', lib.loaderContractProblems(broken).length >= 2);
+}
+
+// v8.3: Overture fill-in, aerial colours, ground image, landmark photos.
+function runV83(lib, check, same) {
+  const la = -27.61, lo = 153.13;
+  const off = (dx, dy) => ({ lat: la + dy / 111320, lon: lo + dx / (111320 * Math.cos(la * Math.PI / 180)) });
+  const llOff = (dx, dy) => { const o = off(dx, dy); return [o.lat, o.lon]; };
+  const rect = (x, y, w, h) => [off(x, y), off(x + w, y), off(x + w, y + h), off(x, y + h), off(x, y)];
+  const ringLL = (x, y, w, h) => rect(x, y, w, h).map(g => [g.lat, g.lon]);
+  const loop = [llOff(0, 0), llOff(200, 0), llOff(200, 200), llOff(0, 200), llOff(0, 0)];
+  const osm = { elements: [
+    { type: 'way', id: 101, tags: { building: 'house' }, geometry: rect(20, 20, 10, 10) },                       // no height in OSM
+    { type: 'way', id: 102, tags: { building: 'house', 'building:levels': '2' }, geometry: rect(40, 20, 10, 10) }, // has levels
+    { type: 'way', id: 103, tags: { building: 'house' }, geometry: rect(60, 20, 10, 10) }                          // no height, no Overture match
+  ] };
+  const ov = [
+    { id: 'o1', osmId: 'w101', height: 4.4, heightFrom: 'Microsoft ML Buildings', ring: ringLL(20, 20, 10, 10) },   // fills w101
+    { id: 'o2', osmId: 'w102', height: 9.9, heightFrom: 'OpenStreetMap', ring: ringLL(40, 20, 10, 10) },            // must NOT override levels
+    { id: 'o3', osmId: null, height: 3.9, heightFrom: 'Microsoft ML Buildings', cls: 'house', ring: ringLL(100, 100, 12, 9) }, // new building
+    { id: 'o4', osmId: null, height: 5, heightFrom: 'Microsoft ML Buildings', ring: ringLL(61, 21, 8, 8) },         // overlaps w103: skip
+    { id: 'o5', osmId: null, height: 3, heightFrom: 'Microsoft ML Buildings', isUnderground: true, ring: ringLL(150, 150, 10, 10) } // underground: skip
+  ];
+  const m = lib.mergeOverture(osm, ov);
+  check('v8.3 Overture merge reports what it did (1 height filled, 1 building added, 2 skipped)', m.stats.heightsFilled === 1 && m.stats.added === 1 && m.stats.skipped === 2, JSON.stringify(m.stats));
+  check('v8.3 Overture merge never changes the original scan data', !osm.elements[0].tags['overture:height'] && osm.elements.length === 3);
+  const out = lib.buildOutput(m.data, { route: loop, waypoints: loop.slice(0, 4), radius: 300, width: 8, loop: true, snapped: false, name: 't', now: 'X' }).out;
+  const B = id => out.buildings.find(b => b.id === id);
+  check('v8.3 missing OSM height filled from Overture, labelled as a machine estimate', B('w101').height === 4.4 && B('w101').heightSource === 'ml-estimate', JSON.stringify(B('w101')));
+  check('v8.3 mapped floors are never replaced by Overture', B('w102').height === 6 && B('w102').heightSource === 'levels');
+  const added = out.buildings.find(b => b.id === 'ov-o3');
+  check('v8.3 building missing from OSM added from Overture, with its estimated height', added && added.height === 3.9 && added.heightSource === 'ml-estimate' && added.kind === 'house' && added.source === 'overture', JSON.stringify(added));
+  check('v8.3 overlapping and underground Overture buildings are not added', !out.buildings.some(b => b.id === 'ov-o4' || b.id === 'ov-o5'));
+  check('v8.3 Overture heights from OSM are labelled overture, counted as measured',
+    lib.buildOutput(lib.mergeOverture({ elements: [osm.elements[0]] }, [{ id: 'x', osmId: 'w101', height: 7, heightFrom: 'OpenStreetMap', ring: ringLL(20, 20, 10, 10) }]).data,
+      { route: loop, waypoints: [], radius: 300, width: 8, loop: true, snapped: false, name: 't', now: 'X' }).out.buildings[0].heightSource === 'overture');
+  check('v8.3 quality report counts machine estimates as estimated, not measured', out.meta.quality.heights.estimated > 0);
+  check('v8.3 Overture credit added when used', /Overture/.test(lib.attributionFor({ overture: true, imagery: false })) && /OpenStreetMap/.test(lib.attributionFor({})));
+  const f = lib.overtureFeature({ id: 'abc', height: 4.2, '@height_source': 'Microsoft ML Buildings', sources: '[{"dataset":"OpenStreetMap","record_id":"w584365517@2"}]', class: 'house' }, [[[153.1, -27.6], [153.1001, -27.6], [153.1001, -27.6001], [153.1, -27.6]]]);
+  check('v8.3 Overture tile feature read correctly (OSM id from record_id, ring in lat/lon)', f.osmId === 'w584365517' && f.height === 4.2 && f.heightFrom === 'Microsoft ML Buildings' && f.ring[0][0] === -27.6 && f.ring[0][1] === 153.1 && f.cls === 'house', JSON.stringify(f));
+
+  // --- aerial colours ---
+  const tiles = lib.planImageTiles({ south: -27.49, west: 153.01, north: -27.47, east: 153.04 }, 1.0, 4096, 2048);
+  const cover = tiles.every(t => t.width <= 4096 && t.height <= 2048) &&
+    Math.min(...tiles.map(t => t.west)) <= 153.01 && Math.max(...tiles.map(t => t.east)) >= 153.04 && Math.min(...tiles.map(t => t.south)) <= -27.49 && Math.max(...tiles.map(t => t.north)) >= -27.47;
+  check('v8.3 aerial image requests stay within the server limit and cover the whole area', cover && tiles.length >= 1 && tiles.length <= 4, JSON.stringify(tiles.map(t => [t.width, t.height])));
+  // a fake 100x100 aerial image: left half red roof colour, right half green; a building on the left half
+  const W = 100, H = 100, data = new Uint8ClampedArray(W * H * 4);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const i = (y * W + x) * 4; if (x < 50) { data[i] = 180 + (x % 3); data[i + 1] = 60; data[i + 2] = 50; } else { data[i] = 70; data[i + 1] = 140; data[i + 2] = 60; } data[i + 3] = 255; }
+  const tile = { south: -27.611, west: 153.129, north: -27.609, east: 153.131 };
+  const midLon = (tile.west + tile.east) / 2;
+  const leftPoly = [[-27.6105, 153.1292], [-27.6105, midLon - 0.0002], [-27.6095, midLon - 0.0002], [-27.6095, 153.1292]];
+  const c = lib.medianColourInPolygon({ width: W, height: H, data }, tile, leftPoly);
+  check('v8.3 roof colour sampled from inside the building outline (median of the pixels)', c && c.hex === '#b53c32' && c.n >= 4, JSON.stringify(c));
+  check('v8.3 no colour when the outline is outside the image', lib.medianColourInPolygon({ width: W, height: H, data }, tile, [[-27.0, 153.0], [-27.0, 153.001], [-27.001, 153.001]]) === null);
+  const outC = JSON.parse(JSON.stringify(out));
+  const n = lib.applyColourSamples(outC, [{ box: tile, image: { width: W, height: H, data } }], (lat0, lon0) => lib.makeUnprojector(lat0, lon0));
+  check('v8.3 sampled colours stored separately from mapped ones (sampledRoofColour), with credit', typeof n.buildings === 'number' && outC.meta.imagery && /State of Queensland/.test(outC.meta.imagery.attribution) && /CC BY-SA/.test(outC.meta.imagery.licence));
+
+  // --- ground image ---
+  const plan = lib.groundImagePlan(out.meta.bbox, 1.0, 4096);
+  check('v8.3 ground image plan: size from the area, capped at 4096 px, south-west corner recorded', plan.width <= 4096 && plan.height <= 4096 && plan.width >= 1 && plan.metresPerPixel >= 1 && plan.minX === out.meta.bbox.minX, JSON.stringify(plan));
+  check('v8.3 ground colours: water blue, grass green, unknown falls back to ground', lib.groundColour('water') !== lib.groundColour('grass') && lib.groundColour('nothing-like-this') === lib.groundColour('ground'));
+  const order = ['residential', 'park', 'grass', 'swimming_pool'].sort((a, b) => lib.groundDrawOrder(a) - lib.groundDrawOrder(b));
+  check('v8.3 ground image draws zoning first, then parks/grass, then water on top', order[0] === 'residential' && order.at(-1) === 'swimming_pool', order.join(','));
+
+  // --- landmark photos ---
+  const ph = lib.parseCommonsImageInfo({ query: { pages: { 1: { title: 'File:Wheel.jpg', imageinfo: [{ thumburl: 'https://upload.wikimedia.org/thumb/w.jpg', descriptionurl: 'https://commons.wikimedia.org/wiki/File:Wheel.jpg', extmetadata: { LicenseShortName: { value: 'CC BY-SA 4.0' }, Artist: { value: '<a href="x">Jane Doe</a>' } } }] } } } });
+  check('v8.3 landmark photo info read with licence and author (HTML stripped)', ph.length === 1 && ph[0].licence === 'CC BY-SA 4.0' && ph[0].author === 'Jane Doe' && /^https:/.test(ph[0].thumb), JSON.stringify(ph));
+  check('v8.3 file stays loader-compatible after all v8.3 additions', lib.loaderContractProblems(outC).length === 0, lib.loaderContractProblems(outC).join('; '));
 }
 
 if (typeof module !== 'undefined') module.exports = { runScannerTests };

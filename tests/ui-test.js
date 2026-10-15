@@ -1,6 +1,3 @@
-// Developer-only: headless test of the full page with fake server replies.
-// Needs Node, playwright and leaflet (npm i playwright leaflet) next to this file.
-// Run: node tests/ui-test.js index.html
 // Headless test of the real scanner page, with fake map/server replies.
 const { chromium } = require('playwright');
 const fs = require('fs');
@@ -10,6 +7,7 @@ const PAGE = process.argv[2];
 const html = fs.readFileSync(PAGE, 'utf8');
 const leafletJs = fs.readFileSync(path.join(__dirname, 'node_modules/leaflet/dist/leaflet.js'));
 const leafletCss = fs.readFileSync(path.join(__dirname, 'node_modules/leaflet/dist/leaflet.css'));
+const aerial = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAGUlEQVR4nGPcYKXHQApgIkn1qIZRDUNKAwCMDwE42muDSwAAAABJRU5ErkJggg==', 'base64');   // solid #b03a2e
 const tile = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==', 'base64');
 
 // fake Overpass reply around South Bank (metres -> lat/lon near -27.4800, 153.0230)
@@ -38,6 +36,16 @@ const overpass = { elements: [
   async function openPage(mode) {
     const ctx = await browser.newContext({ acceptDownloads: true });
     const page = await ctx.newPage();
+    // v8.3: fake Overture reply (one height for GOMA's OSM way, one building OSM doesn't have)
+    await page.addInitScript(({ la, lo }) => {
+      const off = (dx, dy) => [la + dy / 111320, lo + dx / (111320 * Math.cos(la * Math.PI / 180))];
+      const sq = (x, y, s) => [off(x, y), off(x + s, y), off(x + s, y + s), off(x, y + s), off(x, y)];
+      window.__overtureCalls = 0;
+      window.__overtureFetch = async () => { window.__overtureCalls++; return [
+        { id: 'ovGoma', osmId: 'w4', height: 20, heightFrom: 'OpenStreetMap', cls: null, isUnderground: false, ring: sq(50, 10, 30) },
+        { id: 'ovNew', osmId: null, height: 7.5, heightFrom: 'Microsoft ML Buildings', cls: null, isUnderground: false, ring: sq(10, 40, 12) }]; };
+    }, { la, lo });
+    if (mode === 'ovfail') await page.addInitScript(() => { window.__overtureFetch = async () => { throw new Error('test failure'); }; });
     const errors = [];
     page.on('pageerror', e => errors.push(e.message));
     page.on('dialog', d => d.accept());
@@ -51,6 +59,13 @@ const overpass = { elements: [
         return route.fulfill({ body: JSON.stringify(overpass), contentType: 'application/json', headers: { 'access-control-allow-origin': '*' } });
       }
       if (u.includes('router.project-osrm.org')) return route.fulfill({ body: JSON.stringify({ code: 'NoRoute' }), contentType: 'application/json', headers: { 'access-control-allow-origin': '*' } });
+      if (u.includes('spatial-img.information.qld.gov.au')) return route.fulfill({ body: aerial, contentType: 'image/png', headers: { 'access-control-allow-origin': '*' } });
+      if (u.includes('commons.wikimedia.org/w/api.php')) {
+        const q = new URL(u).searchParams, cors = { 'access-control-allow-origin': '*' };
+        if (q.get('list') === 'search') return route.fulfill({ body: JSON.stringify({ query: { search: q.get('srsearch') === 'Streets Beach' ? [{ title: 'File:Streets Beach test.jpg' }] : [] } }), contentType: 'application/json', headers: cors });
+        return route.fulfill({ body: JSON.stringify({ query: { pages: { 1: { title: 'File:Streets Beach test.jpg', imageinfo: [{ url: 'http://img.test/full.jpg', thumburl: 'http://img.test/thumb.jpg', descriptionurl: 'https://commons.wikimedia.org/wiki/File:Streets_Beach_test.jpg', extmetadata: { LicenseShortName: { value: 'CC BY-SA 4.0' }, Artist: { value: '<a href="x">Tester</a>' } } }] } } } }), contentType: 'application/json', headers: cors });
+      }
+      if (u.includes('img.test')) return route.fulfill({ body: aerial, contentType: 'image/png' });
       if (/arcgisonline|tile|opentopomap/.test(u)) return route.fulfill({ body: tile, contentType: 'image/png' });
       return route.fulfill({ status: 404, body: '' });
     });
@@ -118,6 +133,37 @@ const overpass = { elements: [
   // undo removes the tree
   await page.click('#undoBtn'); await page.waitForTimeout(100);
   check('Undo removes the placed tree', /Trees you placed0/.test(await page.textContent('#stats')));
+  if (/kart-map-scanner v8\.([3-9]|\d\d)/.test(html)) {
+    // ---------- v8.3 extras ----------
+    check('v8.3 Overture was asked once during the scan', (await page.evaluate(() => window.__overtureCalls)) === 1);
+    check('v8.3 scan status reports what Overture added', /Overture added 1 buildings/.test(status), status);
+    const ov = j.buildings.find(b => b.id === 'ov-ovNew'), goma = j.buildings.find(b => /Gallery/.test(b.name || ''));
+    check('v8.3 export has the Overture-only building, labelled', ov && ov.source === 'overture' && ov.heightSource === 'ml-estimate' && ov.height === 7.5, JSON.stringify(ov));
+    check('v8.3 OSM levels still beat Overture (GOMA keeps 3 levels)', goma && goma.heightSource === 'levels', goma && goma.heightSource);
+    check('v8.3 meta.overture and attribution', j.meta.overture && j.meta.overture.added === 1 && /Overture/.test(j.meta.attribution), JSON.stringify(j.meta.overture));
+    check('v8.3 Extras buttons enabled after scan', !(await page.isDisabled('#sampleBtn')) && !(await page.isDisabled('#groundBtn')) && !(await page.isDisabled('#photosBtn')));
+    await page.click('#sampleBtn');
+    await page.waitForFunction(() => /Colours sampled|Colour sampling failed/.test(document.getElementById('status').textContent), null, { timeout: 15000 });
+    const st2 = await page.textContent('#status');
+    check('v8.3 colour sampling succeeds', /Colours sampled/.test(st2), st2);
+    await page.click('#photosBtn');
+    await page.waitForFunction(() => /Found reference photos/.test(document.getElementById('status').textContent), null, { timeout: 15000 });
+    check('v8.3 landmark photos: 1 of 2 found', /for 1 of 2/.test(await page.textContent('#status')), await page.textContent('#status'));
+    check('v8.3 photo thumbnail shown in the landmark list', (await page.$$('#stats .lm-photos img')).length === 1);
+    const [gdl] = await Promise.all([page.waitForEvent('download'), page.click('#groundBtn')]);
+    const gfile = path.join(__dirname, 'ground.png'); await gdl.saveAs(gfile);
+    const png = fs.readFileSync(gfile);
+    check('v8.3 ground image is a PNG named after the track', gdl.suggestedFilename() === 'kartmap_ui-test_ground.png' && png.slice(1, 4).toString() === 'PNG', gdl.suggestedFilename());
+    const [dl3] = await Promise.all([page.waitForEvent('download'), page.click('#exportBtn')]);
+    const f3 = path.join(__dirname, 'export3.json'); await dl3.saveAs(f3);
+    const j3 = JSON.parse(fs.readFileSync(f3, 'utf8'));
+    check('v8.3 export: sampled colours (#b03a2e), imagery licence, ground image info',
+      j3.buildings.some(b => b.sampledRoofColour === '#b03a2e') && j3.meta.imagery && j3.meta.imagery.licence === 'CC BY-SA' && /Queensland/.test(j3.meta.attribution) &&
+      j3.meta.groundImage && j3.meta.groundImage.file === 'kartmap_ui-test_ground.png' && png.readUInt32BE(16) === j3.meta.groundImage.width, JSON.stringify(j3.meta.groundImage));
+    const sb = j3.landmarks.find(l => l.name === 'Streets Beach');
+    check('v8.3 export: landmark photo with licence, author and "search" warning', sb.photos && sb.photos[0].licence === 'CC BY-SA 4.0' && sb.photos[0].author === 'Tester' && sb.photosFrom === 'search', JSON.stringify(sb));
+    check('v8.3 file still version 2 (loader-compatible)', j3.version === 2);
+  }
   check('no script errors during the whole run', errors.length === 0, errors.join('; '));
   await ctx.close();
 
@@ -133,6 +179,17 @@ const overpass = { elements: [
   check('server down (502): plain "down, their side" message with status link', /server is down/.test(msg) && /their side/.test(msg) && /api\/status/.test(msg), msg);
   await d.ctx.close();
 
+  if (/kart-map-scanner v8\.([3-9]|\d\d)/.test(html)) {
+    const o = await openPage('ovfail');
+    await o.page.click('[data-mode="points"]'); await o.page.uncheck('#snap');
+    const b3 = await o.page.locator('#map').boundingBox();
+    for (const [dx, dy] of [[0, 0], [60, 0]]) await o.page.mouse.click(b3.x + b3.width / 2 + dx, b3.y + b3.height / 2 + dy);
+    await o.page.click('#scanBtn');
+    await o.page.waitForFunction(() => !document.getElementById('exportBtn').disabled, null, { timeout: 15000 });
+    const m3 = await o.page.textContent('#status');
+    check('v8.3 Overture failing still gives a scan (OSM only) with a plain warning', /Scan done/.test(m3) && /Overture skipped: test failure/.test(m3), m3);
+    await o.ctx.close();
+  }
   await browser.close();
   const failed = results.filter(r => !r.ok).length;
   console.log(`\n${results.length - failed} passed, ${failed} failed`);

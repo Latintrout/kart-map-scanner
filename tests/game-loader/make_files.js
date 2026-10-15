@@ -50,9 +50,29 @@ els.push(N(150, 0, { highway: 'crossing', crossing: 'zebra' }), N(300, 60, { hig
 for (let i = 0; i < 15; i++) els.push(N(15 + i * 18, 190, { natural: 'tree', ...(i % 3 === 0 ? { genus: 'Archontophoenix' } : i % 3 === 1 ? { genus: 'Jacaranda', species: 'Jacaranda mimosifolia', leaf_type: 'broadleaved' } : {}) }));
 els.push(N(150, 3, { natural: 'tree', genus: 'Ficus' }));   // a tree in the road
 const data = { elements: els.map(e => { if (e.tags) for (const k of Object.keys(e.tags)) if (e.tags[k] === undefined) delete e.tags[k]; return e; }) };
-for (const [ver, file] of [['v8.1', 'process.argv[2]'], ['v8.2', 'process.argv[3]']]) {
+for (const [ver, file] of [['v8.1', '/home/claude/kart-map-scanner-v8.1.html'], ['v8.2', '/home/claude/kart-map-scanner-v8.2.html'], ['v8.3', '/home/claude/kart-map-scanner-v8.3.html']]) {
   const L = lib(file);
-  const { out } = L.buildOutput(data, { route, waypoints: route.slice(0, 4), radius: 300, width: 8, loop: true, snapped: true, name: 'harness ' + ver, now: '2026-10-15T00:00:00Z' });
+  let input = data, overture;
+  if (ver === 'v8.3') {
+    // Overture: a height for an unmeasured house (OSM way 7), plus two buildings OSM doesn't have.
+    const ring = (x, y, w, h) => rect(x, y, w, h).map(o => [o.lat, o.lon]);
+    const m = L.mergeOverture(data, [
+      { id: 'a', osmId: 'w7', height: 5.2, heightFrom: 'Microsoft ML Buildings', ring: ring(142, 30, 12, 12) },
+      { id: 'b', osmId: null, height: 11, heightFrom: 'Microsoft ML Buildings', ring: ring(-60, 240, 18, 14) },
+      { id: 'c', osmId: null, height: null, heightFrom: null, ring: ring(-90, 240, 10, 10) }]);
+    input = m.data; overture = { release: '2026-09-23.1', ...m.stats };
+    console.log('overture stats', JSON.stringify(m.stats));
+  }
+  const { out } = L.buildOutput(input, { overture, route, waypoints: route.slice(0, 4), radius: 300, width: 8, loop: true, snapped: true, name: 'harness ' + ver, now: '2026-10-15T00:00:00Z' });
+  if (ver === 'v8.3') {
+    // aerial colours from a fake all-terracotta photo covering everything, plus a landmark photo
+    const W = 2048, H = 2048, px = new Uint8ClampedArray(W * H * 4); for (let i = 0; i < px.length; i += 4) px.set([176, 58, 46, 255], i);
+    const n = L.applyColourSamples(out, [{ box: { south: la - 0.01, north: la + 0.01, west: lo - 0.01, east: lo + 0.01 }, image: { width: W, height: H, data: px } }], L.makeUnprojector, { metresPerPixel: 1 });
+    out.landmarks[0].photos = [{ file: 'File:x.jpg', thumb: 'https://upload.wikimedia.org/x.jpg', page: 'https://commons.wikimedia.org/wiki/File:x.jpg', licence: 'CC BY-SA 4.0', author: 'Someone' }];
+    out.landmarks[0].photosFrom = 'wikidata';
+    out.meta.groundImage = { file: 'kartmap_harness_ground.png', ...L.groundImagePlan(out.meta.bbox, 1, 4096), colours: 'aerial (sampled)' };
+    console.log('sampled', JSON.stringify(n), 'contract problems', JSON.stringify(L.loaderContractProblems(out)));
+  }
   const dir = '/tmp/game/game/tracks/scan_' + ver.replace('.', '_');
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(dir + '/kartmap_harness_2026-10-15.json', L.prettyJSON(out));

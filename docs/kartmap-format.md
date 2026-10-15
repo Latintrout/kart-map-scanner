@@ -1,8 +1,8 @@
 # kartmap file format (version 2)
 
-_Last updated for scanner v8.2 (2026-10-15). Fields marked **(v8)**, **(v8.1)** or **(v8.2)** are newer than version 1. All are optional, so readers of version 1 files still work. Files say `"version": 2` from scanner v8.2 on, matching the "kartmap v2" the game's loader (brisbane-kart, `kartmap.gd`) was written for. That loader accepts versions 1 and 2 and **rejects anything higher**, so a future version 3 needs a loader update first._
+_Last updated for scanner v8.3 (2026-10-15). Fields marked **(v8)**, **(v8.1)**, **(v8.2)** or **(v8.3)** are newer than version 1. All are optional, so readers of version 1 files still work. Files say `"version": 2` from scanner v8.2 on, matching the "kartmap v2" the game's loader (brisbane-kart, `kartmap.gd`) was written for. That loader accepts versions 1 and 2 and **rejects anything higher**, so a future version 3 needs a loader update first._
 
-**Guesses are always marked.** Any field ending in `Source` (`heightSource`, `widthSource`, `roofShapeSource`) says where a value came from. The values `default`, `estimated` and `guess` mean it's a guess: later data (LiDAR, hand edits) may replace guesses freely, but must never replace real values (`osm`, `levels`, `lanes`, `lidar`).
+**Guesses are always marked.** Any field ending in `Source` (`heightSource`, `widthSource`, `roofShapeSource`) says where a value came from. The values `default`, `estimated`, `guess` and **(v8.3)** `ml-estimate` mean it's a guess: later data (LiDAR, hand edits) may replace guesses freely, but must never replace real values (`osm`, `levels`, `lanes`, `lidar`, **(v8.3)** `overture`).
 
 Files ending in `.json` named `kartmap_<name>_<date>.json` come from Brandon's Kart Map Scanner
 (https://latintrout.github.io/kart-map-scanner/). The scanner reads free OpenStreetMap (OSM) data
@@ -48,7 +48,10 @@ into a level in the Godot kart game.
 | `counts` | Number of each feature type (v8 adds `barriers`, `landmarks`, `bridges`, `tunnels`) |
 | `generator` | **(v8)** Which scanner version made the file, e.g. `"kart-map-scanner v8.1"` |
 | `quality` | **(v8.1)** Report card: `heights` (% measured / estimated / default), `roofShapes` (% mapped / guessed), `buildingsOnTrack` (ids), `barriersOnTrack`, `propsOnTrack`, `treesTyped` (%), and `notes` (plain-English warnings) |
-| `attribution` | "© OpenStreetMap contributors, ODbL". Must appear in the game's credits |
+| `attribution` | "© OpenStreetMap contributors, ODbL", plus **(v8.3)** Overture and Queensland imagery credits when those were used. Must appear in the game's credits |
+| `overture` | **(v8.3)** `{ release, heightsFilled, added }` when Overture Maps filled gaps (ODbL, same as OSM) |
+| `imagery` | **(v8.3)** Set after "Sample colours": `{ source, service, licence: "CC BY-SA", attribution, vintage, noWarranty, metresPerPixel, sampled: {buildings, areas} }`. The photos are 2022 or older |
+| `groundImage` | **(v8.3)** Set after "Export ground image": `{ file, minX, minY, maxX, maxY, width, height, metresPerPixel, colours }`. A top-down PNG for the ground texture. Top-left pixel = (`minX`, `maxY`), north is up |
 
 ## route
 
@@ -85,12 +88,14 @@ Each: `{ id, kind, name?, width, widthSource, points, bridge?, tunnel?, layer?, 
 Each: `{ id, kind, name?, height, heightSource, footprint, holes?, roofShape?, roofColour?, colour?, material?, levels?, minHeight? }`
 
 - `footprint` is a polygon outline. The first point is **not** repeated at the end.
-- `height` is in metres. `heightSource` is `osm` (mapped height), `levels` (floors × 3 m), **(v8.1)** `estimated` (typical height of 3+ measured buildings of the same type within 150 m) or `default` (a guess by building type). The Kart LiDAR Tool may later add `lidar` (measured).
+- `height` is in metres. `heightSource` is `osm` (mapped height), `levels` (floors × 3 m), **(v8.1)** `estimated` (typical height of 3+ measured buildings of the same type within 150 m) or `default` (a guess by building type). **(v8.3)** `overture` (a measured height Overture Maps took from OSM history) or `ml-estimate` (Microsoft's machine-learning guess, via Overture: treat as a guess). OSM's own `height` and `building:levels` always win over Overture. The Kart LiDAR Tool may later add `lidar` (measured).
 - **(v8.1)** `roofShape` is always filled in; `roofShapeSource` is `osm` (mapped) or `guess` (small homes hipped, small sheds gabled, everything else flat).
 - **(v8.1)** `hasParts: true`: this building is split into parts. **Don't draw this outline**; draw its parts instead (the buildings with `part: true` and `parent` = this id).
 - **(v8.2) Building parts** are in this same list with `part: true`, their own `height`, `minHeight` (where they start) and `parent`. E.g. a 28-floor tower starting above a 3-floor podium. (v8.1 files had them in a separate `buildingParts` list instead.)
 - **(v8.2)** `roofMaterial` (`metal`, `tile`, `concrete`…) and `roofHeight` (metres) when mapped.
 - **(v8.1)** `trackDist`: metres from the track; `onTrack: true` if it overlaps the track corridor (`width / 2`).
+- **(v8.3)** `source: "overture"`: a building OSM doesn't have, added from Overture Maps (id starts with `ov-`). Only added when it doesn't overlap an OSM building and isn't underground.
+- **(v8.3)** `sampledRoofColour`: hex colour read from the aerial photo (median of the roof). Only present after "Sample colours". A mapped `roofColour` always wins; use this when there is none.
 - `holes` (optional) lists courtyards to cut out, each its own polygon.
 - **(v8) Looks, when OSM has them (all optional):**
   - `roofShape`: `flat`, `gabled`, `hipped`, `pyramidal`, `skillion`, `dome`…
@@ -105,6 +110,7 @@ Each: `{ id, kind, name?, polygon, holes?, surface? }`
 
 - `kind` is the OSM type. Common ones: `water`, `swimming_pool`, `beach`, `park`, `garden`, `grass`, `wood`, `scrub`, `parking`, `pedestrian` (paved plaza), `playground`, `residential` / `commercial` / `industrial` (whole-district zoning: use as faint ground tint at most).
 - `holes` (optional) are cut-outs, e.g. the island in the Streets Beach lagoon.
+- **(v8.3)** `sampledColour`: hex colour read from the aerial photo, after "Sample colours". Never set on zoning areas (a whole suburb has no single colour).
 - Areas can overlap: a pool sits inside a park, which sits inside a residential zone. Draw large or zoning areas first, then smaller specific ones on top.
 - Very large areas were trimmed to `meta.areasTrimmedTo`, so a trimmed edge may run in a straight line along that box.
 
@@ -152,6 +158,7 @@ Each: `{ id, name, kind, pos, ref?, wikidata?, wikipedia? }`
 - `pos` is `[x, y]` in metres (for shapes, roughly their centre).
 - `ref` points to the building, area or prop in this file that it belongs to, so the game can swap that generic piece for a hand-made model. No `ref` means it's only a named spot.
 - `wikidata` and `wikipedia` (when present) help find reference photos.
+- **(v8.3)** `photos`: up to 3 reference photos from Wikimedia Commons, `[{ file, thumb, page, licence, author }]`, after "Find landmark photos". `photosFrom` is `wikidata` (the landmark's own photo) or `search` (found by name: check it's the right place). For modelling reference only; if a photo is used in the game itself, credit the author and follow its licence (`page` has the details).
 - Unnamed things are never landmarks.
 
 ## race (v8.1)
@@ -165,7 +172,7 @@ Suggestions only (`suggested: true`). The game or a later editor may move them.
 
 ## IDs
 
-`w123` = OSM way, `n123` = OSM node, `r123` = OSM multipolygon (`r123-2` = its second piece), `m1` = manual tree, `w123-4` = 4th tree generated from tree row `w123`, `L1` = landmark. IDs are unique within a file.
+`w123` = OSM way, `n123` = OSM node, `r123` = OSM multipolygon (`r123-2` = its second piece), `m1` = manual tree, `w123-4` = 4th tree generated from tree row `w123`, `L1` = landmark, **(v8.3)** `ov-<overture id>` = building added from Overture. IDs are unique within a file.
 
 ## Level-building rules (agreed decisions)
 
@@ -173,9 +180,10 @@ Suggestions only (`suggested: true`). The game or a later editor may move them.
 2. **Keep the track clear.** Skip any building whose footprint overlaps the track corridor (route centreline ± `width / 2`).
 3. **Order of work.** Make the track drivable first (flat ground, track surface, box buildings). Restyling (N64/PS1 look, textures, palette) comes after.
 4. **Missing heights are guesses.** Many buildings have `heightSource: "default"`. The game may adjust them freely.
-5. **Credits.** Include the OSM attribution.
+5. **Credits.** Include `meta.attribution` as written (OSM, plus Overture and Queensland imagery when used).
 6. **(v8) Bridges and tunnels.** Raise `bridge` roads above the ground (by `layer`, about 5 m per level). Draw `tunnel` roads below or skip them, so they don't cut across the surface.
 7. **(v8) Landmarks** with a `ref` replace that generic building, area or prop with a hand-made model once one exists.
 8. **(v8.1) Track surface** from `route.centerline`. Skip or move anything with `onTrack: true` (the quality report lists them).
 9. **(v8.1/v8.2) Building parts:** when a building has `hasParts`, skip it and build the `part: true` buildings that name it as `parent`.
 10. **(v8.2) Loader contract:** the scanner checks every scan against what the game's loader reads (valid footprints, heights, parts present for `hasParts`, positions on landmarks and props) and warns before export if anything would break in the game.
+11. **(v8.3) Colours:** mapped colours (`roofColour`, `colour`) first, then `sampledRoofColour` / area `sampledColour` from the aerial photo, then the game's own palette.

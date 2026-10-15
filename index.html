@@ -51,6 +51,7 @@
   .wp.small { font-size: 0; border-width: 1px; }
   #map.pen { cursor: crosshair; touch-action: none; }
   .legend span { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin: 0 4px 0 8px; vertical-align: middle; }
+.lm-photos{display:flex;gap:4px;margin:3px 0 4px}.lm-photos img{width:64px;height:48px;object-fit:cover;border-radius:3px;border:1px solid #ccc}
 </style>
 </head>
 <body>
@@ -96,6 +97,7 @@
     <label>Scan radius each side: <b id="radiusVal">100</b> m
       <input id="radius" type="range" min="25" max="300" step="5" value="100"></label>
     <label>Track width (m) <input id="width" type="number" min="3" max="30" step="0.5" value="8"></label>
+    <label class="inline"><input id="useOverture" type="checkbox" checked> Fill building gaps from Overture (recommended)</label>
     <button id="scanBtn" class="primary" style="width:100%;margin-top:6px">Scan area</button>
     <div id="status">Hold and drag on the map to draw a route.</div>
   </section>
@@ -111,6 +113,14 @@
       <button id="loadBtn">Load JSON</button>
     </div>
     <input id="loadFile" type="file" accept=".json,application/json" hidden>
+  </section>
+
+  <section>
+    <h2>5. Extras (optional)</h2>
+    <button id="sampleBtn" style="width:100%" disabled>Sample colours from aerial photo</button>
+    <button id="photosBtn" style="width:100%;margin-top:6px" disabled>Find landmark photos</button>
+    <button id="groundBtn" style="width:100%;margin-top:6px" disabled>Export ground image (PNG)</button>
+    <div class="hint" style="margin-top:4px">Aerial photos © State of Queensland (CC BY-SA), mostly 2021. Photos from Wikimedia Commons: check each licence. Export JSON again after using these.</div>
   </section>
 
   <section class="hint">
@@ -186,6 +196,9 @@ function buildingHeight(t) {
   const h = parseNum(t.height); if (h) return [h, 'osm'];
   const lv = parseNum(t['building:levels']);
   if (lv) return [round2(lv * 3 + (parseNum(t['roof:levels']) || 0) * 2), 'levels'];
+  // v8.3: from Overture, only when OSM has neither height nor floors.
+  const oh = parseNum(t['overture:height']);
+  if (oh) return [round2(oh), t['overture:from'] === 'OpenStreetMap' ? 'overture' : 'ml-estimate'];
   return [DEFAULT_BUILDING_HEIGHT[t.building] ?? 6, 'default'];
 }
 // ---- small objects ("props") ----
@@ -791,6 +804,182 @@ function findShortcuts(roads, cl, closed, width) {
   return kept;
 }
 
+// ======================================================================
+// v8.3: Overture fill-in, aerial colours, ground image, landmark photos
+// ======================================================================
+
+// Centre of a shape WITHOUT rounding. (centroid() rounds to 2 decimals: fine for metres, but in
+// lat/lon that's ~1 km, so lat/lon code must use this one.)
+function exactCentroid(pts) { let x = 0, y = 0; for (const p of pts) { x += p[0]; y += p[1]; } return [x / pts.length, y / pts.length]; }
+
+// Credits for everything a file was built from.
+function attributionFor(used) {
+  const parts = ['© OpenStreetMap contributors, ODbL'];
+  if (used && used.overture) parts.push('Overture Maps Foundation (ODbL), including Microsoft ML Buildings');
+  if (used && used.imagery) parts.push('Includes material © State of Queensland (DNRMMRRD), CC BY-SA; © Planet Labs Netherlands');
+  return parts.join('; ');
+}
+
+// One Overture building, from a vector-tile feature (properties + GeoJSON coordinates in lon/lat).
+// The OSM id comes from the feature's sources ("record_id": "w584365517@2").
+function overtureFeature(props, coords) {
+  let ring = coords;
+  while (Array.isArray(ring) && Array.isArray(ring[0]) && Array.isArray(ring[0][0])) ring = ring[0];   // outer ring of (multi)polygon
+  let osmId = null;
+  try {
+    const src = typeof props.sources === 'string' ? JSON.parse(props.sources) : (props.sources || []);
+    for (const s of src) if (/openstreetmap/i.test(s.dataset || '') && s.record_id) { osmId = String(s.record_id).split('@')[0]; break; }
+  } catch (e) { /* unreadable sources: treat as non-OSM */ }
+  let height = parseNum(props.height), from = props['@height_source'] || null;
+  if (!height && parseNum(props.num_floors)) { height = round2(parseNum(props.num_floors) * 3); }
+  return {
+    id: String(props.id || ''), osmId, height: height ? round2(height) : null, heightFrom: from,
+    cls: props.class || props.subtype || null, isUnderground: props.is_underground === true || props.is_underground === 'true',
+    ring: (ring || []).map(p => [p[1], p[0]])
+  };
+}
+
+// Adds Overture to the raw scan data, returning a NEW copy (the original is untouched):
+// - an OSM building with no height or floors gets Overture's height (tagged, so it's labelled
+//   'overture' if that came from OSM, else 'ml-estimate')
+// - a building missing from OSM is added (unless underground or overlapping an OSM building)
+function mergeOverture(data, features) {
+  const els = (data.elements || []).map(e => (e.type === 'way' && e.tags && e.tags.building) ? { ...e, tags: { ...e.tags } } : e);
+  const byId = new Map(), rings = [];
+  for (const e of els) {
+    if (e.type !== 'way' || !e.tags || !e.tags.building || !e.geometry) continue;
+    byId.set('w' + e.id, e);
+    const r = e.geometry.filter(Boolean).map(g => [g.lat, g.lon]);
+    if (r.length >= 3) rings.push({ ring: r, c: exactCentroid(r) });
+  }
+  const stats = { heightsFilled: 0, added: 0, skipped: 0 };
+  for (const f of features || []) {
+    if (f.osmId) {
+      const e = byId.get(f.osmId);
+      if (e && f.height && !parseNum(e.tags.height) && !parseNum(e.tags['building:levels'])) {
+        e.tags['overture:height'] = String(f.height); e.tags['overture:from'] = f.heightFrom || 'Overture'; stats.heightsFilled++;
+      }
+      continue;   // OSM-based Overture buildings are already in the scan
+    }
+    if (f.isUnderground || !f.ring || f.ring.length < 3) { stats.skipped++; continue; }
+    const c = exactCentroid(f.ring);
+    if (rings.some(o => pointInPoly(c, o.ring) || pointInPoly(o.c, f.ring))) { stats.skipped++; continue; }
+    const ring = f.ring.slice();
+    if (ring[0][0] !== ring.at(-1)[0] || ring[0][1] !== ring.at(-1)[1]) ring.push(ring[0]);
+    const tags = { building: f.cls || 'yes', 'overture:added': 'yes', 'overture:id': f.id };
+    if (f.height) { tags['overture:height'] = String(f.height); tags['overture:from'] = f.heightFrom || 'Overture'; }
+    els.push({ type: 'way', id: f.id, ovId: f.id, tags, geometry: ring.map(p => ({ lat: p[0], lon: p[1] })) });
+    rings.push({ ring: f.ring, c });
+    stats.added++;
+  }
+  return { data: { ...data, elements: els }, stats };
+}
+
+// ---- aerial colours ----
+// Splits an area into image requests the imagery server accepts (max width x height pixels),
+// at `metresPerPixel`. Boxes are in degrees (the server returns plain lat/lon images).
+function planImageTiles(box, metresPerPixel, maxW, maxH) {
+  const midLat = (box.south + box.north) / 2;
+  const dLat = metresPerPixel / 111320, dLon = metresPerPixel / (111320 * Math.cos(midLat * Math.PI / 180));
+  const W = Math.max(1, Math.ceil((box.east - box.west) / dLon)), H = Math.max(1, Math.ceil((box.north - box.south) / dLat));
+  const nx = Math.ceil(W / maxW), ny = Math.ceil(H / maxH);
+  const tiles = [];
+  for (let i = 0; i < nx; i++) for (let j = 0; j < ny; j++) {
+    const w0 = box.west + (box.east - box.west) * i / nx, w1 = box.west + (box.east - box.west) * (i + 1) / nx;
+    const n0 = box.north - (box.north - box.south) * j / ny, s0 = box.north - (box.north - box.south) * (j + 1) / ny;
+    tiles.push({ west: w0, east: w1, north: n0, south: s0, width: Math.ceil(W / nx), height: Math.ceil(H / ny) });
+  }
+  return tiles;
+}
+// Typical (median) colour of the image pixels inside an outline. image = {width, height, data RGBA};
+// box = the image's lat/lon bounds; poly = [[lat, lon], ...]. Null if fewer than 4 pixels fall inside.
+function medianColourInPolygon(image, box, poly) {
+  const lats = poly.map(p => p[0]), lons = poly.map(p => p[1]);
+  const W = image.width, H = image.height;
+  const px = lon => (lon - box.west) / (box.east - box.west) * W, py = lat => (box.north - lat) / (box.north - box.south) * H;
+  const x0 = Math.max(0, Math.floor(px(Math.min(...lons)))), x1 = Math.min(W - 1, Math.ceil(px(Math.max(...lons))));
+  const y0 = Math.max(0, Math.floor(py(Math.max(...lats)))), y1 = Math.min(H - 1, Math.ceil(py(Math.min(...lats))));
+  if (x0 > x1 || y0 > y1) return null;
+  const step = Math.max(1, Math.ceil(Math.sqrt((x1 - x0 + 1) * (y1 - y0 + 1) / 400)));   // at most ~400 samples
+  const R = [], G = [], B = [];
+  for (let y = y0; y <= y1; y += step) for (let x = x0; x <= x1; x += step) {
+    const lon = box.west + (x + 0.5) / W * (box.east - box.west), lat = box.north - (y + 0.5) / H * (box.north - box.south);
+    if (!pointInPoly([lat, lon], poly)) continue;
+    const i = (y * W + x) * 4;
+    R.push(image.data[i]); G.push(image.data[i + 1]); B.push(image.data[i + 2]);
+  }
+  if (R.length < 4) return null;
+  const med = a => { a.sort((p, q) => p - q); return a[Math.floor(a.length / 2)]; };
+  const hex = v => v.toString(16).padStart(2, '0');
+  return { hex: '#' + hex(med(R)) + hex(med(G)) + hex(med(B)), n: R.length };
+}
+const ZONING_KINDS = /^(residential|commercial|retail|industrial|railway|construction|brownfield|education|religious|military)$/;
+// Puts sampled colours into a scan result: buildings get sampledRoofColour, areas sampledColour.
+// Mapped colours (roofColour, colour) are never touched. Returns how many were sampled.
+function applyColourSamples(out, tiles, unprojFactory, info) {
+  const U = unprojFactory(out.meta.origin.lat, out.meta.origin.lon);
+  const pick = poly => { const c = exactCentroid(poly); return tiles.find(t => c[0] >= t.box.south && c[0] <= t.box.north && c[1] >= t.box.west && c[1] <= t.box.east); };
+  const counts = { buildings: 0, areas: 0 };
+  for (const b of out.buildings) {
+    const poly = b.footprint.map(U), t = pick(poly); if (!t) continue;
+    const c = medianColourInPolygon(t.image, t.box, poly); if (c) { b.sampledRoofColour = c.hex; counts.buildings++; }
+  }
+  for (const a of out.areas) {
+    if (ZONING_KINDS.test(a.kind)) continue;   // whole districts: their "colour" is just a mix of everything
+    const poly = a.polygon.map(U), t = pick(poly); if (!t) continue;
+    const c = medianColourInPolygon(t.image, t.box, poly); if (c) { a.sampledColour = c.hex; counts.areas++; }
+  }
+  out.meta.imagery = {
+    source: 'Queensland imagery: Latest state program (all users)',
+    service: 'https://spatial-img.information.qld.gov.au/arcgis/rest/services/Basemaps/LatestStateProgram_AllUsers/ImageServer',
+    licence: 'CC BY-SA', attribution: 'Includes material © State of Queensland (DNRMMRRD); © Planet Labs Netherlands',
+    vintage: '2022 or older (urban areas mostly 2021)', noWarranty: 'The State of Queensland makes no warranty about this data.',
+    metresPerPixel: (info && info.metresPerPixel) || null, sampled: counts
+  };
+  out.meta.attribution = attributionFor({ overture: !!out.meta.overture, imagery: true });
+  return counts;
+}
+
+// ---- ground image ----
+// A top-down picture of the whole area in flat colours, for the game's ground texture.
+const GROUND_COLOURS = {
+  ground: '#7c8a52', grass: '#5e9a3e', park: '#5e9a3e', garden: '#66a347', recreation_ground: '#5e9a3e', pitch: '#4f9a4a', village_green: '#5e9a3e',
+  meadow: '#7aa04a', common: '#5e9a3e', playground: '#b58a5a', wood: '#3e6b2e', forest: '#3e6b2e', scrub: '#557a36', wetland: '#5a7f6a', flowerbed: '#8f6a9a',
+  water: '#3a78c8', river: '#3a78c8', swimming_pool: '#41b4e0', water_park: '#41b4e0', beach: '#e2c579', sand: '#e2c579', bare_rock: '#9a958c',
+  parking: '#8f8f8f', pedestrian: '#b9ad98', platform: '#a29d93', residential: '#857f69', commercial: '#86798a', retail: '#86798a', industrial: '#7b7b7b',
+  railway: '#6b6359', cemetery: '#6f8f5a', construction: '#a08060',
+  road: '#4b4b4b', path: '#b49a78', rail: '#3a3530', building: '#6d6a66'
+};
+function groundColour(kind) { return GROUND_COLOURS[kind] || GROUND_COLOURS.ground; }
+// Lower draws first: zoning tints, then land, then paving, then water and sand on top.
+function groundDrawOrder(kind) {
+  if (ZONING_KINDS.test(kind)) return 0;
+  if (/^(parking|pedestrian|platform|bare_rock)$/.test(kind)) return 2;
+  if (/^(water|river|swimming_pool|water_park|beach|sand)$/.test(kind)) return 3;
+  return 1;
+}
+// Pixel size of the ground image: `metresPerPixel`, made coarser if needed to stay within maxPx.
+function groundImagePlan(bbox, metresPerPixel, maxPx) {
+  const wM = bbox.maxX - bbox.minX, hM = bbox.maxY - bbox.minY;
+  const mpp = Math.max(metresPerPixel, wM / maxPx, hM / maxPx);
+  return { minX: bbox.minX, minY: bbox.minY, maxX: bbox.maxX, maxY: bbox.maxY,
+    width: Math.max(1, Math.ceil(wM / mpp)), height: Math.max(1, Math.ceil(hM / mpp)), metresPerPixel: round2(mpp) };
+}
+
+// ---- landmark photos ----
+// Reads a Wikimedia Commons imageinfo answer into [{file, thumb, page, licence, author}].
+function parseCommonsImageInfo(json) {
+  const strip = s => String(s || '').replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+  const out = [];
+  for (const p of Object.values((json && json.query && json.query.pages) || {})) {
+    const ii = p.imageinfo && p.imageinfo[0]; if (!ii) continue;
+    const md = ii.extmetadata || {};
+    out.push({ file: p.title, thumb: ii.thumburl || ii.url, page: ii.descriptionurl,
+      licence: strip(md.LicenseShortName && md.LicenseShortName.value) || 'see page', author: strip(md.Artist && md.Artist.value) || 'unknown' });
+  }
+  return out;
+}
+
 // Turns the raw Overpass response into the kartmap format.
 // Returns { out: <the JSON we export>, preview: <shapes for drawing on the map> }
 function buildOutput(data, o) {
@@ -839,16 +1028,17 @@ function buildOutput(data, o) {
     if (t.surface) a.surface = t.surface;
     res.areas.push(a);
     polygon.forEach(grow);
-    preview.push({ cat: 'area', kind, xy: [polygon, ...h] });
+    preview.push({ cat: 'area', id, kind, xy: [polygon, ...h] });
     noteLandmark(t, id, centroid(polygon), 1);
   };
   const addBuilding = (id, t, name, footprint, holes) => {
     const [height, heightSource] = buildingHeight(t);
     const b = { id, kind: t.building, name, height, heightSource, footprint, ...buildingLooks(t) };
+    if (t['overture:added']) b.source = 'overture';   // v8.3: not in OSM, added from Overture
     if (holes && holes.length) b.holes = holes;
     res.buildings.push(b);
     footprint.forEach(grow);
-    const pv = { cat: 'building', xy: [footprint, ...(holes || [])] };
+    const pv = { cat: 'building', id, xy: [footprint, ...(holes || [])] };
     preview.push(pv); previewOf.set(id, pv);
     noteLandmark(t, id, centroid(footprint), 2);
   };
@@ -860,7 +1050,7 @@ function buildOutput(data, o) {
     if (holes && holes.length) part.holes = holes;
     res.buildings.push(part);
     footprint.forEach(grow);
-    const pv = { cat: 'part', xy: [footprint, ...(holes || [])] };
+    const pv = { cat: 'part', id, xy: [footprint, ...(holes || [])] };
     preview.push(pv); previewOf.set(id, pv);
   };
   const addTrees = (xy, source, idBase, t) => {
@@ -927,7 +1117,7 @@ function buildOutput(data, o) {
     const closed = ll.length > 3 && first[0] === last[0] && first[1] === last[1];
     const xy = ll.map(p => P(p[0], p[1]));
     const ring = closed ? xy.slice(0, -1) : xy;   // polygons: drop the repeated closing point
-    const id = 'w' + el.id;
+    const id = el.ovId ? 'ov-' + el.ovId : 'w' + el.id;   // v8.3: Overture-only buildings get 'ov-' ids
 
     if (t.building) {
       if (!closed) continue;
@@ -992,7 +1182,7 @@ function buildOutput(data, o) {
   }
   // Smarter height guesses: an unmeasured building takes the typical (median) height of at least
   // 3 measured buildings of the same type within 150 m. Measured heights are never changed.
-  const measured = h => h === 'osm' || h === 'levels' || h === 'lidar';
+  const measured = h => h === 'osm' || h === 'levels' || h === 'lidar' || h === 'overture';
   res.buildings.forEach((b, i) => {
     if (b.part || b.heightSource !== 'default') return;
     const near = [];
@@ -1039,7 +1229,7 @@ function buildOutput(data, o) {
   const nb = wholes.length;   // parts are pieces of buildings, so they're left out of the percentages
   const pct = n => nb ? Math.round(1000 * n / nb) / 10 : 0;
   const hMeasured = wholes.filter(b => measured(b.heightSource)).length;
-  const hEstimated = wholes.filter(b => b.heightSource === 'estimated').length;
+  const hEstimated = wholes.filter(b => b.heightSource === 'estimated' || b.heightSource === 'ml-estimate').length;
   const onTrackB = res.buildings.filter(b => b.onTrack);
   const trees = res.points.filter(p => p.kind === 'tree');
   const notes = [];
@@ -1082,7 +1272,7 @@ function buildOutput(data, o) {
     meta: {
       name: o.name || 'route',
       generated: o.now || new Date().toISOString(),
-      generator: 'kart-map-scanner v8.2',
+      generator: 'kart-map-scanner v8.3',
       origin: { lat: origin[0], lon: origin[1] },
       units: 'metres',
       axes: 'x = east, y = north. In Godot: Vector3(x, 0, -y)',
@@ -1090,7 +1280,8 @@ function buildOutput(data, o) {
       bbox: { minX: round2(bb.minX), minY: round2(bb.minY), maxX: round2(bb.maxX), maxY: round2(bb.maxY) },
       areasTrimmedTo: { minX: round2(clipBox.minX), minY: round2(clipBox.minY), maxX: round2(clipBox.maxX), maxY: round2(clipBox.maxY) },
       elevation: null,
-      attribution: '© OpenStreetMap contributors, ODbL',
+      attribution: attributionFor({ overture: !!o.overture }),
+      overture: o.overture || undefined,   // v8.3: { release, heightsFilled, added }
       counts: {
         roads: res.roads.length, buildings: wholes.length,
         buildingsWithRealHeight: hMeasured,
@@ -1263,7 +1454,18 @@ const CONFIG = {
   osrm: 'https://router.project-osrm.org',   // /route = plan a drive through points, /match = fit a rough trace to roads
   matchChunk: 10,     // the free OSRM server accepts at most 10 points per match request (tested 2026-10-14: 10 ok, 11 "TooBig")
   matchTotalMax: 91,  // thin very long strokes to this many points first: 10 pieces, roughly 5-10 s of snapping
-  nominatim: 'https://nominatim.openstreetmap.org/search'
+  nominatim: 'https://nominatim.openstreetmap.org/search',
+  // v8.3 extras. Overture publishes a new release about monthly and removes old ones after a while:
+  // if "Fill building gaps" starts failing with "not found", update `release` (see docs.overturemaps.org).
+  overture: {
+    base: 'https://overturemaps-extras-us-west-2.s3.us-west-2.amazonaws.com/tiles/',
+    release: '2026-09-23.1',
+    libs: ['https://esm.sh/pmtiles@3.2.1', 'https://esm.sh/@mapbox/vector-tile@2.0.3', 'https://esm.sh/pbf@4.0.1']
+  },
+  imagery: {
+    service: 'https://spatial-img.information.qld.gov.au/arcgis/rest/services/Basemaps/LatestStateProgram_AllUsers/ImageServer',
+    metresPerPixel: 1, maxWidth: 4096, maxHeight: 2048   // the server's own limits (checked 2026-10-15)
+  }
 };
 const $ = id => document.getElementById(id);
 const els = {
@@ -1272,6 +1474,7 @@ const els = {
   routeInfo: $('routeInfo'), name: $('name'), radius: $('radius'), radiusVal: $('radiusVal'),
   width: $('width'), scanBtn: $('scanBtn'), status: $('status'), stats: $('stats'),
   exportBtn: $('exportBtn'), loadBtn: $('loadBtn'), loadFile: $('loadFile'),
+  useOverture: $('useOverture'), sampleBtn: $('sampleBtn'), photosBtn: $('photosBtn'), groundBtn: $('groundBtn'),
   treeOpts: $('treeOpts'), canopy: $('canopy'), canopyVal: $('canopyVal'), clearTreesBtn: $('clearTreesBtn')
 };
 
@@ -1345,6 +1548,7 @@ function invalidateScan() {
   scanResult = null;
   featureLayer.clearLayers();
   els.exportBtn.disabled = true;
+  els.sampleBtn.disabled = els.photosBtn.disabled = els.groundBtn.disabled = true;
   els.stats.textContent = 'Route or settings changed. Scan again to export.';
   els.stats.className = 'hint';
 }
@@ -1641,25 +1845,189 @@ async function scan() {
       clearTimeout(limit);
     }
   }
+  if (!data) { els.scanBtn.disabled = false; setStatus('Scan failed. ' + explainScanFailure(problems), 'err'); return; }
+
+  // v8.3: fill gaps from Overture. If it fails, carry on with the OSM data alone.
+  let overture = null, overtureNote = '';
+  if (els.useOverture.checked) {
+    setStatus('Adding Overture buildings…');
+    try {
+      const feats = await Promise.race([fetchOvertureBuildings(scanBox(routeLatLngs, radius)),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('no answer after 45 s')), 45000))]);
+      const m = mergeOverture(data, feats);
+      data = m.data;
+      overture = { release: CONFIG.overture.release, heightsFilled: m.stats.heightsFilled, added: m.stats.added };
+    } catch (e) {
+      overtureNote = ` (Overture skipped: ${e instanceof TypeError ? "couldn't reach it" : e.message})`;
+    }
+  }
   els.scanBtn.disabled = false;
-  if (!data) { setStatus('Scan failed. ' + explainScanFailure(problems), 'err'); return; }
 
   const { out, preview } = buildOutput(data, {
     route: routeLatLngs, waypoints, radius, width: +els.width.value || 8,
-    loop: els.loop.checked && waypoints.length >= 3, snapped: routeSnapped, name: els.name.value.trim()
+    loop: els.loop.checked && waypoints.length >= 3, snapped: routeSnapped, name: els.name.value.trim(), overture
   });
   scanResult = out;
   scanPreview = preview;
   drawPreview(preview);
   showStats();
   els.exportBtn.disabled = false;
+  els.sampleBtn.disabled = els.groundBtn.disabled = false;
+  els.photosBtn.disabled = !out.landmarks.length;
   const partial = data.remark && /error|timed out|out of memory/i.test(data.remark);
   const contract = loaderContractProblems(out);   // v8.2: would the game's loader choke on this file?
   if (partial) setStatus('Scan finished but the server warned the data may be incomplete: ' + data.remark, 'warn');
   else if (contract.length) setStatus(`Scan done, but ${contract.length} thing(s) in this file won't work in the game: ${contract.slice(0, 3).join('; ')}${contract.length > 3 ? '…' : ''}`, 'warn');
-  else setStatus('Scan done. Check the preview, then Export JSON.', 'ok');
+  else setStatus('Scan done. Check the preview, then Export JSON.' + (overture ? ` Overture added ${overture.added} buildings and ${overture.heightsFilled} heights.` : '') + overtureNote, overtureNote ? 'warn' : 'ok');
 }
 els.scanBtn.onclick = scan;
+// ======================================================================
+// v8.3 extras (browser): Overture fill-in, aerial colours, ground image, landmark photos
+// ======================================================================
+// Overture buildings come as "PMTiles" (map tiles in one big file). Small libraries read them;
+// they're only loaded when needed. Tests replace the whole fetch with window.__overtureFetch.
+async function fetchOvertureBuildings(box) {
+  if (window.__overtureFetch) return window.__overtureFetch(box);
+  const [{ PMTiles }, { VectorTile }, pbfMod] = await Promise.all(CONFIG.overture.libs.map(u => import(u)));
+  const Pbf = pbfMod.default || pbfMod;
+  const pm = new PMTiles(CONFIG.overture.base + CONFIG.overture.release + '/buildings.pmtiles');
+  const z = 14;
+  const tx = lon => Math.floor((lon + 180) / 360 * 2 ** z);
+  const ty = lat => { const r = lat * Math.PI / 180; return Math.floor((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * 2 ** z); };
+  const seen = new Map();
+  const jobs = [];
+  for (let x = tx(box.west); x <= tx(box.east); x++) for (let y = ty(box.north); y <= ty(box.south); y++) jobs.push([x, y]);
+  if (jobs.length > 64) throw new Error(`area too big for Overture (${jobs.length} tiles)`);
+  for (const [x, y] of jobs) {
+    const t = await pm.getZxy(z, x, y);
+    if (!t) continue;
+    const layer = new VectorTile(new Pbf(new Uint8Array(t.data))).layers.building;
+    if (!layer) continue;
+    for (let i = 0; i < layer.length; i++) {
+      const f = layer.feature(i), g = f.toGeoJSON(x, y, z);
+      const feat = overtureFeature(f.properties, g.geometry.coordinates);
+      if (!feat.ring.length) continue;
+      const c = exactCentroid(feat.ring);
+      if (c[0] < box.south || c[0] > box.north || c[1] < box.west || c[1] > box.east) continue;
+      seen.set(feat.id || (x + '/' + y + '/' + i), feat);   // a building cut by a tile edge appears in both tiles
+    }
+  }
+  return [...seen.values()];
+}
+// The lat/lon box around a route plus the scan radius.
+function scanBox(latlngs, radius) {
+  const lats = latlngs.map(p => p[0]), lons = latlngs.map(p => p[1]);
+  const mid = (Math.min(...lats) + Math.max(...lats)) / 2;
+  const dLat = radius / 111320, dLon = radius / (111320 * Math.cos(mid * Math.PI / 180));
+  return { south: Math.min(...lats) - dLat, north: Math.max(...lats) + dLat, west: Math.min(...lons) - dLon, east: Math.max(...lons) + dLon };
+}
+
+// ---- aerial colours ----
+async function sampleColours() {
+  if (!scanResult) return;
+  const U = makeUnprojector(scanResult.meta.origin.lat, scanResult.meta.origin.lon);
+  const bb = scanResult.meta.bbox;
+  const sw = U([bb.minX, bb.minY]), ne = U([bb.maxX, bb.maxY]);
+  const plan = planImageTiles({ south: sw[0], west: sw[1], north: ne[0], east: ne[1] }, CONFIG.imagery.metresPerPixel, CONFIG.imagery.maxWidth, CONFIG.imagery.maxHeight);
+  els.sampleBtn.disabled = true;
+  const tiles = [];
+  try {
+    for (let i = 0; i < plan.length; i++) {
+      const t = plan[i];
+      setStatus(`Downloading aerial photo ${i + 1} of ${plan.length}…`);
+      const url = `${CONFIG.imagery.service}/exportImage?bbox=${t.west},${t.south},${t.east},${t.north}&bboxSR=4326&imageSR=4326&size=${t.width},${t.height}&format=jpgpng&f=image`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`the imagery server replied ${res.status}`);
+      const bmp = await createImageBitmap(await res.blob());
+      const cv = new OffscreenCanvas(bmp.width, bmp.height), g = cv.getContext('2d');
+      g.drawImage(bmp, 0, 0);
+      tiles.push({ box: t, image: g.getImageData(0, 0, bmp.width, bmp.height) });
+    }
+    setStatus('Reading colours…');
+    const n = applyColourSamples(scanResult, tiles, makeUnprojector, { metresPerPixel: CONFIG.imagery.metresPerPixel });
+    drawPreview(scanPreview); showStats();
+    setStatus(`Colours sampled from the aerial photo: ${n.buildings} roofs and ${n.areas} areas. Export JSON to save them.`, 'ok');
+  } catch (e) {
+    const why = e instanceof TypeError ? "couldn't reach the Queensland imagery server (offline or blocked)" : e.message;
+    setStatus('Colour sampling failed: ' + why + '. Your scan is unchanged.', 'err');
+  } finally { els.sampleBtn.disabled = false; }
+}
+
+// ---- ground image ----
+function drawGroundImage(out, plan, useSampled) {
+  const cv = document.createElement('canvas'); cv.width = plan.width; cv.height = plan.height;
+  const g = cv.getContext('2d');
+  const X = x => (x - plan.minX) / plan.metresPerPixel, Y = y => (plan.maxY - y) / plan.metresPerPixel;
+  const path = rings => { g.beginPath(); for (const r of rings) { r.forEach((p, i) => i ? g.lineTo(X(p[0]), Y(p[1])) : g.moveTo(X(p[0]), Y(p[1]))); g.closePath(); } };
+  g.fillStyle = groundColour('ground'); g.fillRect(0, 0, cv.width, cv.height);
+  for (const a of out.areas.slice().sort((p, q) => groundDrawOrder(p.kind) - groundDrawOrder(q.kind))) {
+    g.fillStyle = (useSampled && a.sampledColour) || groundColour(a.kind);
+    g.globalAlpha = ZONING_KINDS.test(a.kind) ? 0.35 : 1;
+    path([a.polygon, ...(a.holes || [])]); g.fill('evenodd');
+  }
+  g.globalAlpha = 1; g.lineCap = 'round'; g.lineJoin = 'round';
+  const lines = (list, colour, width) => { for (const l of list) { g.strokeStyle = colour(l); g.lineWidth = Math.max(1, width(l) / plan.metresPerPixel); g.beginPath(); l.points.forEach((p, i) => i ? g.lineTo(X(p[0]), Y(p[1])) : g.moveTo(X(p[0]), Y(p[1]))); g.stroke(); } };
+  lines(out.waterways, () => groundColour('water'), () => 3);
+  lines(out.roads.filter(r => !r.tunnel), r => /footway|path|cycleway|steps|pedestrian|pier/.test(r.kind) ? groundColour('path') : groundColour('road'), r => r.width);
+  lines(out.railways || [], () => groundColour('rail'), () => 3);
+  for (const b of out.buildings) {
+    g.fillStyle = (useSampled && b.sampledRoofColour) || groundColour('building');
+    path([b.footprint, ...(b.holes || [])]); g.fill('evenodd');
+  }
+  return cv;
+}
+function exportGroundImage() {
+  if (!scanResult) return;
+  const plan = groundImagePlan(scanResult.meta.bbox, 1, 4096);
+  const useSampled = !!scanResult.meta.imagery;
+  const cv = drawGroundImage(scanResult, plan, useSampled);
+  const safe = (scanResult.meta.name || 'route').replace(/[^a-z0-9_-]+/gi, '-').toLowerCase();
+  const file = `kartmap_${safe}_ground.png`;
+  scanResult.meta.groundImage = { file, ...plan, colours: useSampled ? 'aerial (sampled)' : 'flat palette',
+    note: 'Top-left pixel = (minX, maxY). One pixel = metresPerPixel metres. North is up.' };
+  cv.toBlob(blob => {
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = file; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    setStatus(`Ground image saved (${plan.width}×${plan.height} px, ${plan.metresPerPixel} m per pixel, ${useSampled ? 'aerial colours' : 'flat colours'}). Export JSON again so the file knows where the image goes.`, 'ok');
+  }, 'image/png');
+}
+
+// ---- landmark photos ----
+async function findLandmarkPhotos() {
+  if (!scanResult || !scanResult.landmarks.length) return;
+  els.photosBtn.disabled = true;
+  const list = scanResult.landmarks.slice(0, 60);
+  let done = 0, found = 0;
+  const api = (base, params) => fetch(base + '?' + new URLSearchParams({ format: 'json', origin: '*', ...params })).then(r => { if (!r.ok) throw new Error('replied ' + r.status); return r.json(); });
+  const one = async l => {
+    let titles = [], from = 'search';
+    if (l.wikidata) {
+      const j = await api('https://www.wikidata.org/w/api.php', { action: 'wbgetclaims', entity: l.wikidata, property: 'P18' });
+      titles = ((j.claims && j.claims.P18) || []).map(c => 'File:' + c.mainsnak.datavalue.value).slice(0, 3);
+      if (titles.length) from = 'wikidata';
+    }
+    if (!titles.length) {
+      const j = await api('https://commons.wikimedia.org/w/api.php', { action: 'query', list: 'search', srnamespace: '6', srlimit: '3', srsearch: l.name });
+      titles = ((j.query && j.query.search) || []).map(s => s.title);
+    }
+    if (!titles.length) return;
+    const info = await api('https://commons.wikimedia.org/w/api.php', { action: 'query', prop: 'imageinfo', iiprop: 'url|extmetadata', iiurlwidth: '640', titles: titles.join('|') });
+    l.photos = parseCommonsImageInfo(info).slice(0, 3);
+    l.photosFrom = from;   // 'wikidata' = the landmark's own photo; 'search' = found by name, check it's the right place
+    if (l.photos.length) found++;
+  };
+  try {
+    const queue = list.slice();
+    const worker = async () => { while (queue.length) { const l = queue.shift(); try { await one(l); } catch (e) { /* skip this one */ } done++; setStatus(`Finding landmark photos… ${done} of ${list.length}`); } };
+    await Promise.all([worker(), worker(), worker(), worker()]);
+    showStats();
+    setStatus(`Found reference photos for ${found} of ${list.length} landmarks (open the landmark list). Export JSON to save the links.`, found ? 'ok' : 'warn');
+  } finally { els.photosBtn.disabled = false; }
+}
+
+els.sampleBtn.onclick = sampleColours;
+els.photosBtn.onclick = findLandmarkPhotos;
+els.groundBtn.onclick = exportGroundImage;
 
 // Preview colours by area type. Anything not listed is drawn as generic green.
 const AREA_COLOURS = {
@@ -1674,6 +2042,12 @@ function drawPreview(preview) {
   if (!scanResult) return;
   const U = makeUnprojector(scanResult.meta.origin.lat, scanResult.meta.origin.lon);
   const LL = rings => rings.map(r => r.map(U));
+  // v8.3: after "Sample colours", buildings and areas show the colour read from the aerial photo.
+  const sampled = new Map();
+  if (scanResult.meta.imagery) {
+    for (const b of scanResult.buildings) if (b.sampledRoofColour) sampled.set(b.id, b.sampledRoofColour);
+    for (const a of scanResult.areas) if (a.sampledColour) sampled.set(a.id, a.sampledColour);
+  }
   // Faint zoning first, then areas, then everything else on top.
   // Race layout on top of everything (v8.1).
   const order = f => f.cat === 'area' ? (FAINT.has(f.kind) ? 0 : 1) : /^(centerline|checkpoint|gridslot|shortcut)$/.test(f.cat) ? 3 : 2;
@@ -1681,9 +2055,9 @@ function drawPreview(preview) {
     if (f.cat === 'building') {
       // Buildings blocking the track are red (v8.1).
       if (f.onTrack) L.polygon(LL(f.xy), { color: '#d00000', weight: 2, fillColor: '#ff4d4d', fillOpacity: 0.85 }).bindTooltip('Blocks the track').addTo(featureLayer);
-      else L.polygon(LL(f.xy), { color: '#495057', weight: 1, fillColor: '#6c757d', fillOpacity: 0.7 }).addTo(featureLayer);
+      else L.polygon(LL(f.xy), { color: '#495057', weight: 1, fillColor: sampled.get(f.id) || '#6c757d', fillOpacity: sampled.has(f.id) ? 0.9 : 0.7 }).addTo(featureLayer);
     }
-    else if (f.cat === 'part') L.polygon(LL(f.xy), { color: '#212529', weight: 1, fillColor: '#495057', fillOpacity: 0.8 }).bindTooltip('building part').addTo(featureLayer);
+    else if (f.cat === 'part') L.polygon(LL(f.xy), { color: '#212529', weight: 1, fillColor: sampled.get(f.id) || '#495057', fillOpacity: 0.8 }).bindTooltip('building part').addTo(featureLayer);
     else if (f.cat === 'railway') L.polyline(f.xy.map(U), { color: '#212529', weight: 3, opacity: 0.9, dashArray: '8 4' }).bindTooltip('railway').addTo(featureLayer);
     else if (f.cat === 'marking') L.circleMarker(U(f.xy), { radius: 3, color: '#212529', weight: 1, fillColor: '#ffffff', fillOpacity: 1 }).bindTooltip(f.kind.replace('_', ' ')).addTo(featureLayer);
     else if (f.cat === 'centerline') L.polyline(f.xy.map(U), { color: '#ffffff', weight: 1.5, opacity: 0.9, dashArray: '3 5', interactive: false }).addTo(featureLayer);
@@ -1691,8 +2065,8 @@ function drawPreview(preview) {
     else if (f.cat === 'gridslot') L.circleMarker(U(f.xy), { radius: 2.5, weight: 0, fillColor: '#ffffff', fillOpacity: 1 }).bindTooltip('Start grid ' + f.slot).addTo(featureLayer);
     else if (f.cat === 'shortcut') L.polyline(f.xy.map(U), { color: '#d63384', weight: 4, opacity: 0.85 }).bindTooltip(`Shortcut: saves ${Math.round(f.saving)} m`).addTo(featureLayer);
     else if (f.cat === 'area') {
-      const c = AREA_COLOURS[f.kind] || '#52b788';
-      L.polygon(LL(f.xy), { color: c, weight: 1, fillColor: c, fillOpacity: FAINT.has(f.kind) ? 0.12 : 0.45 })
+      const c = AREA_COLOURS[f.kind] || '#52b788', s = !FAINT.has(f.kind) && sampled.get(f.id);
+      L.polygon(LL(f.xy), { color: c, weight: 1, fillColor: s || c, fillOpacity: FAINT.has(f.kind) ? 0.12 : s ? 0.8 : 0.45 })
         .bindTooltip(f.kind).addTo(featureLayer);
     }
     else if (f.cat === 'road') {
@@ -1742,7 +2116,13 @@ function showStats() {
     (q.notes.length ? `<ul style="margin:4px 0 0;padding-left:18px">${q.notes.map(n => `<li>${esc(n)}</li>`).join('')}</ul>` : '') + `</details>` : '';
   els.stats.innerHTML = rows.map(([k, v]) => `<div><span>${k}</span><b>${v}</b></div>`).join('') + qHtml +
     (lm.length ? `<details style="margin-top:6px"><summary>Landmarks to model by hand (${lm.length})</summary>` +
-      `<ul style="margin:4px 0 0;padding-left:18px">${lm.map(l => `<li>${esc(l.name)} <span class="hint">(${esc(l.kind)})</span></li>`).join('')}</ul></details>` : '');
+      `<ul style="margin:4px 0 0;padding-left:18px">${lm.map(l => `<li>${esc(l.name)} <span class="hint">(${esc(l.kind)})</span>${photoHtml(l, esc)}</li>`).join('')}</ul></details>` : '');
+}
+// v8.3: small reference photos under a landmark, each linking to its Commons page (author + licence there).
+function photoHtml(l, esc) {
+  if (!l.photos || !l.photos.length) return '';
+  const warn = l.photosFrom === 'search' ? '<div class="hint">Found by name search, check it is the right place.</div>' : '';
+  return `<div class="lm-photos">${l.photos.map(p => `<a href="${esc(p.page)}" target="_blank" rel="noopener" title="${esc((p.author || '') + ' · ' + (p.licence || ''))}"><img src="${esc(p.thumb)}" alt="${esc(l.name)}" loading="lazy"></a>`).join('')}</div>${warn}`;
 }
 
 // ---- export / load ----
