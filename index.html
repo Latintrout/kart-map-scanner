@@ -104,7 +104,7 @@
     <h2>4. Result</h2>
     <div id="stats" class="hint">Nothing scanned yet.</div>
     <div class="legend hint" style="margin-top:6px">
-      <span style="background:#6c757d"></span>building<span style="background:#f1faee;border:1px solid #999"></span>road<span style="background:#52b788"></span>green<span style="background:#4ea8de"></span>water
+      <span style="background:#6c757d"></span>building<span style="background:#343a40"></span>road<span style="background:#e76f51"></span>bridge<span style="background:#7f4f24"></span>fence<span style="background:#52b788"></span>green<span style="background:#4ea8de"></span>water<span style="background:#9b2226;border-radius:50%"></span>landmark<span style="background:#ff4d4d"></span>blocks track<span style="background:#d63384"></span>shortcut<span style="background:#00b4d8;border-radius:50%"></span>checkpoint
     </div>
     <div class="row" style="margin-top:8px">
       <button id="exportBtn" class="primary" disabled>Export JSON</button>
@@ -124,7 +124,7 @@
 // ======================================================================
 // PURE-START  (no browser or Leaflet code in here, so it can be tested on its own)
 // ======================================================================
-const FORMAT_VERSION = 2;
+const FORMAT_VERSION = 1;
 
 // Fallbacks when OSM doesn't say how wide a road is (metres).
 const DEFAULT_ROAD_WIDTH = {
@@ -178,7 +178,9 @@ function makeProjector(lat0, lon0) {
 function roadWidth(t) {
   const w = parseNum(t.width); if (w) return [w, 'osm'];
   const l = parseNum(t.lanes); if (l) return [round2(l * 3.2), 'lanes'];
-  return [DEFAULT_ROAD_WIDTH[t.highway] ?? 5, 'default'];
+  const w0 = DEFAULT_ROAD_WIDTH[t.highway] ?? 5;
+  if (/^(yes|1|true|-1)$/.test(t.oneway || '') && /^(residential|service|unclassified|living_street|tertiary)$/.test(t.highway || '')) return [round2(w0 * 0.6), 'default'];
+  return [w0, 'default'];
 }
 function buildingHeight(t) {
   const h = parseNum(t.height); if (h) return [h, 'osm'];
@@ -186,72 +188,124 @@ function buildingHeight(t) {
   if (lv) return [round2(lv * 3 + (parseNum(t['roof:levels']) || 0) * 2), 'levels'];
   return [DEFAULT_BUILDING_HEIGHT[t.building] ?? 6, 'default'];
 }
-function pointKind(t) {
-  if (t.natural === 'tree') return 'tree';
-  if (t.highway) return t.highway;
-  if (t.power === 'pole') return 'power_pole';
-  if (t.amenity) return t.amenity;
-  if (t.attraction) return t.attraction;
-  if (t.tourism) return t.tourism;
-  if (t.leisure) return t.leisure;
-  if (t.man_made) return t.man_made;
-  return 'other';
+// ---- small objects ("props") ----
+// Which small OSM objects become props, by tag. Shops, offices and the like are left out:
+// they're businesses inside buildings, not things you'd see standing on the street.
+const PROP_TAGS = {
+  natural: /^(tree|rock|stone|shrub|tree_stump)$/,
+  highway: /^(street_lamp|traffic_signals|stop|give_way|bus_stop|speed_camera|milestone)$/,   // crossings are road markings (v8.1)
+  amenity: /^(bench|waste_basket|recycling|fountain|drinking_water|bicycle_parking|post_box|telephone|vending_machine|clock|shelter|bbq|charging_station|parcel_locker)$/,
+  leisure: /^(picnic_table|fitness_station|firepit|outdoor_seating)$/,
+  playground: /./,
+  tourism: /^(artwork|information|viewpoint|picnic_site)$/,
+  historic: /./,
+  man_made: /^(flagpole|mast|tower|chimney|street_cabinet|surveillance|obelisk|crane|water_tap|antenna|lamp|water_tower|storage_tank)$/,
+  barrier: /^(bollard|gate|lift_gate|block|cycle_barrier|stile|turnstile|planter|swing_gate)$/,
+  power: /^(pole|tower)$/,
+  emergency: /^(fire_hydrant|phone|defibrillator)$/,
+  advertising: /./
+};
+// Returns { group, kind } for a prop, or null if this node isn't one.
+function propKind(t) {
+  for (const [key, re] of Object.entries(PROP_TAGS)) {
+    const v = t[key];
+    if (v && re.test(v)) {
+      if (key === 'power') return { group: 'power', kind: 'power_' + v };   // "power_pole" as in v1-v7
+      return { group: key, kind: v };
+    }
+  }
+  return null;
 }
+// Kept for older code paths: the kind of a prop node, or 'other'.
+function pointKind(t) { const p = propKind(t); return p ? p.kind : 'other'; }
+
+// ---- landmarks ----
+// Named things worth modelling by hand: attractions, galleries, monuments, fountains,
+// and named buildings/areas that have a Wikipedia/Wikidata entry.
+const LANDMARK_TAGS = {
+  tourism: /^(attraction|artwork|museum|gallery|viewpoint|theme_park|zoo|aquarium)$/,
+  historic: /./,
+  man_made: /^(tower|obelisk|lighthouse|water_tower|windmill)$/,
+  amenity: /^(fountain|theatre|arts_centre|place_of_worship|townhall|library|planetarium|events_venue|conference_centre|cinema|clock)$/,
+  leisure: /^(stadium|water_park|marina|bandstand)$/
+};
+// Returns the landmark "kind" if this element is a landmark, else null. Unnamed things never are.
+function extractLandmark(t) {
+  if (!t.name) return null;
+  for (const [key, re] of Object.entries(LANDMARK_TAGS)) if (t[key] && re.test(t[key])) return t[key];
+  // A Wikipedia/Wikidata link counts, except on shops and eateries: there it's usually the
+  // brand's page (live test found "Max Brenner Chocolate Bar" listed as a landmark).
+  const commercial = t.shop || t.office || t.craft || t.brand ||
+    /^(cafe|restaurant|fast_food|bar|pub|ice_cream|food_court|bank|pharmacy|fuel)$/.test(t.amenity || '');
+  if ((t.wikidata || t.wikipedia) && !commercial) return t.building ? 'building' : (t.leisure || t.natural || t.landuse || t.amenity || 'place');
+  return null;
+}
+
 function areaKind(t) {
-  return t.leisure || t.landuse || t.natural || t.amenity || t.man_made ||
+  if (t.railway === 'platform' || t.public_transport === 'platform') return 'platform';
+  return t.leisure || t.landuse || t.natural || t.amenity || t.man_made || t.tourism || t.historic ||
     (t.highway ? 'pedestrian' : null) || 'area';
 }
-// v2: the look of a thing, when OSM says. Only keys that are set are added.
-// Colours are OSM's own text: a name ("red") or a hex code ("#c0c0c0").
-function pick(t, keys) {
-  const o = {};
-  for (const [from, to, num] of keys) {
-    if (t[from] == null || t[from] === '') continue;
-    const v = num ? parseNum(t[from]) : t[from];
-    if (v != null) o[to] = v;
+
+// Extra building details OSM often has. Only fields that are present are added.
+function buildingLooks(t) {
+  const out = {};
+  if (t['roof:shape']) out.roofShape = t['roof:shape'];
+  if (t['roof:colour']) out.roofColour = t['roof:colour'];
+  if (t['building:colour']) out.colour = t['building:colour'];
+  if (t['building:material']) out.material = t['building:material'];
+  const lv = parseNum(t['building:levels']); if (lv) out.levels = lv;
+  const mh = parseNum(t.min_height); if (mh) out.minHeight = mh;   // e.g. a walkway raised off the ground
+  const ml = parseNum(t['building:min_level']); if (!mh && ml) out.minHeight = round2(ml * 3);   // starts at this floor
+  return out;
+}
+// Extra road details: bridges, tunnels, which level they're on, surface.
+function roadExtras(t) {
+  const out = {};
+  if (t.bridge && t.bridge !== 'no') out.bridge = true;
+  if (t.tunnel && t.tunnel !== 'no') out.tunnel = true;
+  const layer = parseInt(t.layer, 10);
+  if (isFinite(layer) && layer !== 0) out.layer = layer;
+  if (t.surface) out.surface = t.surface;
+  const lanes = parseNum(t.lanes); if (lanes) out.lanes = lanes;
+  // v8.1: one-way, footpaths, crossings, slope direction
+  if (/^(yes|1|true)$/.test(t.oneway || '')) out.oneway = true;
+  else if (/^(-1|reverse)$/.test(t.oneway || '')) out.oneway = 'reverse';   // one-way against the drawing direction
+  const sw = t.sidewalk || (t['sidewalk:both'] && t['sidewalk:both'] !== 'no' ? 'both' : null) ||
+    ((t['sidewalk:left'] && t['sidewalk:left'] !== 'no') ? ((t['sidewalk:right'] && t['sidewalk:right'] !== 'no') ? 'both' : 'left') :
+     ((t['sidewalk:right'] && t['sidewalk:right'] !== 'no') ? 'right' : null));
+  if (sw) out.sidewalk = sw;
+  if (t.footway === 'crossing' || t.cycleway === 'crossing' || t.path === 'crossing') out.crossing = crossingStyle(t);
+  if (t.incline) {
+    if (/^(up|down)$/.test(t.incline)) out.incline = t.incline;     // relative to the direction the line is drawn
+    else { const n = parseFloat(String(t.incline).replace('%', '')); if (isFinite(n)) out.incline = n; }   // percent slope
   }
-  return o;
+  return out;
 }
-const BUILDING_LOOK = [
-  ['building:colour', 'colour'], ['roof:colour', 'roofColour'], ['building:material', 'material'],
-  ['roof:material', 'roofMaterial'], ['roof:shape', 'roofShape'], ['roof:height', 'roofHeight', true],
-  ['building:levels', 'levels', true], ['min_height', 'minHeight', true]
-];
-const POINT_LOOK = [
-  ['name', 'name'], ['species', 'species'], ['genus', 'genus'], ['leaf_type', 'leafType'],
-  ['leaf_cycle', 'leafCycle'], ['height', 'height', true], ['diameter_crown', 'canopy', true],
-  ['artwork_type', 'artworkType'], ['colour', 'colour']
-];
-function buildingFields(t) {
-  const look = pick(t, BUILDING_LOOK);
-  // A part that starts at an upper floor (an overhang, a tower on a podium).
-  if (look.minHeight == null && parseNum(t['building:min_level'])) look.minHeight = round2(parseNum(t['building:min_level']) * 3);
-  return look;
+
+// How much time/memory to ask the server for. Small scans ask small (busy servers refuse
+// big requests). Bigger scans need more or they'd run out. Corridor area = route × 2 radii.
+function serverBudget(routeLengthM, radius) {
+  const areaKm2 = (2 * radius * routeLengthM + Math.PI * radius * radius) / 1e6;
+  const factor = Math.max(1, Math.ceil(areaKm2 / 2));            // one 64 MB step per 2 km²
+  return {
+    areaKm2: round2(areaKm2),
+    timeout: Math.min(120, 25 + 15 * (factor - 1)),
+    maxsize: Math.min(536870912, 67108864 * factor)                 // 64 MB steps, capped at 512 MB
+  };
 }
-// v2: bridges, tunnels and stacking order on roads, paths and railways.
-function lineFields(t) {
-  const o = {};
-  if (t.bridge && t.bridge !== 'no') o.bridge = true;
-  if (t.tunnel && t.tunnel !== 'no') o.tunnel = true;
-  const layer = parseInt(t.layer, 10); if (isFinite(layer) && layer !== 0) o.layer = layer;
-  if (t.surface) o.surface = t.surface;
-  if (t.lit === 'yes') o.lit = true;
-  return o;
-}
+
 function buildQuery(routeLatLngs, radius) {
   const poly = downsample(routeLatLngs, 20).map(p => p[0].toFixed(6) + ',' + p[1].toFixed(6)).join(',');
+  const b = serverBudget(routeLength(routeLatLngs), radius);
   // Grab the ways (.w) and nodes (.n) near the route once each, then filter those sets by tag.
-  // [timeout] and [maxsize] are RESERVATIONS: Overpass queues requests by how much time and
-  // memory they ask for, and refuses big ones when busy ("dispatcher timeout"). A route scan
-  // needs a few seconds and a few MB, so ask small. Tested 2026-10-14: 60 s / default memory got
-  // refused 2 out of 3 times; 25 s / 64 MB worked 4 out of 4.
+  // [timeout] and [maxsize] are RESERVATIONS: Overpass queues requests by how much they ask for
+  // and refuses big ones when busy. Tested 2026-10-14: 60 s / default memory got refused 2 of 3
+  // times; 25 s / 64 MB worked 4 of 4. serverBudget() only asks for more on long routes.
   //
-  // Multipolygons (v7): big or holey shapes (the South Bank lagoon, the river, parklands) are
-  // stored as RELATIONS made of several ways. Finding relations with "around" is very slow (the
-  // server builds every big boundary's full shape just to test distance: that caused the v1-v3
-  // timeouts). "rel(bw.w)" instead asks "which relations use the ways we already found?",
-  // which is a cheap lookup. Their full shapes come back and get trimmed to the scan area later.
-  return `[out:json][timeout:25][maxsize:67108864];
+  // Multipolygons: "rel(bw.w)" asks "which relations use the ways we already found?", which
+  // is cheap. Never find relations with "around" (very slow: it caused the v1-v3 timeouts).
+  return `[out:json][timeout:${b.timeout}][maxsize:${b.maxsize}];
 way(around:${radius},${poly})->.w;
 node(around:${radius},${poly})->.n;
 rel(bw.w)["type"="multipolygon"]->.r;
@@ -263,33 +317,58 @@ rel(bw.w)["type"="multipolygon"]->.r;
   way.w["natural"];
   way.w["amenity"];
   way.w["waterway"];
+  way.w["barrier"];
+  way.w["man_made"];
+  way.w["tourism"];
+  way.w["historic"];
+  way.w["railway"];
   way.w["building:part"];
-  way.w["barrier"~"^(hedge|wall|fence|retaining_wall|guard_rail|city_wall|handrail|kerb|bollard)$"];
-  way.w["man_made"~"^(bridge|pier|breakwater|groyne|tower|water_tower|lighthouse)$"];
-  way.w["tourism"~"^(attraction|artwork|museum|gallery|zoo|theme_park)$"];
-  way.w["attraction"];
-  way.w["railway"~"^(rail|light_rail|tram|subway|narrow_gauge|monorail|funicular)$"];
-  rel.r["building:part"];
-  rel.r["man_made"];
   rel.r["building"];
   rel.r["leisure"];
   rel.r["landuse"];
   rel.r["natural"];
   rel.r["amenity"];
-  node.n["natural"="tree"];
-  node.n["highway"~"^(street_lamp|traffic_signals|stop|give_way|bus_stop)$"];
-  node.n["power"="pole"];
-  node.n["amenity"~"^(bench|waste_basket|fountain|drinking_water|toilets|bicycle_parking|cafe|restaurant|fast_food|ice_cream|bar|pub|telephone|post_box|shelter|bbq|clock|vending_machine|parking_meter)$"];
-  node.n["tourism"~"^(attraction|artwork|viewpoint|information|picnic_site)$"];
-  node.n["attraction"];
-  node.n["leisure"~"^(picnic_table|playground|fitness_station|bandstand)$"];
-  node.n["man_made"~"^(flagpole|mast|tower|lighthouse|surveillance)$"];
-  node.n["barrier"~"^(bollard|gate)$"];
+  rel.r["man_made"];
+  rel.r["tourism"];
+  rel.r["building:part"];
+  node.n["natural"];
+  node.n["highway"];
+  node.n["amenity"];
+  node.n["leisure"];
+  node.n["playground"];
+  node.n["tourism"];
+  node.n["historic"];
+  node.n["man_made"];
+  node.n["barrier"];
+  node.n["power"];
+  node.n["emergency"];
+  node.n["advertising"];
 );
 out geom;`;
 }
 
-// ---- shape helpers (v7) ----
+// Turns a list of failed tries into a plain explanation.
+// Each try: { host, status?, kind?: 'timeout'|'unreadable'|'error', seconds?, message? }
+function explainScanFailure(tries) {
+  const statuses = tries.map(t => t.status).filter(Boolean);
+  const details = tries.map(t => `${t.host}: ${t.status ? 'replied ' + t.status : t.kind === 'timeout' ? 'no answer after ' + Math.round(t.seconds || 0) + ' s' : t.kind === 'unreadable' ? 'refused (no readable reply)' : (t.message || 'failed')}`).join(' | ');
+  const statusLink = 'Check https://overpass-api.de/api/status (when it lists "slots available", it\'s back).';
+  let why;
+  if (statuses.some(s => s === 502 || s === 503)) {
+    why = `The map-data server is down (it replied ${statuses.find(s => s === 502 || s === 503)}: a fault on their side, not your tool or internet). ${statusLink} Your route is saved; scan again later.`;
+  } else if (statuses.includes(429)) {
+    why = 'Too many scans in a short time (the server\'s rate limit). Wait a minute, then scan again.';
+  } else if (tries.length && tries.every(t => t.kind === 'unreadable' && (t.seconds || 0) < 5)) {
+    why = `Every map-data server refused straight away. That almost always means they're down or overloaded (their side). ${statusLink} Your route is saved; scan again later.`;
+  } else if (tries.some(t => t.kind === 'timeout' || t.status === 504)) {
+    why = 'The map-data servers are busy and didn\'t finish in time. Wait a few minutes and retry, or use a smaller scan radius or a shorter route.';
+  } else {
+    why = 'The scan failed on every server. Wait a few minutes and retry.';
+  }
+  return `${why} (Details: ${details})`;
+}
+
+// ---- shape helpers ----
 const samePt = (a, b) => Math.abs(a[0] - b[0]) < 1e-7 && Math.abs(a[1] - b[1]) < 1e-7;
 
 // Multipolygon pieces arrive as separate lines. Join them end to end into closed rings.
@@ -341,12 +420,6 @@ function clipRect(poly, b) {
   return res.length >= 3 ? res : [];
 }
 
-function centroid(poly) {
-  let x = 0, y = 0;
-  for (const p of poly) { x += p[0]; y += p[1]; }
-  return [x / poly.length, y / poly.length];
-}
-
 // Is point p inside polygon poly? (ray casting)
 function pointInPoly(p, poly) {
   let inside = false;
@@ -375,18 +448,359 @@ function pointsAlong(xy, step) {
   return out;
 }
 
+// Average of a shape's corners: good enough to place a landmark marker.
+function centroid(pts) {
+  const s = pts.reduce((a, p) => [a[0] + p[0], a[1] + p[1]], [0, 0]);
+  return [round2(s[0] / pts.length), round2(s[1] / pts.length)];
+}
+
+// ======================================================================
+// v8.1 helpers: trees, crossings, geometry, smoothing, race layout
+// ======================================================================
+const RAIL_KINDS = /^(rail|light_rail|tram|subway|narrow_gauge|monorail|funicular|miniature)$/;
+const TREE_GROUPS = [
+  ['palm', /^(archontophoenix|livistona|washingtonia|phoenix|syagrus|roystonea|cocos|howea|dypsis|wodyetia|caryota|chamaedorea|trachycarpus|butia|bismarckia|licuala|ptychosperma|veitchia|carpentaria|rhapis|sabal)\b/i],
+  ['eucalypt', /^(eucalyptus|corymbia|angophora)\b/i],
+  ['fig', /^ficus\b/i],
+  ['conifer', /^(araucaria|pinus|agathis|callitris|cupressus|podocarpus|juniperus|taxodium|cedrus|wollemia)\b/i]
+];
+// Tree details for picking the right model: type (palm/eucalypt/fig/conifer/broadleaf),
+// species name, and height/crown size when mapped. No type = not enough info (game picks a default).
+function treeInfo(t) {
+  const out = {};
+  const sci = String(t.species || t.genus || t.taxon || '').trim();
+  const en = String(t['species:en'] || t['taxon:en'] || '').toLowerCase();
+  if (sci) out.species = sci;
+  for (const [type, re] of TREE_GROUPS) if (re.test(sci)) { out.treeType = type; break; }
+  if (!out.treeType) {
+    if (/palm/.test(en)) out.treeType = 'palm';
+    else if (/gum|eucalypt/.test(en)) out.treeType = 'eucalypt';
+    else if (/\bfig\b/.test(en)) out.treeType = 'fig';
+    else if (/pine|conifer|cypress/.test(en) || t.leaf_type === 'needleleaved') out.treeType = 'conifer';
+    else if (t.leaf_type === 'broadleaved' || sci) out.treeType = 'broadleaf';
+  }
+  const h = parseNum(t.height); if (h) out.height = h;
+  const c = parseNum(t.diameter_crown); if (c) out.canopy = c;
+  return out;
+}
+// What a pedestrian crossing looks like painted on the road.
+function crossingStyle(t) {
+  const m = t['crossing:markings'], c = t.crossing;
+  if (m === 'zebra' || m === 'zebra:double' || c === 'zebra') return 'zebra';
+  if (c === 'traffic_signals' || t['crossing:signals'] === 'yes') return 'signals';
+  if (c === 'unmarked' || m === 'no') return 'unmarked';
+  if (c === 'marked' || c === 'uncontrolled' || (m && m !== 'no')) return 'marked';
+  return 'crossing';
+}
+const RESIDENTIAL_KINDS = /^(house|detached|bungalow|semidetached_house|terrace|residential|hut|cabin|farm|static_caravan)$/;
+const SHED_KINDS = /^(shed|garage|garages|carport|hut|allotment_house)$/;
+// Best guess at a roof shape when OSM doesn't say: small homes hipped (common in Brisbane),
+// small sheds gabled, everything else flat. Always marked as a guess.
+function guessRoof(kind, area, height) {
+  if (RESIDENTIAL_KINDS.test(kind || '') && area < 400 && height <= 12) return 'hipped';
+  if (SHED_KINDS.test(kind || '') && area < 150) return 'gabled';
+  return 'flat';
+}
+function polygonArea(poly) {
+  let s = 0;
+  for (let i = 0; i < poly.length; i++) { const a = poly[i], b = poly[(i + 1) % poly.length]; s += a[0] * b[1] - b[0] * a[1]; }
+  return Math.abs(s / 2);
+}
+
+// ---- distances ----
+function distPointSeg(p, a, b) {
+  const dx = b[0] - a[0], dy = b[1] - a[1], L = dx * dx + dy * dy;
+  let t = L ? ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / L : 0;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy);
+}
+function segsCross(a, b, c, d) {
+  const o = (p, q, r) => Math.sign((q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]));
+  return o(a, b, c) !== o(a, b, d) && o(c, d, a) !== o(c, d, b);
+}
+function distSegSeg(a, b, c, d) {
+  if (segsCross(a, b, c, d)) return 0;
+  return Math.min(distPointSeg(a, c, d), distPointSeg(b, c, d), distPointSeg(c, a, b), distPointSeg(d, a, b));
+}
+// Finds the nearest distance from shapes/lines/points to the track line, fast:
+// the track's segments are put in 25 m grid cells, and only nearby cells are checked.
+function makeTrackIndex(line) {
+  const CELL = 25, grid = new Map();
+  const segs = [];
+  for (let i = 1; i < line.length; i++) segs.push([line[i - 1], line[i]]);
+  segs.forEach((s, i) => {
+    const x0 = Math.floor(Math.min(s[0][0], s[1][0]) / CELL), x1 = Math.floor(Math.max(s[0][0], s[1][0]) / CELL);
+    const y0 = Math.floor(Math.min(s[0][1], s[1][1]) / CELL), y1 = Math.floor(Math.max(s[0][1], s[1][1]) / CELL);
+    for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) {
+      const k = x + ',' + y; if (!grid.has(k)) grid.set(k, []); grid.get(k).push(i);
+    }
+  });
+  // Segments in cells within `reach` metres of a box.
+  const near = (minX, minY, maxX, maxY, reach) => {
+    const out = new Set();
+    for (let x = Math.floor((minX - reach) / CELL); x <= Math.floor((maxX + reach) / CELL); x++)
+      for (let y = Math.floor((minY - reach) / CELL); y <= Math.floor((maxY + reach) / CELL); y++) {
+        const g = grid.get(x + ',' + y); if (g) g.forEach(i => out.add(i));
+      }
+    return out;
+  };
+  // Distance from a set of points (closed = polygon, open = line, 1 point = point).
+  const dist = (pts, closed) => {
+    const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+    const bx = [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+    for (let reach = 30; ; reach *= 4) {
+      const cand = near(bx[0], bx[1], bx[2], bx[3], reach);
+      if (!cand.size) { if (reach > 20000) return Infinity; continue; }
+      let best = Infinity;
+      for (const i of cand) {
+        const [a, b] = segs[i];
+        if (closed && (pointInPoly(a, pts) || pointInPoly(b, pts))) return 0;
+        if (pts.length === 1) { best = Math.min(best, distPointSeg(pts[0], a, b)); continue; }
+        const n = closed ? pts.length : pts.length - 1;
+        for (let j = 0; j < n; j++) { best = Math.min(best, distSegSeg(pts[j], pts[(j + 1) % pts.length], a, b)); if (best === 0) return 0; }
+      }
+      if (best <= reach) return best;   // anything closer would have been in the searched cells
+    }
+  };
+  return { dist };
+}
+
+// ---- smooth, evenly spaced track line ----
+// Points every `step` metres along a line (no extra point at the end).
+function resampleLine(pts, step) {
+  const out = [[pts[0][0], pts[0][1]]];
+  let need = step;
+  for (let i = 1; i < pts.length; i++) {
+    let ax = pts[i - 1][0], ay = pts[i - 1][1];
+    const bx = pts[i][0], by = pts[i][1];
+    let seg = Math.hypot(bx - ax, by - ay);
+    while (seg >= need) {
+      const t = need / seg;
+      ax += (bx - ax) * t; ay += (by - ay) * t;
+      out.push([ax, ay]);
+      seg -= need; need = step;
+    }
+    need -= seg;
+  }
+  return out;
+}
+// Smooths small zigzags and rounds sharp corners slightly (about `radius` metres),
+// then spaces points exactly `spacing` metres apart. The raw route is kept separately.
+function smoothLine(points, closed, spacing = 2, radius = 5) {
+  const clean = points.filter((p, i) => i === 0 || p[0] !== points[i - 1][0] || p[1] !== points[i - 1][1]);
+  if (clean.length < 2) return { spacing, points: clean.map(p => p.slice()), length: 0 };
+  const ring = closed && (clean[0][0] !== clean.at(-1)[0] || clean[0][1] !== clean.at(-1)[1]) ? clean.concat([clean[0]]) : clean;
+  const dense = resampleLine(ring, 1);
+  if (!closed) dense.push(ring.at(-1).slice());
+  const n = dense.length, w = Math.max(1, Math.round(radius));
+  const sm = dense.map((p, i) => {
+    if (!closed && (i < w || i >= n - w)) {   // open lines: shrink the window near the ends, keep the ends fixed
+      const k = Math.min(i, n - 1 - i); if (k === 0) return p.slice();
+      let sx = 0, sy = 0; for (let j = i - k; j <= i + k; j++) { sx += dense[j][0]; sy += dense[j][1]; }
+      return [sx / (2 * k + 1), sy / (2 * k + 1)];
+    }
+    let sx = 0, sy = 0;
+    for (let j = i - w; j <= i + w; j++) { const q = dense[(j + n) % n]; sx += q[0]; sy += q[1]; }
+    return [sx / (2 * w + 1), sy / (2 * w + 1)];
+  });
+  const loopPts = closed ? sm.concat([sm[0]]) : sm;
+  const res = resampleLine(loopPts, spacing);
+  if (!closed) { const last = loopPts.at(-1); const g = Math.hypot(last[0] - res.at(-1)[0], last[1] - res.at(-1)[1]); if (g > 0.3 * spacing) res.push(last.slice()); else res[res.length - 1] = last.slice(); }
+  let length = 0;
+  for (let i = 1; i < res.length; i++) length += Math.hypot(res[i][0] - res[i - 1][0], res[i][1] - res[i - 1][1]);
+  if (closed) length += Math.hypot(res[0][0] - res.at(-1)[0], res[0][1] - res.at(-1)[1]);
+  return { spacing, points: res.map(p => [round2(p[0]), round2(p[1])]), length: round2(length) };
+}
+// Point and direction at a distance along the smooth line (wraps around on loops).
+function pointAt(cl, at, closed) {
+  const pts = cl.points, n = pts.length, L = cl.length;
+  if (closed) at = ((at % L) + L) % L; else at = Math.max(0, Math.min(L, at));
+  const f = at / cl.spacing, i = Math.floor(f), t = f - i;
+  const a = pts[Math.min(i, n - 1)], b = closed ? pts[(i + 1) % n] : pts[Math.min(i + 1, n - 1)];
+  const pos = [round2(a[0] + (b[0] - a[0]) * t), round2(a[1] + (b[1] - a[1]) * t)];
+  const pa = pts[closed ? (i - 1 + n) % n : Math.max(0, i - 1)], pb = closed ? pts[(i + 2) % n] : pts[Math.min(n - 1, i + 2)];
+  const dx = pb[0] - pa[0], dy = pb[1] - pa[1], len = Math.hypot(dx, dy) || 1;
+  return { pos, dir: [round2(dx / len), round2(dy / len)] };
+}
+// Corners: places where the track turns more than 35° within about 20 m.
+// angle > 0 = left turn, < 0 = right turn (degrees).
+function findCorners(cl, closed) {
+  const pts = cl.points, n = pts.length, k = Math.max(2, Math.round(10 / cl.spacing));
+  const head = (a, b) => Math.atan2(b[1] - a[1], b[0] - a[0]);
+  const turns = pts.map((p, i) => {
+    if (!closed && (i < k || i >= n - k)) return 0;
+    const a = pts[(i - k + n) % n], b = pts[(i + k) % n];
+    let d = head(p, b) - head(a, p);
+    while (d > Math.PI) d -= 2 * Math.PI; while (d < -Math.PI) d += 2 * Math.PI;
+    return d * 180 / Math.PI;
+  });
+  const out = [];
+  let i0 = 0;
+  if (closed) { while (i0 < n && Math.abs(turns[i0]) > 35) i0++; if (i0 === n) return out; }   // start outside a corner
+  let run = null;
+  for (let s = 0; s <= n; s++) {
+    const i = (i0 + s) % n;
+    const inCorner = s < n && Math.abs(turns[i]) > 35;
+    if (inCorner) { if (!run || Math.abs(turns[i]) > Math.abs(turns[run.best])) run = { best: i }; }
+    else if (run) {
+      // Measure the turn from the straight track 10-20 m before to 10-20 m after the corner,
+      // outside the rounding (measuring closer in under-reads: a 90° corner showed as 74°).
+      const b = run.best, at = (j) => pts[closed ? ((j % n) + n) % n : Math.max(0, Math.min(n - 1, j))];
+      let d = head(at(b + k), at(b + 2 * k)) - head(at(b - 2 * k), at(b - k));
+      while (d > Math.PI) d -= 2 * Math.PI; while (d < -Math.PI) d += 2 * Math.PI;
+      out.push({ at: round2(b * cl.spacing), pos: pts[b], angle: Math.round(d * 180 / Math.PI) });
+      run = null;
+    }
+  }
+  return out.sort((a, b) => a.at - b.at);
+}
+
+// ---- race layout ----
+// Checkpoints (about every 100 m, at least 8), a start line and an 8-kart start grid behind it.
+function raceLayout(cl, closed, width, trackIdx) {
+  const L = cl.length;
+  const n = Math.max(8, Math.round(L / 100));
+  const startAt = closed ? 0 : Math.min(40, L * 0.1);
+  const span = closed ? L : L - startAt;
+  const checkpoints = [];
+  const count = closed ? n : n + 1;
+  for (let k = 0; k < count; k++) {
+    const at = round2(startAt + k * span / n);
+    const { pos, dir } = pointAt(cl, at, closed);
+    checkpoints.push({ i: k, at, pos, dir, width });
+  }
+  const start = pointAt(cl, startAt, closed);
+  const grid = [];
+  for (let s = 0; s < 8; s++) {
+    const behind = 6 + Math.floor(s / 2) * 6, side = s % 2 ? -1 : 1;
+    const { pos, dir } = pointAt(cl, startAt - behind, closed);
+    const nx = -dir[1], ny = dir[0];   // left-hand normal
+    const p = [round2(pos[0] + nx * side * width / 4), round2(pos[1] + ny * side * width / 4)];
+    grid.push({ slot: s + 1, behind, pos: p, dir, trackDist: Math.round(trackIdx.dist([p], false) * 10) / 10 });
+  }
+  return { suggested: true, startLine: { at: round2(startAt), pos: start.pos, dir: start.dir, width }, checkpoints, grid };
+}
+
+// Shortcut finder: footpaths and side roads that connect two parts of the track and are
+// at least 30 m shorter than driving the track between them. A "shortcut" that skips more
+// than half a lap is really driving backwards, so those are ignored.
+function findShortcuts(roads, cl, closed, width) {
+  const L = cl.length, touch = width / 2 + 4;
+  const key = p => p[0].toFixed(1) + ',' + p[1].toFixed(1);
+  const idx = new Map(), V = [], adj = [];
+  const vid = p => { const k = key(p); let i = idx.get(k); if (i === undefined) { i = V.length; idx.set(k, i); V.push(p); adj.push([]); } return i; };
+  for (const r of roads) {
+    if (/^(motorway|motorway_link|trunk|trunk_link|construction|proposed|elevator|corridor|platform|bus_stop)$/.test(r.kind) || r.tunnel) continue;
+    for (let i = 1; i < r.points.length; i++) {
+      const a = vid(r.points[i - 1]), b = vid(r.points[i]);
+      const d = Math.hypot(r.points[i][0] - r.points[i - 1][0], r.points[i][1] - r.points[i - 1][1]);
+      adj[a].push([b, d, r.id]); adj[b].push([a, d, r.id]);
+    }
+  }
+  // Where the path network touches the track: distance from the smooth line and position along it.
+  const CELL = 20, grid = new Map(), segs = [];
+  const P = cl.points, n = P.length;
+  for (let i = 0; i < (closed ? n : n - 1); i++) {
+    const a = P[i], b = P[(i + 1) % n];
+    segs.push([a, b, i * cl.spacing]);
+    const k = Math.floor((a[0] + b[0]) / 2 / CELL) + ',' + Math.floor((a[1] + b[1]) / 2 / CELL);
+    if (!grid.has(k)) grid.set(k, []); grid.get(k).push(segs.length - 1);
+  }
+  const touches = [];
+  V.forEach((v, vi) => {
+    const cx = Math.floor(v[0] / CELL), cy = Math.floor(v[1] / CELL);
+    let best = null;
+    for (let x = cx - 1; x <= cx + 1; x++) for (let y = cy - 1; y <= cy + 1; y++) {
+      for (const si of (grid.get(x + ',' + y) || [])) {
+        const [a, b, at0] = segs[si];
+        const dx = b[0] - a[0], dy = b[1] - a[1], LL = dx * dx + dy * dy;
+        let t = LL ? ((v[0] - a[0]) * dx + (v[1] - a[1]) * dy) / LL : 0; t = Math.max(0, Math.min(1, t));
+        const d = Math.hypot(v[0] - a[0] - t * dx, v[1] - a[1] - t * dy);
+        if (d <= touch && (!best || d < best.d)) best = { v: vi, d, at: at0 + t * Math.sqrt(LL) };
+      }
+    }
+    if (best) touches.push(best);
+  });
+  if (!touches.length) return [];
+  // Group touch points into clusters about 15 m apart along the track.
+  touches.sort((a, b) => a.at - b.at);
+  const clusters = [];
+  for (const t of touches) {
+    const c = clusters[clusters.length - 1];
+    if (c && t.at - c.end < 15) { c.members.push(t); c.end = t.at; } else clusters.push({ start: t.at, end: t.at, members: [t] });
+  }
+  if (closed && clusters.length > 1 && clusters[0].start + L - clusters.at(-1).end < 15) {   // join across the start line
+    const last = clusters.pop(); clusters[0].members.push(...last.members);
+  }
+  const clusterOf = new Map();
+  clusters.forEach((c, ci) => c.members.forEach(m => clusterOf.set(m.v, ci)));
+  // Dijkstra from each cluster (all its touch points at once), up to 400 m of path.
+  const MAX = 400, cands = [];
+  const heapPush = (h, x) => { h.push(x); let i = h.length - 1; while (i) { const p = (i - 1) >> 1; if (h[p][0] <= h[i][0]) break; [h[p], h[i]] = [h[i], h[p]]; i = p; } };
+  const heapPop = h => { const top = h[0], last = h.pop(); if (h.length) { h[0] = last; let i = 0; for (;;) { const l = 2 * i + 1, r = l + 1; let m = i; if (l < h.length && h[l][0] < h[m][0]) m = l; if (r < h.length && h[r][0] < h[m][0]) m = r; if (m === i) break; [h[m], h[i]] = [h[i], h[m]]; i = m; } } return top; };
+  clusters.forEach((A, ai) => {
+    const dist = new Map(), prev = new Map(), heap = [];
+    for (const m of A.members) { if (!dist.has(m.v) || m.d < dist.get(m.v)) { dist.set(m.v, m.d); heapPush(heap, [m.d, m.v]); prev.set(m.v, { from: null, at: m.at }); } }
+    while (heap.length) {
+      const [d, u] = heapPop(heap);
+      if (d > dist.get(u) || d > MAX) continue;
+      for (const [w, len, rid] of adj[u]) {
+        const nd = d + len;
+        if (nd < (dist.has(w) ? dist.get(w) : Infinity) && nd <= MAX) { dist.set(w, nd); prev.set(w, { from: u, rid, at: prev.get(u).at }); heapPush(heap, [nd, w]); }
+      }
+    }
+    clusters.forEach((B, bi) => {
+      if (bi === ai) return;
+      let best = null;
+      for (const m of B.members) {
+        if (!dist.has(m.v)) continue;
+        let start = m.v; while (prev.get(start).from !== null) start = prev.get(start).from;
+        const fromAt = prev.get(m.v).at;
+        const skips = closed ? ((m.at - fromAt) % L + L) % L : m.at - fromAt;
+        if (skips <= 0 || skips > L / 2) continue;
+        const length = dist.get(m.v) + m.d, saving = skips - length;
+        if (saving >= 30 && (!best || saving > best.saving)) best = { v: m.v, fromAt, toAt: m.at, skips, length, saving };
+      }
+      if (!best) return;
+      const pts = [], via = [];
+      for (let v = best.v; v !== null && v !== undefined; v = prev.get(v).from) { pts.push(V[v]); const r = prev.get(v).rid; if (r && !via.includes(r)) via.push(r); }
+      pts.reverse(); via.reverse();
+      if (via.length) cands.push({ from: round2(best.fromAt), to: round2(best.toAt), skips: round2(best.skips), length: round2(best.length), saving: round2(best.saving), via, points: pts });
+    });
+  });
+  // Keep the best ones; drop near-duplicates (same start and end area).
+  const circ = (a, b) => { const d = Math.abs(a - b); return closed ? Math.min(d, L - d) : d; };
+  const kept = [];
+  for (const c of cands.sort((a, b) => b.saving - a.saving)) {
+    if (kept.some(k => circ(k.from, c.from) < 40 && circ(k.to, c.to) < 40)) continue;
+    kept.push(c);
+    if (kept.length === 10) break;
+  }
+  return kept;
+}
+
 // Turns the raw Overpass response into the kartmap format.
 // Returns { out: <the JSON we export>, preview: <shapes for drawing on the map> }
 function buildOutput(data, o) {
   const origin = o.route[0];
   const P = makeProjector(origin[0], origin[1]);
-  const res = { roads: [], buildings: [], areas: [], waterways: [], points: [], barriers: [], railways: [], landmarks: [] };
+  const res = { roads: [], buildings: [], buildingParts: [], areas: [], waterways: [], barriers: [], railways: [], points: [], markings: [] };
+  const previewOf = new Map();   // id -> preview item, so flags found later (e.g. on the track) can colour it
   const preview = [];
+  const landmarkCands = [];
   let skipped = 0;
   const bb = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
   const grow = ([x, y]) => {
     if (x < bb.minX) bb.minX = x; if (x > bb.maxX) bb.maxX = x;
     if (y < bb.minY) bb.minY = y; if (y > bb.maxY) bb.maxY = y;
+  };
+  const noteLandmark = (t, ref, pos, priority) => {
+    const kind = extractLandmark(t);
+    if (!kind) return;
+    const l = { name: t.name, kind, ref, pos };
+    if (t.wikidata) l.wikidata = t.wikidata;
+    if (t.wikipedia) l.wikipedia = t.wikipedia;
+    landmarkCands.push({ l, priority });
   };
 
   // The track itself, with consecutive duplicate points removed.
@@ -410,13 +824,36 @@ function buildOutput(data, o) {
     const kind = areaKind(t);
     const a = { id, kind, name, polygon };
     if (h.length) a.holes = h;
+    if (t.surface) a.surface = t.surface;
     res.areas.push(a);
     polygon.forEach(grow);
     preview.push({ cat: 'area', kind, xy: [polygon, ...h] });
+    noteLandmark(t, id, centroid(polygon), 1);
   };
-  const addTrees = (xy, source, idBase) => {
+  const addBuilding = (id, t, name, footprint, holes) => {
+    const [height, heightSource] = buildingHeight(t);
+    const b = { id, kind: t.building, name, height, heightSource, footprint, ...buildingLooks(t) };
+    if (holes && holes.length) b.holes = holes;
+    res.buildings.push(b);
+    footprint.forEach(grow);
+    const pv = { cat: 'building', xy: [footprint, ...(holes || [])] };
+    preview.push(pv); previewOf.set(id, pv);
+    noteLandmark(t, id, centroid(footprint), 2);
+  };
+  // Building parts (v8.1): pieces of one building with their own heights, e.g. a tower on a podium.
+  const addPart = (id, t, name, footprint, holes) => {
+    const [height, heightSource] = buildingHeight(t);
+    const part = { id, part: t['building:part'], name, height, heightSource, footprint, ...buildingLooks(t) };
+    if (holes && holes.length) part.holes = holes;
+    res.buildingParts.push(part);
+    footprint.forEach(grow);
+    const pv = { cat: 'part', xy: [footprint, ...(holes || [])] };
+    preview.push(pv); previewOf.set(id, pv);
+  };
+  const addTrees = (xy, source, idBase, t) => {
+    const info = treeInfo(t || {});
     pointsAlong(xy, 8).forEach((pos, i) => {
-      res.points.push({ id: idBase + '-' + i, kind: 'tree', source, pos });
+      res.points.push({ id: idBase + '-' + i, kind: 'tree', group: 'natural', source, pos, ...info });
       grow(pos);
       preview.push({ cat: 'point', kind: 'tree', xy: pos });
     });
@@ -428,18 +865,22 @@ function buildOutput(data, o) {
 
     if (el.type === 'node') {
       if (el.lat == null) continue;
-      const pos = P(el.lat, el.lon); grow(pos);
-      const kind = pointKind(t);
-      if (t.barrier && !t.amenity && !t.tourism) {
-        res.points.push({ id: 'n' + el.id, kind: t.barrier, source: 'osm', pos });
-        preview.push({ cat: 'point', kind: t.barrier, xy: pos });
-        continue;
+      const pos = P(el.lat, el.lon);
+      const prop = propKind(t);
+      if (prop) {
+        grow(pos);
+        const pt = { id: 'n' + el.id, kind: prop.kind, group: prop.group, source: 'osm', pos };
+        if (name) pt.name = name;
+        if (prop.kind === 'tree') Object.assign(pt, treeInfo(t));
+        res.points.push(pt);
+        const pv = { cat: 'point', kind: prop.kind, xy: pos };
+        preview.push(pv); previewOf.set(pt.id, pv);
       }
-      if (t.tourism === 'attraction' || t.attraction || t.tourism === 'artwork' || t.man_made === 'lighthouse') {
-        res.landmarks.push({ id: 'n' + el.id, kind: t.attraction || t.artwork_type || t.man_made || t.tourism, name, pos, ...pick(t, POINT_LOOK.slice(1)) });
-      }
-      res.points.push({ id: 'n' + el.id, kind, source: 'osm', pos, ...pick(t, POINT_LOOK) });
-      preview.push({ cat: 'point', kind, xy: pos });
+      // Road markings (v8.1): crossings, stop and give-way lines.
+      const mk = t.highway === 'crossing' ? { kind: 'crossing', style: crossingStyle(t) }
+        : t.highway === 'stop' ? { kind: 'stop_line' } : t.highway === 'give_way' ? { kind: 'give_way_line' } : null;
+      if (mk) { res.markings.push({ id: 'n' + el.id, ...mk, pos }); grow(pos); preview.push({ cat: 'marking', kind: mk.kind, xy: pos }); }
+      noteLandmark(t, prop ? 'n' + el.id : null, pos, 0);
       continue;
     }
 
@@ -458,17 +899,9 @@ function buildOutput(data, o) {
       outers.forEach((outer, i) => {
         const id = 'r' + el.id + (outers.length > 1 ? '-' + (i + 1) : '');
         const holes = outers.length === 1 ? inners : inners.filter(r => pointInPoly(r[0], outer));
-        if (t.building || t['building:part']) {
-          const [height, heightSource] = buildingHeight({ ...t, building: t.building || t['building:part'] });
-          const b = { id, kind: t.building || t['building:part'], name, height, heightSource, footprint: outer.map(p => p.slice()), ...buildingFields(t) };
-          if (!t.building) b.part = true;
-          if (holes.length) b.holes = holes;
-          res.buildings.push(b);
-          outer.forEach(grow);
-          preview.push({ cat: 'building', xy: [outer, ...holes] });
-        } else {
-          addArea(id, t, name, outer, holes);
-        }
+        if (t.building) addBuilding(id, t, name, outer.map(p => p.slice()), holes);
+        else if (t['building:part']) addPart(id, t, name, outer.map(p => p.slice()), holes);
+        else addArea(id, t, name, outer, holes);
       });
       continue;
     }
@@ -482,59 +915,144 @@ function buildOutput(data, o) {
     const ring = closed ? xy.slice(0, -1) : xy;   // polygons: drop the repeated closing point
     const id = 'w' + el.id;
 
-    if (t.building || t['building:part']) {
+    if (t.building) {
       if (!closed) continue;
-      const kind = t.building || t['building:part'];
-      const [height, heightSource] = buildingHeight({ ...t, building: kind });
-      const b = { id, kind, name, height, heightSource, footprint: ring, ...buildingFields(t) };
-      if (!t.building) b.part = true;
-      res.buildings.push(b);
-      ring.forEach(grow);
-      preview.push({ cat: 'building', xy: [ring] });
-      if (t.tourism === 'attraction' || t.attraction) res.landmarks.push({ id, kind: t.attraction || t.tourism, name, footprint: ring });
-    } else if (t.barrier && !t.highway && !(closed && (t.landuse || t.leisure || t.natural))) {
-      const b = { id, kind: t.barrier, points: xy, ...pick(t, [['height', 'height', true], ['material', 'material'], ['colour', 'colour']]) };
-      res.barriers.push(b);
+      addBuilding(id, t, name, ring, null);
+    } else if (t['building:part']) {
+      if (closed) addPart(id, t, name, ring, null);
+    } else if (t.railway && !closed && RAIL_KINDS.test(t.railway)) {
+      // Railways (v8.1). Abandoned/disused/proposed lines don't match RAIL_KINDS, so they're left out.
+      const ex = roadExtras(t);
+      const rail = { id, kind: t.railway, points: xy };
+      if (name) rail.name = name;
+      for (const k of ['bridge', 'tunnel', 'layer']) if (ex[k] !== undefined) rail[k] = ex[k];
+      if (t.electrified && t.electrified !== 'no') rail.electrified = true;
+      res.railways.push(rail);
       xy.forEach(grow);
-      preview.push({ cat: 'barrier', kind: t.barrier, xy });
-    } else if (t.railway && !closed) {
-      res.railways.push({ id, kind: t.railway, name, points: xy, ...lineFields(t) });
+      const pv = { cat: 'railway', xy };
+      preview.push(pv); previewOf.set(id, pv);
+    } else if (t.barrier && !t.highway) {
+      // Fences, walls, hedges, kerbs: lines (a closed one keeps its first point repeated at the end).
+      const bar = { id, kind: t.barrier, points: xy };
+      if (name) bar.name = name;
+      const h = parseNum(t.height); if (h) bar.height = h;
+      if (t.material) bar.material = t.material;
+      res.barriers.push(bar);
       xy.forEach(grow);
-      preview.push({ cat: 'railway', xy });
-    } else if ((t.attraction || t.tourism === 'attraction' || t.tourism === 'artwork') && !t.highway) {
-      res.landmarks.push({ id, kind: t.attraction || t.artwork_type || t.tourism, name, ...(closed ? { footprint: ring } : { points: xy }) });
-      (closed ? ring : xy).forEach(grow);
-      if (closed && (t.leisure || t.landuse || t.natural || t.amenity || t.man_made)) addArea(id, t, name, ring, null);
-    } else if (t.man_made && !closed) {
-      // A pier or breakwater mapped as a line: kept as a path the game can draw.
-      const [width, widthSource] = [parseNum(t.width) || 4, parseNum(t.width) ? 'osm' : 'default'];
-      res.roads.push({ id, kind: t.man_made, name, width, widthSource, points: xy, ...lineFields(t) });
-      xy.forEach(grow);
-      preview.push({ cat: 'road', kind: t.man_made, xy });
+      const pv = { cat: 'barrier', xy };
+      preview.push(pv); previewOf.set(id, pv);
     } else if (t.highway && !(closed && t.area === 'yes')) {
       const [width, widthSource] = roadWidth(t);
-      res.roads.push({ id, kind: t.highway, name, width, widthSource, points: xy, ...lineFields(t) });
+      const extras = roadExtras(t);
+      res.roads.push({ id, kind: t.highway, name, width, widthSource, points: xy, ...extras });
       xy.forEach(grow);
-      preview.push({ cat: 'road', kind: t.highway, xy });
+      preview.push({ cat: 'road', kind: t.highway, bridge: !!extras.bridge, tunnel: !!extras.tunnel, xy });
     } else if (t.waterway && !closed) {
       res.waterways.push({ id, kind: t.waterway, name, points: xy });
       xy.forEach(grow);
       preview.push({ cat: 'waterway', xy });
     } else if (t.natural === 'tree_row' && !closed) {
-      addTrees(xy, 'osm-tree_row', id);
+      addTrees(xy, 'osm-tree_row', id, t);
     } else if (closed) {
       addArea(id, t, name, ring, null);
     }
   }
   routeXY.forEach(grow);
 
-  // A building drawn in parts (OSM "building:part") keeps its outline for maps; the game
-  // should draw the parts instead, so the outline is flagged.
-  const parts = res.buildings.filter(b => b.part);
-  for (const b of res.buildings) {
-    if (b.part) continue;
-    if (parts.some(p => pointInPoly(centroid(p.footprint), b.footprint))) b.hasParts = true;
+  // ---------- v8.1 enrichment ----------
+  // Parts: link each to the building it sits in. Parts carry the real shape; the parent's outline
+  // is then just its ground footprint.
+  const bCent = res.buildings.map(b => centroid(b.footprint));
+  for (const part of res.buildingParts) {
+    const c = centroid(part.footprint);
+    const host = res.buildings.find(b => pointInPoly(c, b.footprint));
+    if (host) { part.parent = host.id; host.hasParts = true; }
   }
+  // Smarter height guesses: an unmeasured building takes the typical (median) height of at least
+  // 3 measured buildings of the same type within 150 m. Measured heights are never changed.
+  const measured = h => h === 'osm' || h === 'levels' || h === 'lidar';
+  res.buildings.forEach((b, i) => {
+    if (b.heightSource !== 'default') return;
+    const near = [];
+    res.buildings.forEach((o2, j) => {
+      if (j === i || o2.kind !== b.kind || !measured(o2.heightSource)) return;
+      if (Math.hypot(bCent[j][0] - bCent[i][0], bCent[j][1] - bCent[i][1]) <= 150) near.push(o2.height);
+    });
+    if (near.length >= 3) {
+      near.sort((x, y) => x - y);
+      const m = near.length % 2 ? near[(near.length - 1) / 2] : (near[near.length / 2 - 1] + near[near.length / 2]) / 2;
+      b.height = round2(m); b.heightSource = 'estimated';
+    }
+  });
+  // Roof shapes: mapped ones are marked 'osm', the rest get a guess marked 'guess'.
+  for (const b of res.buildings.concat(res.buildingParts)) {
+    if (b.roofShape) b.roofShapeSource = 'osm';
+    else { b.roofShape = b.part ? 'flat' : guessRoof(b.kind, polygonArea(b.footprint), b.height); b.roofShapeSource = 'guess'; }
+  }
+  // Distance to the track and "blocks the track" flags (within half the track width).
+  const trackIdx = makeTrackIndex(routeXY);
+  const half = (o.width || 8) / 2;
+  const flag = (obj, pts, closedShape) => {
+    const d = trackIdx.dist(pts, closedShape);
+    obj.trackDist = Math.round(d * 10) / 10;
+    if (d <= half) { obj.onTrack = true; const pv = previewOf.get(obj.id); if (pv) pv.onTrack = true; }
+  };
+  res.buildings.forEach(b => flag(b, b.footprint, true));
+  res.buildingParts.forEach(b => flag(b, b.footprint, true));
+  res.barriers.forEach(b => flag(b, b.points, false));
+  res.railways.forEach(r => flag(r, r.points, false));
+  res.points.forEach(p => flag(p, [p.pos], false));
+  // Smooth track line, corners and suggested race layout.
+  const closedRoute = !!o.loop;
+  const centerline = smoothLine(routeXY, closedRoute, 2, 5);
+  const corners = centerline.points.length > 4 ? findCorners(centerline, closedRoute) : [];
+  const race = centerline.length > 20 ? raceLayout(centerline, closedRoute, o.width || 8, trackIdx) : null;
+  if (race) race.shortcuts = findShortcuts(res.roads, centerline, closedRoute, o.width || 8);
+  preview.push({ cat: 'centerline', xy: centerline.points });
+  if (race) {
+    race.checkpoints.forEach(c => preview.push({ cat: 'checkpoint', xy: c.pos, dir: c.dir, i: c.i }));
+    race.grid.forEach(s => preview.push({ cat: 'gridslot', xy: s.pos, slot: s.slot }));
+    race.shortcuts.forEach(s => preview.push({ cat: 'shortcut', xy: s.points, saving: s.saving }));
+  }
+  // Quality report: how much is real vs guessed, and what needs fixing by hand.
+  const nb = res.buildings.length;
+  const pct = n => nb ? Math.round(1000 * n / nb) / 10 : 0;
+  const hMeasured = res.buildings.filter(b => measured(b.heightSource)).length;
+  const hEstimated = res.buildings.filter(b => b.heightSource === 'estimated').length;
+  const onTrackB = res.buildings.filter(b => b.onTrack);
+  const trees = res.points.filter(p => p.kind === 'tree');
+  const notes = [];
+  if (onTrackB.length) notes.push(`${onTrackB.length} building${onTrackB.length > 1 ? 's block' : ' blocks'} the track: ${onTrackB.slice(0, 5).map(b => b.name || b.id).join(', ')}${onTrackB.length > 5 ? '…' : ''}. Nudge the route or let the game remove them.`);
+  const barOn = res.barriers.filter(b => b.onTrack).length;
+  if (barOn) notes.push(`${barOn} fence${barOn > 1 ? 's/walls cross' : '/wall crosses'} the track.`);
+  const propOn = res.points.filter(p => p.onTrack).length;
+  if (propOn) notes.push(`${propOn} prop${propOn > 1 ? 's stand' : ' stands'} on the track (benches, bins, trees…). The game should skip or move them.`);
+  const guessed = nb - hMeasured;
+  if (nb && guessed / nb > 0.5) notes.push(`${Math.round(100 * guessed / nb)}% of building heights are guesses (the Kart LiDAR Tool can measure them).`);
+  if (trees.length) notes.push(`${Math.round(100 * trees.filter(t => t.treeType).length / trees.length)}% of trees have a known type (palm, gum, fig…).`);
+  if (skipped) notes.push(`${skipped} shape${skipped > 1 ? 's were' : ' was'} incomplete in OSM and skipped.`);
+  if (!o.snapped) {
+    let gap = 0; for (let i = 1; i < routeXY.length; i++) gap = Math.max(gap, Math.hypot(routeXY[i][0] - routeXY[i - 1][0], routeXY[i][1] - routeXY[i - 1][1]));
+    if (gap > 50) notes.push(`The route has a ${Math.round(gap)} m straight stretch: check it follows the real road or path.`);
+  }
+  const quality = {
+    heights: { measured: pct(hMeasured), estimated: pct(hEstimated), default: Math.round((100 - pct(hMeasured) - pct(hEstimated)) * 10) / 10 },
+    roofShapes: { mapped: pct(res.buildings.filter(b => b.roofShapeSource === 'osm').length), guessed: pct(res.buildings.filter(b => b.roofShapeSource === 'guess').length) },
+    buildingsOnTrack: onTrackB.map(b => b.id),
+    barriersOnTrack: barOn, propsOnTrack: propOn,
+    treesTyped: trees.length ? Math.round(1000 * trees.filter(t => t.treeType).length / trees.length) / 10 : 0,
+    notes
+  };
+
+  // Landmarks: one per name and place. If a name appears on both a point and a building/area
+  // within 60 m, keep the building/area version (it has a shape to model from).
+  const landmarks = [];
+  for (const { l } of landmarkCands.sort((a, b) => b.priority - a.priority)) {
+    if (landmarks.some(k => k.name === l.name && Math.hypot(k.pos[0] - l.pos[0], k.pos[1] - l.pos[1]) < 60)) continue;
+    landmarks.push(l);
+  }
+  landmarks.forEach((l, i) => { l.id = 'L' + (i + 1); if (l.ref == null) delete l.ref; });
+  for (const l of landmarks) preview.push({ cat: 'landmark', name: l.name, kind: l.kind, xy: l.pos });
 
   const out = {
     format: 'kartmap',
@@ -542,6 +1060,7 @@ function buildOutput(data, o) {
     meta: {
       name: o.name || 'route',
       generated: o.now || new Date().toISOString(),
+      generator: 'kart-map-scanner v8.1',
       origin: { lat: origin[0], lon: origin[1] },
       units: 'metres',
       axes: 'x = east, y = north. In Godot: Vector3(x, 0, -y)',
@@ -552,13 +1071,15 @@ function buildOutput(data, o) {
       attribution: '© OpenStreetMap contributors, ODbL',
       counts: {
         roads: res.roads.length, buildings: res.buildings.length,
-        buildingsWithRealHeight: res.buildings.filter(b => b.heightSource !== 'default').length,
+        buildingsWithRealHeight: hMeasured,
         areas: res.areas.length, waterways: res.waterways.length, points: res.points.length,
-        buildingParts: parts.length, barriers: res.barriers.length, railways: res.railways.length,
-        landmarks: res.landmarks.length,
-        buildingsWithColour: res.buildings.filter(b => b.colour || b.roofColour).length,
-        manualTrees: 0, skippedIncompleteShapes: skipped
-      }
+        manualTrees: 0, skippedIncompleteShapes: skipped,
+        barriers: res.barriers.length, landmarks: landmarks.length,
+        bridges: res.roads.filter(r => r.bridge).length, tunnels: res.roads.filter(r => r.tunnel).length,
+        buildingParts: res.buildingParts.length, railways: res.railways.length, markings: res.markings.length,
+        shortcuts: race ? race.shortcuts.length : 0
+      },
+      quality
     },
     route: {
       points: routeXY,
@@ -566,16 +1087,21 @@ function buildOutput(data, o) {
       length: round2(routeLength(o.route)),
       closed: !!o.loop,
       snappedToRoads: !!o.snapped,
-      waypoints: o.waypoints   // lat/lon clicks, so the tool can reload and edit this route
+      waypoints: o.waypoints,  // lat/lon clicks, so the tool can reload and edit this route
+      centerline,              // v8.1: smoothed, evenly spaced version of points
+      corners                  // v8.1: turns of more than 35°
     },
     roads: res.roads,
     buildings: res.buildings,
     areas: res.areas,
     waterways: res.waterways,
-    points: res.points,
     barriers: res.barriers,
+    points: res.points,
+    landmarks,
+    buildingParts: res.buildingParts,
     railways: res.railways,
-    landmarks: res.landmarks
+    markings: res.markings,
+    race
   };
   return { out, preview };
 }
@@ -689,7 +1215,6 @@ const CONFIG = {
   },
   // Tried in order; if one fails or takes too long, the next one gets a go.
   overpass: ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter', 'https://overpass.private.coffee/api/interpreter'],
-  scanTimeoutMs: 40000,   // give up on a server after 40 s (its own limit is 25 s, plus time to send the data back)
   scanRounds: 2,          // go through the server list twice: "too busy" is often gone a few seconds later
   osrm: 'https://router.project-osrm.org',   // /route = plan a drive through points, /match = fit a rough trace to roads
   matchChunk: 10,     // the free OSRM server accepts at most 10 points per match request (tested 2026-10-14: 10 ok, 11 "TooBig")
@@ -1023,9 +1548,15 @@ async function scan() {
   if (len > 15000 && !confirm(`This route is ${(len / 1000).toFixed(1)} km. Big scans can time out. Continue?`)) return;
   const radius = Math.min(400, Math.max(10, +els.radius.value));
   const query = buildQuery(routeLatLngs, radius);
+  // Two time limits per server:
+  // 1. Waiting for it to START answering: its own work limit plus 30 s for queueing.
+  // 2. Downloading once data is arriving: up to 2 minutes. (Live test 2026-10-15: a 1.8 MB
+  //    South Bank answer took 40.9 s in total, so a single 40 s limit cut off a scan that was working.)
+  const startWaitMs = (serverBudget(len, radius).timeout + 30) * 1000;
+  const downloadMs = 120000;
 
   els.scanBtn.disabled = true;
-  let data = null; const problems = [];
+  let data = null; const problems = [];   // each failed try: { host, status?, kind?, seconds? }
   const servers = CONFIG.overpass;
   const attempts = [];
   for (let r = 1; r <= CONFIG.scanRounds; r++) for (const s of servers) attempts.push({ server: s, round: r });
@@ -1040,7 +1571,8 @@ async function scan() {
     const tick = setInterval(() => setStatus(`${label}… ${Math.round((Date.now() - started) / 1000)} s`), 1000);
     // Time limit: abort this server and move on to the next one.
     const ctrl = new AbortController();
-    const limit = setTimeout(() => ctrl.abort(), CONFIG.scanTimeoutMs);
+    let limit = setTimeout(() => ctrl.abort(), startWaitMs);
+    const seconds = () => (Date.now() - started) / 1000;
     try {
       const res = await fetch(server, {
         method: 'POST',
@@ -1048,23 +1580,25 @@ async function scan() {
         body: 'data=' + encodeURIComponent(query),
         signal: ctrl.signal
       });
-      if (res.status === 429) { problems.push(`${host}: too many requests (rate limit)`); continue; }
-      if (res.status === 504) { problems.push(`${host}: server busy / timed out`); continue; }
-      if (!res.ok) { problems.push(`${host}: replied ${res.status}`); continue; }
+      if (!res.ok) { problems.push({ host, status: res.status, seconds: seconds() }); continue; }
+      // The server has started answering: switch to the (longer) download limit.
+      clearTimeout(limit);
+      limit = setTimeout(() => ctrl.abort(), downloadMs);
+      clearInterval(tick);
+      setStatus(`Downloading map data from ${host}…`);
       data = await res.json();
       break;
     } catch (e) {
-      const why = e.name === 'AbortError' ? `no answer after ${CONFIG.scanTimeoutMs / 1000} s`
-        : e instanceof TypeError ? 'no readable reply (server overloaded, offline, or blocked)'
-        : e.message;
-      problems.push(`${host}: ${why}`);
+      problems.push(e.name === 'AbortError' ? { host, kind: 'timeout', seconds: seconds() }
+        : e instanceof TypeError ? { host, kind: 'unreadable', seconds: seconds() }   // browser got no usable reply
+        : { host, kind: 'error', message: e.message, seconds: seconds() });
     } finally {
       clearInterval(tick);
       clearTimeout(limit);
     }
   }
   els.scanBtn.disabled = false;
-  if (!data) { setStatus('Scan failed. ' + problems.join(' | ') + '. All servers busy: wait a few minutes and retry, or shorten the route.', 'err'); return; }
+  if (!data) { setStatus('Scan failed. ' + explainScanFailure(problems), 'err'); return; }
 
   const { out, preview } = buildOutput(data, {
     route: routeLatLngs, waypoints, radius, width: +els.width.value || 8,
@@ -1095,19 +1629,35 @@ function drawPreview(preview) {
   const U = makeUnprojector(scanResult.meta.origin.lat, scanResult.meta.origin.lon);
   const LL = rings => rings.map(r => r.map(U));
   // Faint zoning first, then areas, then everything else on top.
-  const order = f => f.cat === 'area' ? (FAINT.has(f.kind) ? 0 : 1) : 2;
+  // Race layout on top of everything (v8.1).
+  const order = f => f.cat === 'area' ? (FAINT.has(f.kind) ? 0 : 1) : /^(centerline|checkpoint|gridslot|shortcut)$/.test(f.cat) ? 3 : 2;
   for (const f of preview.slice().sort((a, b) => order(a) - order(b))) {
-    if (f.cat === 'building') L.polygon(LL(f.xy), { color: '#495057', weight: 1, fillColor: '#6c757d', fillOpacity: 0.7 }).addTo(featureLayer);
+    if (f.cat === 'building') {
+      // Buildings blocking the track are red (v8.1).
+      if (f.onTrack) L.polygon(LL(f.xy), { color: '#d00000', weight: 2, fillColor: '#ff4d4d', fillOpacity: 0.85 }).bindTooltip('Blocks the track').addTo(featureLayer);
+      else L.polygon(LL(f.xy), { color: '#495057', weight: 1, fillColor: '#6c757d', fillOpacity: 0.7 }).addTo(featureLayer);
+    }
+    else if (f.cat === 'part') L.polygon(LL(f.xy), { color: '#212529', weight: 1, fillColor: '#495057', fillOpacity: 0.8 }).bindTooltip('building part').addTo(featureLayer);
+    else if (f.cat === 'railway') L.polyline(f.xy.map(U), { color: '#212529', weight: 3, opacity: 0.9, dashArray: '8 4' }).bindTooltip('railway').addTo(featureLayer);
+    else if (f.cat === 'marking') L.circleMarker(U(f.xy), { radius: 3, color: '#212529', weight: 1, fillColor: '#ffffff', fillOpacity: 1 }).bindTooltip(f.kind.replace('_', ' ')).addTo(featureLayer);
+    else if (f.cat === 'centerline') L.polyline(f.xy.map(U), { color: '#ffffff', weight: 1.5, opacity: 0.9, dashArray: '3 5', interactive: false }).addTo(featureLayer);
+    else if (f.cat === 'checkpoint') L.circleMarker(U(f.xy), { radius: 4, color: '#003049', weight: 2, fillColor: f.i === 0 ? '#ffffff' : '#00b4d8', fillOpacity: 1 }).bindTooltip(f.i === 0 ? 'Start / finish' : 'Checkpoint ' + f.i).addTo(featureLayer);
+    else if (f.cat === 'gridslot') L.circleMarker(U(f.xy), { radius: 2.5, weight: 0, fillColor: '#ffffff', fillOpacity: 1 }).bindTooltip('Start grid ' + f.slot).addTo(featureLayer);
+    else if (f.cat === 'shortcut') L.polyline(f.xy.map(U), { color: '#d63384', weight: 4, opacity: 0.85 }).bindTooltip(`Shortcut: saves ${Math.round(f.saving)} m`).addTo(featureLayer);
     else if (f.cat === 'area') {
       const c = AREA_COLOURS[f.kind] || '#52b788';
       L.polygon(LL(f.xy), { color: c, weight: 1, fillColor: c, fillOpacity: FAINT.has(f.kind) ? 0.12 : 0.45 })
         .bindTooltip(f.kind).addTo(featureLayer);
     }
-    else if (f.cat === 'road') L.polyline(f.xy.map(U), { color: /footway|path|cycleway|steps/.test(f.kind) ? '#bc6c25' : '#343a40', weight: 2, opacity: 0.8 }).addTo(featureLayer);
+    else if (f.cat === 'road') {
+      if (f.bridge) L.polyline(f.xy.map(U), { color: '#e76f51', weight: 5, opacity: 0.9 }).bindTooltip('bridge').addTo(featureLayer);
+      else if (f.tunnel) L.polyline(f.xy.map(U), { color: '#6c757d', weight: 3, opacity: 0.8, dashArray: '4 6' }).bindTooltip('tunnel').addTo(featureLayer);
+      else L.polyline(f.xy.map(U), { color: /footway|path|cycleway|steps/.test(f.kind) ? '#bc6c25' : '#343a40', weight: 2, opacity: 0.8 }).addTo(featureLayer);
+    }
+    else if (f.cat === 'barrier') L.polyline(f.xy.map(U), { color: '#7f4f24', weight: 1.5, opacity: 0.9 }).addTo(featureLayer);
     else if (f.cat === 'waterway') L.polyline(f.xy.map(U), { color: '#4ea8de', weight: 2 }).addTo(featureLayer);
-    else if (f.cat === 'barrier') L.polyline(f.xy.map(U), { color: f.kind === 'hedge' ? '#2d6a4f' : '#e5989b', weight: 2, dashArray: '3 3' }).bindTooltip(f.kind).addTo(featureLayer);
-    else if (f.cat === 'railway') L.polyline(f.xy.map(U), { color: '#7f5539', weight: 2, dashArray: '6 4' }).addTo(featureLayer);
-    else if (f.cat === 'point') L.circleMarker(U(f.xy), { radius: 3, weight: 0, fillOpacity: 0.9, fillColor: f.kind === 'tree' ? '#2d6a4f' : '#ffb703' }).addTo(featureLayer);
+    else if (f.cat === 'point') L.circleMarker(U(f.xy), { radius: f.kind === 'tree' ? 3 : 2, weight: 0, fillOpacity: 0.9, fillColor: f.kind === 'tree' ? '#2d6a4f' : '#ffb703' }).bindTooltip(f.kind).addTo(featureLayer);
+    else if (f.cat === 'landmark') L.circleMarker(U(f.xy), { radius: 7, color: '#fff', weight: 2, fillColor: '#9b2226', fillOpacity: 1 }).bindTooltip(`★ ${f.name} (${f.kind})`).addTo(featureLayer);
   }
 }
 function showStats() {
@@ -1115,23 +1665,38 @@ function showStats() {
   const out = withManualTrees(scanResult, trees);
   const c = out.meta.counts;
   const size = new Blob([prettyJSON(out)]).size;
+  const osmTrees = out.points.filter(p => p.kind === 'tree' && p.source !== 'manual').length;
+  const props = out.points.filter(p => p.kind !== 'tree').length;
   const rows = [
     ['Track length', (out.route.length / 1000).toFixed(2) + ' km'],
     ['Buildings', `${c.buildings} (${c.buildingsWithRealHeight} with real height)`],
     ['Roads / paths', c.roads],
+    ['Bridges / tunnels', `${c.bridges || 0} / ${c.tunnels || 0}`],
     ['Parks, water, pools, land', c.areas],
+    ['Fences, walls, hedges', c.barriers || 0],
     ['Creeks / drains', c.waterways],
-    ['Building parts / with colours', `${c.buildingParts} / ${c.buildingsWithColour}`],
-    ['Hedges, walls, fences', c.barriers],
-    ['Railways', c.railways],
-    ['Landmarks', c.landmarks],
-    ['Trees, poles, signs (OSM)', c.points - c.manualTrees],
+    ['Trees (OSM)', osmTrees],
     ['Trees you placed', c.manualTrees],
+    ['Props (benches, lamps, signs…)', props],
+    ['Landmarks', c.landmarks || 0],
+    ['Building parts (towers)', c.buildingParts || 0],
+    ['Railway lines', c.railways || 0],
+    ['Road markings', c.markings || 0],
+    ['Corners / checkpoints', `${(out.route.corners || []).length} / ${out.race ? out.race.checkpoints.length : 0}`],
+    ['Shortcuts found', c.shortcuts || 0],
     ['File size', (size / 1024).toFixed(0) + ' KB']
   ];
   if (c.skippedIncompleteShapes) rows.push(['Shapes skipped (incomplete in OSM)', c.skippedIncompleteShapes]);
   els.stats.className = '';
-  els.stats.innerHTML = rows.map(([k, v]) => `<div><span>${k}</span><b>${v}</b></div>`).join('');
+  const esc = s => String(s).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+  const lm = out.landmarks || [];
+  const q = out.meta.quality;
+  const qHtml = q ? `<details open style="margin-top:6px"><summary>Quality report</summary>` +
+    `<div class="hint" style="margin-top:4px">Heights: ${q.heights.measured}% measured, ${q.heights.estimated}% estimated, ${q.heights.default}% default guess. Roofs: ${q.roofShapes.mapped}% mapped.</div>` +
+    (q.notes.length ? `<ul style="margin:4px 0 0;padding-left:18px">${q.notes.map(n => `<li>${esc(n)}</li>`).join('')}</ul>` : '') + `</details>` : '';
+  els.stats.innerHTML = rows.map(([k, v]) => `<div><span>${k}</span><b>${v}</b></div>`).join('') + qHtml +
+    (lm.length ? `<details style="margin-top:6px"><summary>Landmarks to model by hand (${lm.length})</summary>` +
+      `<ul style="margin:4px 0 0;padding-left:18px">${lm.map(l => `<li>${esc(l.name)} <span class="hint">(${esc(l.kind)})</span></li>`).join('')}</ul></details>` : '');
 }
 
 // ---- export / load ----
