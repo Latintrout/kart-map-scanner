@@ -6,6 +6,8 @@
 <title>Kart Map Scanner</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<!-- v11: three.js for the 3D preview, loaded only when you open it -->
+<script type="importmap">{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js", "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/" } }</script>
 <style>
   :root {
     --bg: #16161d; --panel: #20202a; --line: #33334a; --text: #e8e8f0; --muted: #9a9ab0;
@@ -78,6 +80,14 @@
     input[type=checkbox] { width: 20px; height: 20px; }
     .leaflet-control-zoom { display: none; }   /* pinch to zoom instead */
   }
+  /* v11: 3D preview overlay */
+  #view3d { position: fixed; inset: 0; z-index: 3000; background: #000; display: flex; flex-direction: column; }
+  #v3dBar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 6px 8px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  #v3dBar .grow { flex: 1; min-width: 120px; }
+  #v3dHost { flex: 1; position: relative; overflow: hidden; }
+  #v3dHost canvas { width: 100% !important; height: 100% !important; display: block; touch-action: none; }
+  #v3dHost.retro canvas { image-rendering: pixelated; }
+  #v3dHelp { position: absolute; left: 8px; bottom: 8px; color: #fff; font-size: 12px; text-shadow: 0 0 3px #000; pointer-events: none; }
   .legend span { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin: 0 4px 0 8px; vertical-align: middle; }
 .lm-photos{display:flex;gap:4px;margin:3px 0 4px}.lm-photos img{width:64px;height:48px;object-fit:cover;border-radius:3px;border:1px solid #ccc}
 </style>
@@ -176,6 +186,7 @@
       <button id="loadBtn">Load JSON</button>
     </div>
     <input id="loadFile" type="file" accept=".json,application/json" hidden>
+    <button id="view3dBtn" style="width:100%;margin-top:6px" disabled>🧊 3D preview</button>
   </section>
 
   <section>
@@ -1035,7 +1046,9 @@ function groundDrawOrder(kind) {
 // Pixel size of the ground image: `metresPerPixel`, made coarser if needed to stay within maxPx.
 function groundImagePlan(bbox, metresPerPixel, maxPx) {
   const wM = bbox.maxX - bbox.minX, hM = bbox.maxY - bbox.minY;
-  const mpp = Math.max(metresPerPixel, wM / maxPx, hM / maxPx);
+  // v11: rounded UP to whole centimetres before sizing, so the size and the stored metresPerPixel agree
+  // (before, a 5 km area gave 1.2207 m/px for the size but 1.22 in the file: ~3 px off at the far edge).
+  const mpp = Math.ceil(Math.max(metresPerPixel, wM / maxPx, hM / maxPx) * 100 - 1e-9) / 100;
   return { minX: bbox.minX, minY: bbox.minY, maxX: bbox.maxX, maxY: bbox.maxY,
     width: Math.max(1, Math.ceil(wM / mpp)), height: Math.max(1, Math.ceil(hM / mpp)), metresPerPixel: round2(mpp) };
 }
@@ -1354,7 +1367,7 @@ function buildOutput(data, o) {
     meta: {
       name: o.name || 'route',
       generated: o.now || new Date().toISOString(),
-      generator: 'kart-map-scanner v9b',
+      generator: 'kart-map-scanner v11',
       origin: { lat: origin[0], lon: origin[1] },
       units: 'metres',
       axes: 'x = east, y = north. In Godot: Vector3(x, 0, -y)',
@@ -1541,6 +1554,59 @@ function problemSpots(preview) {
   const label = f => f.cat === 'barrier' ? 'Fence or wall across the track' : f.cat === 'point' ? `${String(f.kind).replace(/_/g, ' ')} on the track` : 'Building blocking the track';
   return (preview || []).filter(f => f.onTrack).map(f => ({ cat: f.cat, xy: mid(f), label: label(f) }))
     .sort((a, b) => Math.hypot(a.xy[0], a.xy[1]) - Math.hypot(b.xy[0], b.xy[1]));
+}
+
+// ======================================================================
+// v11: 3D preview plan. Turns a kartmap file into simple shapes (pure, testable); the browser
+// part draws them with three.js. Coordinates stay kartmap metres (x east, y north); the viewer
+// maps them to 3D as (x, height, -y), the same way the Godot game does.
+// ======================================================================
+const WALL_COLOURS = {
+  house: '#d9c8a9', residential: '#d9c8a9', detached: '#d9c8a9', semidetached_house: '#d9c8a9', terrace: '#d4bfa1', bungalow: '#d9c8a9',
+  apartments: '#cfc4b4', commercial: '#b9bccb', retail: '#c7b9cb', office: '#b9c4cb', hotel: '#c9bfb0', industrial: '#a9a9a9',
+  warehouse: '#a9a9a9', shed: '#a58f73', garage: '#a59a8c', garages: '#a59a8c', roof: '#8d99ae', carport: '#8d99ae',
+  school: '#d4b49c', university: '#d4b49c', church: '#d6cfc3', hospital: '#e0e0e0', train_station: '#c2b8a3', stadium: '#bfbfbf'
+};
+// The two edges of a ribbon `width` wide along a line (left = left of the direction of travel).
+function ribbon(points, width, closed) {
+  const n = points.length, left = [], right = [], h = width / 2;
+  for (let i = 0; i < n; i++) {
+    const prev = points[i > 0 ? i - 1 : (closed ? n - 2 : 0)], next = points[i < n - 1 ? i + 1 : (closed ? 1 : n - 1)];
+    let dx = next[0] - prev[0], dy = next[1] - prev[1];
+    const L = Math.hypot(dx, dy) || 1; dx /= L; dy /= L;
+    left.push([round2(points[i][0] - dy * h), round2(points[i][1] + dx * h)]);
+    right.push([round2(points[i][0] + dy * h), round2(points[i][1] - dx * h)]);
+  }
+  return { left, right };
+}
+function scene3dPlan(out) {
+  const bb = out.meta.bbox;
+  const buildings = [];
+  for (const b of out.buildings || []) {
+    if (b.hasParts || !Array.isArray(b.footprint) || b.footprint.length < 3) continue;   // parts are drawn instead
+    const base = Math.max(0, b.minHeight || 0);
+    buildings.push({ id: b.id, outline: b.footprint, holes: b.holes || [], base, top: Math.max(base + 0.5, b.height || 3),
+      wall: b.colour || WALL_COLOURS[b.kind] || '#c9c9c9', roof: b.roofColour || b.sampledRoofColour || null,
+      guessed: /^(default|estimated|ml-estimate|guess)$/.test(b.heightSource || ''), manual: b.source === 'manual', blocks: !!b.onTrack });
+  }
+  const trees = [], props = [];
+  for (const p of out.points || []) {
+    if (!Array.isArray(p.pos)) continue;
+    if (p.kind === 'tree') trees.push({ x: p.pos[0], y: p.pos[1], type: p.treeType || null,
+      h: p.height || (p.treeType === 'palm' ? 10 : p.treeType === 'conifer' ? 9 : 7), r: (p.canopy || (p.treeType === 'palm' ? 5 : 7)) / 2 });
+    else props.push({ x: p.pos[0], y: p.pos[1], kind: p.kind });
+  }
+  const line = (out.route.centerline && out.route.centerline.points && out.route.centerline.points.length > 1) ? out.route.centerline.points : out.route.points;
+  const closed = !!out.route.closed;
+  return {
+    centre: [round2((bb.minX + bb.maxX) / 2), round2((bb.minY + bb.maxY) / 2)],
+    size: [round2(bb.maxX - bb.minX), round2(bb.maxY - bb.minY)],
+    buildings, trees, props,
+    track: { line, closed, width: out.route.width || 8, ...ribbon(line, out.route.width || 8, closed) },
+    start: out.race ? out.race.startLine : null,
+    checkpoints: out.race ? out.race.checkpoints : [],
+    landmarks: (out.landmarks || []).filter(l => Array.isArray(l.pos)).map(l => ({ x: l.pos[0], y: l.pos[1], name: l.name, kind: l.kind }))
+  };
 }
 
 // lat/lon from [east, north] metres (the reverse of makeProjector), for drawing the preview.
@@ -1766,6 +1832,7 @@ function invalidateScan() {
   featureLayer.clearLayers();
   els.exportBtn.disabled = true;
   els.sampleBtn.disabled = els.photosBtn.disabled = els.groundBtn.disabled = true;
+  $('view3dBtn').disabled = true;
   els.stats.textContent = 'Route or settings changed. Scan again to export.';
   els.stats.className = 'hint';
 }
@@ -2106,6 +2173,7 @@ async function scan() {
   els.exportBtn.disabled = false;
   els.sampleBtn.disabled = els.groundBtn.disabled = false;
   els.photosBtn.disabled = !out.landmarks.length;
+  $('view3dBtn').disabled = false;
   const partial = data.remark && /error|timed out|out of memory/i.test(data.remark);
   const contract = loaderContractProblems(out);   // v8.2: would the game's loader choke on this file?
   if (partial) setStatus('Scan finished but the server warned the data may be incomplete: ' + data.remark, 'warn');
@@ -2629,6 +2697,197 @@ els.map.addEventListener('pointerdown', e => {
 const fingerUp = e => fingers.delete(e.pointerId);
 els.map.addEventListener('pointerup', fingerUp, true);
 els.map.addEventListener('pointercancel', fingerUp, true);
+
+// ======================================================================
+// v11 (browser): 3D preview with three.js, "fly the lap", retro pixels, .glb download
+// ======================================================================
+let v3d = null;   // { renderer, scene, camera, controls, raf, fly, ... } while the preview is open
+async function open3D() {
+  if (!scanResult || v3d) return;
+  setStatus('Loading the 3D viewer…');
+  let THREE, OrbitControls;
+  try {
+    [THREE, { OrbitControls }] = await Promise.all([import('three'), import('three/addons/controls/OrbitControls.js')]);
+  } catch (e) {
+    setStatus("Couldn't load the 3D viewer: three.js didn't download from unpkg.com (offline or blocked). The rest of the scanner still works.", 'err');
+    return;
+  }
+  const out = withManualExtras(scanResult, trees, manualBuildings);
+  const plan = scene3dPlan(out);
+  const ui = document.createElement('div');
+  ui.id = 'view3d';
+  ui.innerHTML = `<div id="v3dBar"><button id="v3dClose">✕ Close</button><button id="v3dFly">▶ Fly the lap</button>
+    <label class="inline" style="margin:0"><input id="v3dRetro" type="checkbox"> Retro pixels</label>
+    <button id="v3dGlb">⬇ .glb</button><span id="v3dInfo" class="hint grow"></span></div>
+    <div id="v3dHost"><div id="v3dHelp">Drag to turn · scroll or pinch to zoom · right-drag or two fingers to move</div></div>`;
+  document.body.appendChild(ui);
+  const host = $('v3dHost');
+  let renderer;
+  try { renderer = new THREE.WebGLRenderer({ antialias: false, preserveDrawingBuffer: true }); }
+  catch (e) { ui.remove(); setStatus("Couldn't start 3D: this browser has WebGL turned off or unavailable.", 'err'); return; }
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  host.appendChild(renderer.domElement);
+  const scene = new THREE.Scene();
+  const sky = new THREE.Color('#9cc9ef');
+  scene.background = sky;
+  const diag = Math.hypot(plan.size[0], plan.size[1]) || 500;
+  scene.fog = new THREE.Fog(sky, diag * 0.6, diag * 1.6);
+  scene.add(new THREE.HemisphereLight('#ffffff', '#6b7a4f', 1.6));
+  const sun = new THREE.DirectionalLight('#fff4e0', 1.6); sun.position.set(-0.5, 1, 0.35); scene.add(sun);
+  const P = (x, y, h = 0) => new THREE.Vector3(x, h, -y);   // kartmap metres → 3D
+  const mats = new Map();
+  const okColour = c => typeof c === 'string' && (!window.CSS || CSS.supports('color', c));
+  const mat = (c, extra) => {
+    const key = c + JSON.stringify(extra || {});
+    if (!mats.has(key)) mats.set(key, new THREE.MeshLambertMaterial({ color: new THREE.Color(okColour(c) ? c : '#c9c9c9'), ...(extra || {}) }));
+    return mats.get(key);
+  };
+  // ground: the same picture as "Export ground image" (aerial colours if sampled), nearest-pixel filtering
+  const gplan = groundImagePlan(out.meta.bbox, 1, 2048);
+  const gcanvas = drawGroundImage(out, gplan, !!out.meta.imagery);
+  const gtex = new THREE.CanvasTexture(gcanvas);
+  gtex.colorSpace = THREE.SRGBColorSpace; gtex.magFilter = THREE.NearestFilter; gtex.minFilter = THREE.NearestMipmapNearestFilter;
+  const gw = gplan.width * gplan.metresPerPixel, gh = gplan.height * gplan.metresPerPixel;
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(gw, gh), new THREE.MeshLambertMaterial({ map: gtex }));
+  ground.rotation.x = -Math.PI / 2;
+  ground.position.copy(P(gplan.minX + gw / 2, gplan.maxY - gh / 2, 0));
+  ground.name = 'ground';
+  scene.add(ground);
+  // buildings: footprints pushed up to their height (roof colour on top, wall colour on the sides)
+  const bgroup = new THREE.Group(); bgroup.name = 'buildings'; scene.add(bgroup);
+  let bad = 0;
+  for (const b of plan.buildings) {
+    try {
+      const shape = new THREE.Shape(b.outline.map(q => new THREE.Vector2(q[0], q[1])));
+      for (const hole of b.holes) shape.holes.push(new THREE.Path(hole.map(q => new THREE.Vector2(q[0], q[1]))));
+      const geo = new THREE.ExtrudeGeometry(shape, { depth: b.top - b.base, bevelEnabled: false });
+      geo.rotateX(-Math.PI / 2);
+      geo.translate(0, b.base, 0);
+      const wall = b.blocks ? '#ff4d4d' : b.manual ? '#ffb703' : b.wall;
+      const roof = b.blocks ? '#d00000' : (okColour(b.roof) ? b.roof : new THREE.Color(okColour(wall) ? wall : '#c9c9c9').multiplyScalar(0.72).getStyle());
+      const m = new THREE.Mesh(geo, [mat(roof), mat(wall)]);
+      m.name = b.id;
+      bgroup.add(m);
+    } catch (e) { bad++; }
+  }
+  // track: a flat ribbon just above the ground, white start line, cyan checkpoint posts
+  const t = plan.track, pos = [];
+  for (let i = 0; i < t.line.length - 1; i++) {
+    const a = P(...t.left[i], 0.08), b2 = P(...t.right[i], 0.08), c = P(...t.left[i + 1], 0.08), d = P(...t.right[i + 1], 0.08);
+    pos.push(a.x, a.y, a.z, b2.x, b2.y, b2.z, c.x, c.y, c.z, b2.x, b2.y, b2.z, d.x, d.y, d.z, c.x, c.y, c.z);
+  }
+  const tgeo = new THREE.BufferGeometry(); tgeo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); tgeo.computeVertexNormals();
+  const track = new THREE.Mesh(tgeo, new THREE.MeshLambertMaterial({ color: '#3d3d48', side: THREE.DoubleSide })); track.name = 'track'; scene.add(track);
+  if (plan.start) {
+    const s = new THREE.Mesh(new THREE.BoxGeometry(plan.start.width || t.width, 0.05, 1.2), mat('#ffffff'));
+    s.position.copy(P(plan.start.pos[0], plan.start.pos[1], 0.12));
+    s.rotation.y = Math.atan2(plan.start.dir[0], -plan.start.dir[1]);   // turns the box's depth axis to the travel direction (3D z = -north)
+    s.name = 'start line'; scene.add(s);
+  }
+  for (const c of plan.checkpoints.slice(1)) {
+    const post = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.15, 2.5, 6), mat('#00b4d8'));
+    post.position.copy(P(c.pos[0] - c.dir[1] * (t.width / 2 + 0.5), c.pos[1] + c.dir[0] * (t.width / 2 + 0.5), 1.25));
+    post.name = 'checkpoint ' + c.i; scene.add(post);
+  }
+  // trees and props: one "instanced" mesh each, so thousands stay fast
+  const dummy = new THREE.Object3D();
+  const instanced = (geo, material, list, place, name) => {
+    if (!list.length) return null;
+    const m = new THREE.InstancedMesh(geo, material, list.length);
+    list.forEach((it, i) => { place(it); dummy.updateMatrix(); m.setMatrixAt(i, dummy.matrix); });
+    m.name = name; scene.add(m); return m;
+  };
+  instanced(new THREE.CylinderGeometry(0.25, 0.35, 1, 5), mat('#6b4f2a'), plan.trees, tr => { dummy.position.copy(P(tr.x, tr.y, tr.h * 0.3)); dummy.scale.set(1, tr.h * 0.6, 1); }, 'tree trunks');
+  instanced(new THREE.IcosahedronGeometry(1, 0), mat('#3f7d3a', { flatShading: true }), plan.trees.filter(tr => tr.type !== 'palm'), tr => { dummy.position.copy(P(tr.x, tr.y, tr.h * 0.65)); dummy.scale.set(tr.r, tr.h * 0.4, tr.r); }, 'tree tops');
+  instanced(new THREE.ConeGeometry(1, 0.5, 6), mat('#4f8f3a', { flatShading: true }), plan.trees.filter(tr => tr.type === 'palm'), tr => { dummy.position.copy(P(tr.x, tr.y, tr.h * 0.95)); dummy.scale.set(tr.r, tr.r * 0.5, tr.r); }, 'palm tops');
+  instanced(new THREE.BoxGeometry(0.7, 0.9, 0.7), mat('#ffb703'), plan.props, pr => { dummy.position.copy(P(pr.x, pr.y, 0.45)); dummy.scale.set(1, 1, 1); }, 'props');
+  for (const l of plan.landmarks) {
+    const pin = new THREE.Mesh(new THREE.OctahedronGeometry(2, 0), mat('#e63946'));
+    pin.position.copy(P(l.x, l.y, 30)); pin.name = 'landmark ' + l.name; scene.add(pin);
+  }
+  // camera
+  const camera = new THREE.PerspectiveCamera(60, 1, 0.5, diag * 3);
+  const centre = P(plan.centre[0], plan.centre[1], 0);
+  camera.position.copy(centre).add(new THREE.Vector3(diag * 0.25, diag * 0.35, diag * 0.45));
+  const controls = new OrbitControls(camera, renderer.domElement);
+  controls.target.copy(centre); controls.maxPolarAngle = Math.PI * 0.49; controls.update();
+  v3d = { THREE, renderer, scene, camera, controls, ui, host, fly: null, raf: 0, retro: false, gtex };
+  const resize = () => {
+    const w = host.clientWidth, hh = host.clientHeight;
+    renderer.setPixelRatio(v3d.retro ? 0.33 : Math.min(devicePixelRatio, 2));
+    renderer.setSize(w, hh, false); camera.aspect = w / Math.max(1, hh); camera.updateProjectionMatrix();
+  };
+  v3d.resize = resize; resize();
+  window.addEventListener('resize', resize);
+  const len = out.route.centerline ? out.route.centerline.length : out.route.length;
+  $('v3dInfo').textContent = `${plan.buildings.length - bad} buildings · ${plan.trees.length} trees · ${plan.props.length} props · ${plan.landmarks.length} landmarks · ${(len / 1000).toFixed(2)} km track` +
+    (bad ? ` · ${bad} shapes couldn't be drawn` : '') + '. Red = blocks the track, orange = drawn by you.';
+  let last = performance.now();
+  const frame = now => {
+    const dt = Math.min(0.1, (now - last) / 1000); last = now;
+    if (v3d.fly) stepFly(dt); else controls.update();
+    renderer.render(scene, camera);
+    v3d.raf = requestAnimationFrame(frame);
+  };
+  v3d.raf = requestAnimationFrame(frame);
+  $('v3dClose').onclick = close3D;
+  $('v3dFly').onclick = () => toggleFly(plan.track);
+  $('v3dRetro').onchange = e => { v3d.retro = e.target.checked; host.classList.toggle('retro', v3d.retro); resize(); };
+  $('v3dGlb').onclick = () => download3D(out);
+  setStatus(`3D preview open. ${bad ? bad + " shapes couldn't be drawn (odd outlines in OSM). " : ''}Close it to get back to the map.`, bad ? 'warn' : 'ok');
+}
+// "Fly the lap": camera at kart height, 25 m/s, looking 15 m ahead along the smooth track line.
+function toggleFly(track) {
+  if (v3d.fly) { v3d.fly = null; $('v3dFly').textContent = '▶ Fly the lap'; v3d.controls.enabled = true; return; }
+  const pts = track.line, cum = [0];
+  for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
+  v3d.fly = { pts, cum, s: 0, total: cum[cum.length - 1], closed: track.closed };
+  v3d.controls.enabled = false;
+  $('v3dFly').textContent = '■ Stop';
+}
+function flyAt(f, s) {
+  if (f.closed) s = ((s % f.total) + f.total) % f.total; else s = Math.max(0, Math.min(f.total, s));
+  let i = 1; while (i < f.cum.length - 1 && f.cum[i] < s) i++;
+  const a = f.pts[i - 1], b = f.pts[i], seg = (f.cum[i] - f.cum[i - 1]) || 1, k = (s - f.cum[i - 1]) / seg;
+  return [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k];
+}
+function stepFly(dt) {
+  const f = v3d.fly;
+  f.s += 25 * dt;
+  if (!f.closed && f.s >= f.total) { toggleFly(); return; }
+  const p = flyAt(f, f.s), q = flyAt(f, f.s + 15);
+  v3d.camera.position.set(p[0], 2.2, -p[1]);
+  v3d.camera.lookAt(q[0], 1.4, -q[1]);
+}
+async function download3D(out) {
+  const btn = $('v3dGlb');
+  btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    const { GLTFExporter } = await import('three/addons/exporters/GLTFExporter.js');
+    const glb = await new GLTFExporter().parseAsync(v3d.scene, { binary: true, onlyVisible: true });
+    const safe = (out.meta.name || 'route').replace(/[^a-z0-9_-]+/gi, '-').toLowerCase();
+    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([glb], { type: 'model/gltf-binary' }));
+    a.download = `kartmap_${safe}_preview.glb`; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    setStatus(`Saved the 3D preview as .glb (${(glb.byteLength / 1048576).toFixed(1)} MB). It's a rough look-see model; the game still builds its level from the JSON.`, 'ok');
+  } catch (e) {
+    setStatus("Couldn't save the .glb: " + (e instanceof TypeError ? 'the exporter did not download from unpkg.com' : e.message), 'err');
+  } finally { btn.disabled = false; btn.textContent = '⬇ .glb'; }
+}
+function close3D() {
+  if (!v3d) return;
+  cancelAnimationFrame(v3d.raf);
+  window.removeEventListener('resize', v3d.resize);
+  v3d.controls.dispose();
+  v3d.scene.traverse(o => { if (o.geometry) o.geometry.dispose(); const ms = Array.isArray(o.material) ? o.material : o.material ? [o.material] : []; for (const m of ms) { if (m.map) m.map.dispose(); m.dispose(); } });
+  v3d.renderer.dispose();
+  v3d.renderer.forceContextLoss();
+  v3d.ui.remove();
+  v3d = null;
+  setTimeout(() => map.invalidateSize(), 50);
+}
+$('view3dBtn').onclick = open3D;
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && v3d) close3D(); });
 
 // ---- remember the last route between visits (optional; fails silently) ----
 function save() {

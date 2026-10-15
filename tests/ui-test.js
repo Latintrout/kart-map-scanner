@@ -56,6 +56,8 @@ const overpass = { elements: [
     await page.route('**/*', async route => {
       const u = route.request().url();
       if (u.startsWith('http://scanner.test/')) return route.fulfill({ body: html, contentType: 'text/html' });
+      const three = u.match(/unpkg\.com\/three@0\.160\.0\/(.+)$/);
+      if (three) return route.fulfill({ body: fs.readFileSync(path.join(__dirname, 'node_modules/three', three[1])), contentType: 'text/javascript', headers: { 'access-control-allow-origin': '*' } });
       if (u.includes('leaflet.js')) return route.fulfill({ body: leafletJs, contentType: 'text/javascript' });
       if (u.includes('leaflet.css')) return route.fulfill({ body: leafletCss, contentType: 'text/css' });
       if (u.includes('/interpreter')) {
@@ -233,6 +235,40 @@ const overpass = { elements: [
     await page.setInputFiles('#libFile', path.join(__dirname, 'export.json')); await page.waitForTimeout(200);
     if (process.env.SHOT) { await page.click('[data-mode="build"]'); for (const [dx, dy] of [[-150, 80], [-110, 80], [-110, 110]]) await page.mouse.click(cx + dx, cy + dy); await page.screenshot({ path: process.env.SHOT }); await page.click('#bCancelBtn'); await page.click('[data-mode="pan"]'); }
     check('v9a library: restoring a non-library file explains why', /not a track library backup/.test(await page.textContent('#status')));
+  }
+  if (V >= 11) {
+    // ---------- v11: 3D preview ----------
+    if (await page.isDisabled('#exportBtn')) { await page.click('#scanBtn'); await page.waitForFunction(() => !document.getElementById('exportBtn').disabled, null, { timeout: 15000 }); }
+    check('v11 3D preview button enabled after a scan', !(await page.isDisabled('#view3dBtn')));
+    await page.click('#view3dBtn');
+    await page.waitForFunction(() => /buildings/.test((document.getElementById('v3dInfo') || {}).textContent || '') || /Couldn't/.test(document.getElementById('status').textContent), null, { timeout: 20000 });
+    const info = await page.textContent('#v3dInfo').catch(() => '');
+    check('v11 3D preview opens and lists what it drew', /^\d+ buildings · \d+ trees · \d+ props · \d+ landmarks · [\d.]+ km track/.test(info), info + ' | ' + await page.textContent('#status'));
+    await page.waitForTimeout(500);
+    // count pixels that aren't sky: the scene actually rendered
+    const notSky = async () => page.evaluate(() => { const c = document.querySelector('#v3dHost canvas'); const t = document.createElement('canvas'); t.width = 200; t.height = 150; const g = t.getContext('2d'); g.drawImage(c, 0, 0, 200, 150); const d = g.getImageData(0, 0, 200, 150).data; let n = 0; for (let i = 0; i < d.length; i += 4) if (Math.abs(d[i] - 156) + Math.abs(d[i + 1] - 201) + Math.abs(d[i + 2] - 239) > 40) n++; return { n, w: c.width }; });
+    const px = await notSky();
+    check('v11 3D scene renders (ground, track, buildings visible)', px.n > 2000, JSON.stringify(px));
+    if (process.env.SHOT3) await page.screenshot({ path: process.env.SHOT3 });
+    await page.check('#v3dRetro'); await page.waitForTimeout(300);
+    const rp = await notSky();
+    check('v11 Retro pixels renders at about a third of the resolution', rp.w < px.w * 0.5 && rp.n > 2000, JSON.stringify([px.w, rp.w]));
+    if (process.env.SHOT3) await page.screenshot({ path: process.env.SHOT3.replace('.png', '-retro.png') });
+    await page.uncheck('#v3dRetro');
+    const shot1 = await page.evaluate(() => document.querySelector('#v3dHost canvas').toDataURL());
+    await page.click('#v3dFly'); await page.waitForTimeout(800);
+    const shot2 = await page.evaluate(() => document.querySelector('#v3dHost canvas').toDataURL());
+    check('v11 Fly the lap moves the camera (picture changes) and the button becomes Stop', shot1 !== shot2 && /Stop/.test(await page.textContent('#v3dFly')));
+    if (process.env.SHOT3) await page.screenshot({ path: process.env.SHOT3.replace('.png', '-fly.png') });
+    await page.click('#v3dFly');
+    const [gd] = await Promise.all([page.waitForEvent('download', { timeout: 20000 }), page.click('#v3dGlb')]);
+    const gf = path.join(__dirname, 'preview.glb'); await gd.saveAs(gf);
+    const glb = fs.readFileSync(gf);
+    check('v11 .glb download is a real glTF 2 binary', glb.slice(0, 4).toString() === 'glTF' && glb.readUInt32LE(4) === 2 && glb.length > 2000 && /_preview\.glb$/.test(gd.suggestedFilename()), glb.length + ' ' + gd.suggestedFilename());
+    const gjson = JSON.parse(glb.slice(20, 20 + glb.readUInt32LE(12)).toString());
+    check('v11 .glb has the buildings, track and ground in it', gjson.nodes.some(n => n.name === 'track') && gjson.nodes.some(n => n.name === 'ground') && gjson.nodes.some(n => n.name === 'buildings'), gjson.nodes.map(n => n.name).slice(0, 20).join(','));
+    await page.click('#v3dClose');
+    check('v11 Close removes the 3D view and the map still works', !(await page.$('#view3d')) && await page.isVisible('#map'));
   }
   check('no script errors during the whole run', errors.length === 0, errors.join('; '));
   await ctx.close();

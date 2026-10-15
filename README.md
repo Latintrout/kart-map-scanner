@@ -24,6 +24,7 @@ Draw a route on a real map, scan the area along it from free OpenStreetMap data,
 - **Race direction and start**: reverse the lap or click where the start line goes. Arrows and a 🏁 show the way round.
 - **Saved tracks**: keep several tracks in the browser, and back them all up to one file.
 - **Works on a phone**: map on top, panel below (the ▲/▼ button gives either more room). Draw with one finger, pinch with two, long-press to delete. "Show problem" jumps to anything sitting on the track.
+- **3D preview** after a scan: orbit around the level, "Fly the lap" at kart height, switch on retro pixels, or save a rough `.glb` model.
 - **Export / Load** the level file. The format is documented in `docs/kartmap-format.md`.
 
 ## Tests
@@ -36,4 +37,4 @@ Use the local launcher package (`start-kart-scanner.bat`). It serves the page at
 
 ## Credits
 
-Map data © OpenStreetMap contributors (ODbL). Map tiles © Esri / OpenTopoMap / OpenStreetMap. Road snapping by the OSRM demo server. Search by Nominatim. Building gaps from Overture Maps (ODbL). Colours from Queensland aerial imagery: Includes material © State of Queensland (DNRMMRRD); © Planet Labs Netherlands (CC BY-SA). Landmark photos from Wikimedia Commons (each photo's own licence).
+Map data © OpenStreetMap contributors (ODbL). Map tiles © Esri / OpenTopoMap / OpenStreetMap. Road snapping by the OSRM demo server. Search by Nominatim. Building gaps from Overture Maps (ODbL). Colours from Queensland aerial imagery: Includes material © State of Queensland (DNRMMRRD); © Planet Labs Netherlands (CC BY-SA). Landmark photos from Wikimedia Commons (each photo's own licence). 3D preview by three.js (MIT).

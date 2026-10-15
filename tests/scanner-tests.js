@@ -121,6 +121,8 @@ function runScannerTests(lib) {
   else check('v9a functions present', false, 'orientRoute not found (running against v8.3?)');
   if (has('problemSpots')) runV9b(lib, check, same);
   else check('v9b functions present', false, 'problemSpots not found (running against v9a?)');
+  if (has('scene3dPlan')) runV11(lib, check, same);
+  else check('v11 functions present', false, 'scene3dPlan not found (running against v9b?)');
 
   return results;
 }
@@ -560,5 +562,44 @@ function runV9b(lib, check, same) {
   check('v9b problems are ordered nearest the start first, with plain labels', ps.length === 3 && /bench on the track/.test(ps[0].label) && /Fence or wall/.test(ps[1].label) && /Building blocking/.test(ps[2].label));
   check('v9b problem spots sit where the things are', ps.length === 3 && Math.abs(ps[0].xy[0] - 50) < 1 && Math.abs(ps[2].xy[0] - 205) < 1, JSON.stringify(ps.map(p => p.xy)));
   check('v9b no problems = empty list', lib.problemSpots([]).length === 0 && lib.problemSpots(null).length === 0);
+}
+
+function runV11(lib, check, same) {
+  // ribbon: heading east, left edge is north
+  const r = lib.ribbon([[0, 0], [10, 0], [20, 0]], 8, false);
+  check('v11 track ribbon: left edge 4 m north, right edge 4 m south when heading east', same(r.left, [[0, 4], [10, 4], [20, 4]]) && same(r.right, [[0, -4], [10, -4], [20, -4]]), JSON.stringify(r));
+  const sq = lib.ribbon([[0, 0], [10, 0], [10, 10], [0, 10], [0, 0]], 2, true);
+  check('v11 closed ribbon: the join at the start is mitred like any other corner', Math.abs(sq.left[0][0] - sq.left[4][0]) < 1e-6 && Math.abs(sq.left[0][1] - sq.left[4][1]) < 1e-6);
+  // plan from a real buildOutput
+  const la = -27.47, lo = 153.03;
+  const off = (dx, dy) => ({ lat: la + dy / 111320, lon: lo + dx / (111320 * Math.cos(la * Math.PI / 180)) });
+  const llOff = (dx, dy) => { const o = off(dx, dy); return [o.lat, o.lon]; };
+  const rect = (x, y, w, h) => [off(x, y), off(x + w, y), off(x + w, y + h), off(x, y + h), off(x, y)];
+  const loop = [llOff(0, 0), llOff(200, 0), llOff(200, 200), llOff(0, 200), llOff(0, 0)];
+  const data = { elements: [
+    { type: 'way', id: 1, tags: { highway: 'residential' }, geometry: loop.map(p => ({ lat: p[0], lon: p[1] })) },
+    { type: 'way', id: 2, tags: { building: 'yes', 'building:levels': '3', 'building:colour': 'red' }, geometry: rect(50, 50, 30, 30) },
+    { type: 'way', id: 3, tags: { building: 'house' }, geometry: rect(120, 50, 10, 10) },
+    { type: 'way', id: 4, tags: { building: 'yes', name: 'Tower' }, geometry: rect(50, 120, 30, 30) },
+    { type: 'way', id: 5, tags: { 'building:part': 'yes', 'building:levels': '20', 'building:min_level': '2' }, geometry: rect(55, 125, 10, 10) },
+    { type: 'way', id: 6, tags: { 'building:part': 'yes', 'building:levels': '2' }, geometry: rect(50, 120, 30, 30) },
+    { type: 'node', id: 7, lat: off(30, 30).lat, lon: off(30, 30).lon, tags: { natural: 'tree', genus: 'Archontophoenix' } },
+    { type: 'node', id: 8, lat: off(40, 30).lat, lon: off(40, 30).lon, tags: { amenity: 'bench' } },
+    { type: 'node', id: 9, lat: off(60, 60).lat, lon: off(60, 60).lon, tags: { tourism: 'attraction', name: 'Big Thing' } }
+  ] };
+  const { out } = lib.buildOutput(data, { route: loop, waypoints: loop.slice(0, 4), radius: 150, width: 8, loop: true, snapped: false, name: 't', now: 'X' });
+  const p = lib.scene3dPlan(lib.withManualExtras(out, [], [{ ring: [llOff(150, 150), llOff(160, 150), llOff(160, 160)], height: 4 }]));
+  const tower = out.buildings.find(b => b.name === 'Tower');
+  check('v11 3D plan: parent with parts is skipped, its parts drawn', tower && tower.hasParts && !p.buildings.some(b => b.id === tower.id) && p.buildings.filter(b => out.buildings.find(o => o.id === b.id && o.part)).length === 2);
+  const tall = p.buildings.find(b => b.top === 60);
+  check('v11 3D plan: a 20-floor part starting at floor 2 runs 6 m to 60 m', tall && tall.base === 6, JSON.stringify(p.buildings.map(b => [b.id, b.base, b.top])));
+  const red = p.buildings.find(b => b.wall === 'red'), house = p.buildings.find(b => b.wall === '#d9c8a9');
+  check('v11 3D plan: mapped wall colour kept, unmapped house gets the house colour, guessed heights flagged', red && house && house.guessed === true && red.guessed === false);
+  check('v11 3D plan: hand-drawn building included and marked', p.buildings.some(b => b.manual && b.top === 4));
+  check('v11 3D plan: palm tree, bench prop, landmark', p.trees.length === 1 && p.trees[0].type === 'palm' && p.trees[0].h === 10 && p.props.length === 1 && p.props[0].kind === 'bench' && p.landmarks.some(l => l.name === 'Big Thing'));
+  check('v11 3D plan: track uses the smooth line, both edges, closed loop, start line', p.track.closed && p.track.line.length === out.route.centerline.points.length && p.track.left.length === p.track.line.length && p.start && p.checkpoints.length >= 8);
+  // ground image plan: size and stored metres-per-pixel agree (v11 fix)
+  const g = lib.groundImagePlan({ minX: 0, minY: 0, maxX: 5000, maxY: 1000 }, 1, 4096);
+  check('v11 fix: ground image size matches its metres per pixel (5 km wide area)', g.width * g.metresPerPixel >= 5000 && (g.width - 1) * g.metresPerPixel < 5000 && g.width <= 4096, JSON.stringify(g));
 }
 

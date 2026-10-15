@@ -1,6 +1,6 @@
 # kartmap file format (version 2)
 
-_Last updated for scanner v9a (2026-10-16; v9b made no format changes). Fields marked **(v8)**, **(v8.1)**, **(v8.2)**, **(v8.3)** or **(v9a)** are newer than version 1. All are optional, so readers of version 1 files still work. Files say `"version": 2` from scanner v8.2 on, matching the "kartmap v2" the game's loader (brisbane-kart, `kartmap.gd`) was written for. That loader accepts versions 1 and 2 and **rejects anything higher**, so a future version 3 needs a loader update first._
+_Last updated for scanner v11 (2026-10-16). v9b and v11 made no format changes; v11's `.glb` is a separate preview model, not part of this format. Fields marked **(v8)**, **(v8.1)**, **(v8.2)**, **(v8.3)** or **(v9a)** are newer than version 1. All are optional, so readers of version 1 files still work. Files say `"version": 2` from scanner v8.2 on, matching the "kartmap v2" the game's loader (brisbane-kart, `kartmap.gd`) was written for. That loader accepts versions 1 and 2 and **rejects anything higher**, so a future version 3 needs a loader update first._
 
 **Guesses are always marked.** Any field ending in `Source` (`heightSource`, `widthSource`, `roofShapeSource`) says where a value came from. The values `default`, `estimated`, `guess` and **(v8.3)** `ml-estimate` mean it's a guess: later data (LiDAR, hand edits) may replace guesses freely, but must never replace real values (`osm`, `levels`, `lanes`, `lidar`, **(v8.3)** `overture`, **(v9a)** `manual`).
 
@@ -52,7 +52,7 @@ into a level in the Godot kart game.
 | `attribution` | "© OpenStreetMap contributors, ODbL", plus **(v8.3)** Overture and Queensland imagery credits when those were used. Must appear in the game's credits |
 | `overture` | **(v8.3)** `{ release, heightsFilled, added }` when Overture Maps filled gaps (ODbL, same as OSM) |
 | `imagery` | **(v8.3)** Set after "Sample colours": `{ source, service, licence: "CC BY-SA", attribution, vintage, noWarranty, metresPerPixel, sampled: {buildings, areas} }`. The photos are 2022 or older |
-| `groundImage` | **(v8.3)** Set after "Export ground image": `{ file, minX, minY, maxX, maxY, width, height, metresPerPixel, colours }`. A top-down PNG for the ground texture. Top-left pixel = (`minX`, `maxY`), north is up |
+| `groundImage` | **(v8.3)** Set after "Export ground image": `{ file, minX, minY, maxX, maxY, width, height, metresPerPixel, colours }`. **(v11)** `width × metresPerPixel` now always covers the area exactly (rounding fix). A top-down PNG for the ground texture. Top-left pixel = (`minX`, `maxY`), north is up |
 
 ## route
 
