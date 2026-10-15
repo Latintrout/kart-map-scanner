@@ -1,6 +1,6 @@
 # kartmap file format (version 2)
 
-_Last updated for scanner v11 (2026-10-16). v9b and v11 made no format changes; v11's `.glb` is a separate preview model, not part of this format. Fields marked **(v8)**, **(v8.1)**, **(v8.2)**, **(v8.3)** or **(v9a)** are newer than version 1. All are optional, so readers of version 1 files still work. Files say `"version": 2` from scanner v8.2 on, matching the "kartmap v2" the game's loader (brisbane-kart, `kartmap.gd`) was written for. That loader accepts versions 1 and 2 and **rejects anything higher**, so a future version 3 needs a loader update first._
+_Last updated for scanner v12a (2026-10-16). v9b and v11 made no format changes (v11's `.glb` is a separate preview model). **(v12a)** adds ground heights._ Fields marked **(v8)**, **(v8.1)**, **(v8.2)**, **(v8.3)** or **(v9a)** are newer than version 1. All are optional, so readers of version 1 files still work. Files say `"version": 2` from scanner v8.2 on, matching the "kartmap v2" the game's loader (brisbane-kart, `kartmap.gd`) was written for. That loader accepts versions 1 and 2 and **rejects anything higher**, so a future version 3 needs a loader update first._
 
 **Guesses are always marked.** Any field ending in `Source` (`heightSource`, `widthSource`, `roofShapeSource`) says where a value came from. The values `default`, `estimated`, `guess` and **(v8.3)** `ml-estimate` mean it's a guess: later data (LiDAR, hand edits) may replace guesses freely, but must never replace real values (`osm`, `levels`, `lanes`, `lidar`, **(v8.3)** `overture`, **(v9a)** `manual`).
 
@@ -14,7 +14,7 @@ into a level in the Godot kart game.
 - All positions are **metres** from the route's first point (the origin, `[0, 0]`).
 - Every point is `[x, y]`: **x = east, y = north**.
 - In Godot (Y up, -Z forward): `Vector3(x, 0, -y)`.
-- The ground is flat for now. `meta.elevation` is `null` and is reserved for hill data later.
+- The ground is flat unless the scan has ground heights: `meta.elevation` is `null` without them. **(v12a)** With them ("Get ground heights"), heights are metres above `meta.elevation.base`, kept in separate fields so every point stays `[x, y]`: `route.elevation`, `route.centerline.elevation`, and `ground` on buildings, points and landmarks. In Godot: `Vector3(x, height, -y)`.
 
 ## Top level
 
@@ -47,6 +47,7 @@ into a level in the Godot kart game.
 | `bbox` | Extent of everything in the file, in metres |
 | `areasTrimmedTo` | Box that large areas (like the river) were cut to |
 | `counts` | Number of each feature type (v8 adds `barriers`, `landmarks`, `bridges`, `tunnels`) |
+| `elevation` | **(v12a)** `null`, or ground heights from the Queensland LiDAR terrain model: `{ source, service, licence: "CC BY-SA", attribution, base, units, groundOnly, metresPerSample, trackLowest, trackHighest, climb, descent, steepest: { grade, at }, bridgedPoints, counts, terrainFile?, terrainSpacing? }`. `base` = metres above sea level (AHD) of the track's lowest point; every other height is metres above `base`. `grade` is % over 20 m (+ uphill in race direction), `at` = metres along the centerline |
 | `generator` | **(v8)** Which scanner version made the file, e.g. `"kart-map-scanner v8.1"` |
 | `quality` | **(v8.1)** Report card: `heights` (% measured / estimated / default), `roofShapes` (% mapped / guessed), `buildingsOnTrack` (ids), `barriersOnTrack`, `propsOnTrack`, `treesTyped` (%), and `notes` (plain-English warnings) |
 | `attribution` | "© OpenStreetMap contributors, ODbL", plus **(v8.3)** Overture and Queensland imagery credits when those were used. Must appear in the game's credits |
@@ -64,9 +65,10 @@ into a level in the Godot kart game.
 | `closed` | `true` = lap track (loop) |
 | `snappedToRoads` | `true` if snapped to car roads; `false` if drawn by hand (e.g. along footpaths) |
 | `waypoints` | The scanner's editing points in lat/lon, in the order they were drawn. The game should ignore these |
+| `elevation` | **(v12a)** Height (m above `meta.elevation.base`) of each of `points`, same length. Smoothed over ±8 m; on bridges and in tunnels a straight line between the two ends (the terrain model is bare ground, so it would put a bridge deck down in the river) |
 | `reversed` | **(v9a)** `true` if the race runs against the drawing direction (already applied to `points`) |
 | `startPoint` | **(v9a)** `[lat, lon]` of the start picked by hand on a loop (already applied to `points`; `meta.origin` sits there too) |
-| `centerline` | **(v8.1)** `{ spacing, points, length }`: the track line smoothed (corners rounded about 5 m) with points exactly `spacing` (2 m) apart. **Use this for the track surface**; `points` is the raw line |
+| `centerline` | **(v8.1)** `{ spacing, points, length, elevation? }` (**v12a** `elevation`: one height per point, as for `route.elevation`): the track line smoothed (corners rounded about 5 m) with points exactly `spacing` (2 m) apart. **Use this for the track surface**; `points` is the raw line |
 | `corners` | **(v8.1)** `[{ at, pos, angle }]`: turns of more than 35°. `at` = metres along the centerline, `angle` in degrees (+ left, − right) |
 
 ## roads
@@ -100,6 +102,7 @@ Each: `{ id, kind, name?, height, heightSource, footprint, holes?, roofShape?, r
 - **(v8.3)** `source: "overture"`: a building OSM doesn't have, added from Overture Maps (id starts with `ov-`). Only added when it doesn't overlap an OSM building and isn't underground.
 - **(v8.3)** `sampledRoofColour`: hex colour read from the aerial photo (median of the roof). Only present after "Sample colours". A mapped `roofColour` always wins; use this when there is none.
 - **(v9a)** `source: "manual"`, `heightSource: "manual"`: a building drawn by hand in the scanner (id `mb1`, `mb2`…), with the height typed in. Treat the height as real. Roof is `flat` (`roofShapeSource: "guess"`). No `trackDist` / `onTrack` on these.
+- **(v12a)** `ground`: height of the lowest ground under the outline (m above `meta.elevation.base`), so the building starts there and doesn't float on a slope. `height` and `minHeight` are still measured from the building's own ground.
 - `holes` (optional) lists courtyards to cut out, each its own polygon.
 - **(v8) Looks, when OSM has them (all optional):**
   - `roofShape`: `flat`, `gabled`, `hipped`, `pyramidal`, `skillion`, `dome`…
@@ -191,3 +194,8 @@ Suggestions only (`suggested: true`). The game or a later editor may move them.
 9. **(v8.1/v8.2) Building parts:** when a building has `hasParts`, skip it and build the `part: true` buildings that name it as `parent`.
 10. **(v8.2) Loader contract:** the scanner checks every scan against what the game's loader reads (valid footprints, heights, parts present for `hasParts`, positions on landmarks and props) and warns before export if anything would break in the game.
 11. **(v8.3) Colours:** mapped colours (`roofColour`, `colour`) first, then `sampledRoofColour` / area `sampledColour` from the aerial photo, then the game's own palette.
+12. **(v12a) Hills:** with `meta.elevation`, raise the track by `route.elevation` (or `centerline.elevation`), and each building/prop/tree by its `ground`. The full height grid is in the terrain file:
+
+### Terrain file (v12a), `kartmap_<name>_terrain.json`
+
+`{ format: "kartmap-terrain", version: 1, name, origin, minX, maxY, spacing, width, height, base, encoding, source, licence, attribution, missing, data }`. `data` is base64 of `width × height` 16-bit little-endian integers: centimetres above `base`, row by row starting at the north-west corner (`minX`, `maxY`), going east along a row and then south (row `r`, column `c` is at x = `minX + c × spacing`, y = `maxY − r × spacing`). `-32768` = no data. Bare ground only (bridges and buildings are not in it).

@@ -67,6 +67,13 @@ const overpass = { elements: [
         return route.fulfill({ body: JSON.stringify(body), contentType: 'application/json', headers: { 'access-control-allow-origin': '*' } });
       }
       if (u.includes('router.project-osrm.org')) return route.fulfill({ body: JSON.stringify({ code: 'NoRoute' }), contentType: 'application/json', headers: { 'access-control-allow-origin': '*' } });
+      if (u.includes('/Elevation/QldDem/ImageServer/exportImage')) {
+        // fake LiDAR heights: 10 m on the west edge, rising 0.2 m per pixel going east; all pixels valid
+        const [w, hh] = new URL(u).searchParams.get('size').split(',').map(Number);
+        const buf = Buffer.alloc(w * hh * 4 + Math.ceil(w * hh / 8), 255);
+        for (let r = 0; r < hh; r++) for (let c = 0; c < w; c++) buf.writeFloatLE(10 + c * 0.2, (r * w + c) * 4);
+        return route.fulfill({ body: buf, contentType: 'application/octet-stream', headers: { 'access-control-allow-origin': '*' } });
+      }
       if (u.includes('spatial-img.information.qld.gov.au')) return route.fulfill({ body: aerial, contentType: 'image/png', headers: { 'access-control-allow-origin': '*' } });
       if (u.includes('commons.wikimedia.org/w/api.php')) {
         const q = new URL(u).searchParams, cors = { 'access-control-allow-origin': '*' };
@@ -235,6 +242,25 @@ const overpass = { elements: [
     await page.setInputFiles('#libFile', path.join(__dirname, 'export.json')); await page.waitForTimeout(200);
     if (process.env.SHOT) { await page.click('[data-mode="build"]'); for (const [dx, dy] of [[-150, 80], [-110, 80], [-110, 110]]) await page.mouse.click(cx + dx, cy + dy); await page.screenshot({ path: process.env.SHOT }); await page.click('#bCancelBtn'); await page.click('[data-mode="pan"]'); }
     check('v9a library: restoring a non-library file explains why', /not a track library backup/.test(await page.textContent('#status')));
+  }
+  if (V >= 12.1) {
+    // ---------- v12a: ground heights ----------
+    if (await page.isDisabled('#exportBtn')) { await page.click('#scanBtn'); await page.waitForFunction(() => !document.getElementById('exportBtn').disabled, null, { timeout: 15000 }); }
+    check('v12a heights button ready after a scan, terrain button waits for heights', !(await page.isDisabled('#heightsBtn')) && await page.isDisabled('#terrainBtn'));
+    await page.click('#heightsBtn');
+    await page.waitForFunction(() => /Ground heights (added|failed)|No ground heights/.test(document.getElementById('status').textContent), null, { timeout: 15000 });
+    const hs = await page.textContent('#status');
+    check('v12a ground heights added, with climb in the status', /Ground heights added: the track climbs \d+ m/.test(hs), hs);
+    check('v12a stats show the hills row', /Hills \(climb \/ highest\)\d+ m \/ [\d.]+ m/.test(await page.textContent('#stats')), (await page.textContent('#stats')).slice(0, 200));
+    const [td] = await Promise.all([page.waitForEvent('download'), page.click('#terrainBtn')]);
+    const tfile = path.join(__dirname, 'terrain.json'); await td.saveAs(tfile);
+    const tj = JSON.parse(fs.readFileSync(tfile, 'utf8'));
+    check('v12a terrain file: right format, size and data length', tj.format === 'kartmap-terrain' && tj.spacing === 4 && Buffer.from(tj.data, 'base64').length === tj.width * tj.height * 2 && /_terrain\.json$/.test(td.suggestedFilename()));
+    const jh = JSON.parse(fs.readFileSync(await (async () => { const [d] = await Promise.all([page.waitForEvent('download'), page.click('#exportBtn')]); const f = path.join(__dirname, 'export12a.json'); await d.saveAs(f); return f; })(), 'utf8'));
+    check('v12a export: meta.elevation (base, climb, licence, terrain file), heights on the route and buildings',
+      jh.meta.elevation && jh.meta.elevation.licence === 'CC BY-SA' && jh.meta.elevation.terrainFile === td.suggestedFilename() && jh.route.elevation.length === jh.route.points.length &&
+      jh.route.centerline.elevation.length === jh.route.centerline.points.length && jh.buildings.every(b => typeof b.ground === 'number') && /Ground heights/.test(jh.meta.attribution), JSON.stringify(jh.meta.elevation).slice(0, 300));
+    check('v12a export still version 2 and loader-safe shapes (points stay [x, y])', jh.version === 2 && jh.route.points.every(p => p.length === 2));
   }
   if (V >= 11) {
     // ---------- v11: 3D preview ----------

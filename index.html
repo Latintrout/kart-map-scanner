@@ -194,7 +194,9 @@
     <button id="sampleBtn" style="width:100%" disabled>Sample colours from aerial photo</button>
     <button id="photosBtn" style="width:100%;margin-top:6px" disabled>Find landmark photos</button>
     <button id="groundBtn" style="width:100%;margin-top:6px" disabled>Export ground image (PNG)</button>
-    <div class="hint" style="margin-top:4px">Aerial photos © State of Queensland (CC BY-SA), mostly 2021. Photos from Wikimedia Commons: check each licence. Export JSON again after using these.</div>
+    <button id="heightsBtn" style="width:100%;margin-top:6px" disabled>⛰ Get ground heights (QLD LiDAR)</button>
+    <button id="terrainBtn" style="width:100%;margin-top:6px" disabled>Export terrain file (hills for the game)</button>
+    <div class="hint" style="margin-top:4px">Aerial photos and ground heights © State of Queensland (CC BY-SA); photos mostly 2021. Photos from Wikimedia Commons: check each licence. Export JSON again after using these.</div>
   </section>
 
   <section class="hint">
@@ -893,6 +895,7 @@ function attributionFor(used) {
   const parts = ['© OpenStreetMap contributors, ODbL'];
   if (used && used.overture) parts.push('Overture Maps Foundation (ODbL), including Microsoft ML Buildings');
   if (used && used.imagery) parts.push('Includes material © State of Queensland (DNRMMRRD), CC BY-SA; © Planet Labs Netherlands');
+  if (used && used.elevation) parts.push('Ground heights: Includes material © State of Queensland (DNRMMRRD); © Commonwealth of Australia (Geoscience Australia, The Australian Hydrographic Office); © www.deepreef.org 2025, CC BY-SA');
   return parts.join('; ');
 }
 
@@ -1021,7 +1024,7 @@ function applyColourSamples(out, tiles, unprojFactory, info) {
     vintage: '2022 or older (urban areas mostly 2021)', noWarranty: 'The State of Queensland makes no warranty about this data.',
     metresPerPixel: (info && info.metresPerPixel) || null, sampled: counts
   };
-  out.meta.attribution = attributionFor({ overture: !!out.meta.overture, imagery: true });
+  out.meta.attribution = attributionFor({ overture: !!out.meta.overture, imagery: true, elevation: !!out.meta.elevation });
   return counts;
 }
 
@@ -1367,7 +1370,7 @@ function buildOutput(data, o) {
     meta: {
       name: o.name || 'route',
       generated: o.now || new Date().toISOString(),
-      generator: 'kart-map-scanner v11',
+      generator: 'kart-map-scanner v12a',
       origin: { lat: origin[0], lon: origin[1] },
       units: 'metres',
       axes: 'x = east, y = north. In Godot: Vector3(x, 0, -y)',
@@ -1585,28 +1588,178 @@ function scene3dPlan(out) {
   for (const b of out.buildings || []) {
     if (b.hasParts || !Array.isArray(b.footprint) || b.footprint.length < 3) continue;   // parts are drawn instead
     const base = Math.max(0, b.minHeight || 0);
-    buildings.push({ id: b.id, outline: b.footprint, holes: b.holes || [], base, top: Math.max(base + 0.5, b.height || 3),
+    buildings.push({ id: b.id, outline: b.footprint, holes: b.holes || [], base, top: Math.max(base + 0.5, b.height || 3), ground: b.ground || 0,
       wall: b.colour || WALL_COLOURS[b.kind] || '#c9c9c9', roof: b.roofColour || b.sampledRoofColour || null,
       guessed: /^(default|estimated|ml-estimate|guess)$/.test(b.heightSource || ''), manual: b.source === 'manual', blocks: !!b.onTrack });
   }
   const trees = [], props = [];
   for (const p of out.points || []) {
     if (!Array.isArray(p.pos)) continue;
-    if (p.kind === 'tree') trees.push({ x: p.pos[0], y: p.pos[1], type: p.treeType || null,
+    if (p.kind === 'tree') trees.push({ x: p.pos[0], y: p.pos[1], g: p.ground || 0, type: p.treeType || null,
       h: p.height || (p.treeType === 'palm' ? 10 : p.treeType === 'conifer' ? 9 : 7), r: (p.canopy || (p.treeType === 'palm' ? 5 : 7)) / 2 });
-    else props.push({ x: p.pos[0], y: p.pos[1], kind: p.kind });
+    else props.push({ x: p.pos[0], y: p.pos[1], g: p.ground || 0, kind: p.kind });
   }
-  const line = (out.route.centerline && out.route.centerline.points && out.route.centerline.points.length > 1) ? out.route.centerline.points : out.route.points;
+  const useCl = !!(out.route.centerline && out.route.centerline.points && out.route.centerline.points.length > 1);
+  const line = useCl ? out.route.centerline.points : out.route.points;
   const closed = !!out.route.closed;
+  // v12a: heights along the track (zeros when there are none)
+  const elev = (useCl ? out.route.centerline.elevation : out.route.elevation) || line.map(() => 0);
+  const sp = useCl ? (out.route.centerline.spacing || 2) : 0;
+  const elevAt = at => sp ? elev[Math.max(0, Math.min(elev.length - 1, Math.round(at / sp)))] : 0;
   return {
     centre: [round2((bb.minX + bb.maxX) / 2), round2((bb.minY + bb.maxY) / 2)],
     size: [round2(bb.maxX - bb.minX), round2(bb.maxY - bb.minY)],
     buildings, trees, props,
-    track: { line, closed, width: out.route.width || 8, ...ribbon(line, out.route.width || 8, closed) },
-    start: out.race ? out.race.startLine : null,
-    checkpoints: out.race ? out.race.checkpoints : [],
-    landmarks: (out.landmarks || []).filter(l => Array.isArray(l.pos)).map(l => ({ x: l.pos[0], y: l.pos[1], name: l.name, kind: l.kind }))
+    track: { line, closed, elev, width: out.route.width || 8, ...ribbon(line, out.route.width || 8, closed) },
+    start: out.race ? { ...out.race.startLine, g: elevAt(out.race.startLine.at || 0) } : null,
+    checkpoints: out.race ? out.race.checkpoints.map(c => ({ ...c, g: elevAt(c.at || 0) })) : [],
+    landmarks: (out.landmarks || []).filter(l => Array.isArray(l.pos)).map(l => ({ x: l.pos[0], y: l.pos[1], g: l.ground || 0, name: l.name, kind: l.kind })),
+    hills: !!out.meta.elevation
   };
+}
+
+// ======================================================================
+// v12a: ground heights from Queensland's LiDAR terrain model (pure part)
+// ======================================================================
+// The service is "Queensland DEM": bare ground (no buildings or trees), 1 m LiDAR in towns,
+// 30 m SRTM elsewhere, river and sea depths included. Licence CC BY-SA.
+const DEM_SOURCE = {
+  service: 'https://spatial-img.information.qld.gov.au/arcgis/rest/services/Elevation/QldDem/ImageServer',
+  name: 'Queensland DEM (LiDAR, 1 m in most towns)', licence: 'CC BY-SA',
+  attribution: 'Includes material © State of Queensland (DNRMMRRD); © Commonwealth of Australia (Geoscience Australia, The Australian Hydrographic Office); © www.deepreef.org 2025'
+};
+// The server's raw "bsq" answer for one float band: width × height float32 values (row by row,
+// north row first), then one bit per pixel saying whether it has data (found in a live test).
+function parseBsqF32(buf, w, h) {
+  const n = w * h, out = new Float32Array(n);
+  out.set(new Float32Array(buf.slice(0, n * 4)));
+  if (buf.byteLength >= n * 4 + Math.ceil(n / 8)) {
+    const mask = new Uint8Array(buf, n * 4, Math.ceil(n / 8));
+    for (let i = 0; i < n; i++) if (!(mask[i >> 3] & (0x80 >> (i & 7)))) out[i] = NaN;
+  }
+  for (let i = 0; i < n; i++) if (!(out[i] > -1000 && out[i] < 10000)) out[i] = NaN;   // junk / no-data values
+  return out;
+}
+// Height at a lat/lon from a list of grids { box: {west, east, north, south}, width, height, data }.
+// Pixel centres, bilinear between the 4 nearest. null where there's no data.
+function sampleGrid(grids, lat, lon) {
+  for (const g of grids) {
+    const b = g.box;
+    if (lat < b.south || lat > b.north || lon < b.west || lon > b.east) continue;
+    const fx = Math.max(0, Math.min(g.width - 1, (lon - b.west) / (b.east - b.west) * g.width - 0.5));
+    const fy = Math.max(0, Math.min(g.height - 1, (b.north - lat) / (b.north - b.south) * g.height - 0.5));
+    const x0 = Math.floor(fx), y0 = Math.floor(fy), x1 = Math.min(g.width - 1, x0 + 1), y1 = Math.min(g.height - 1, y0 + 1);
+    const tx = fx - x0, ty = fy - y0, d = g.data, W = g.width;
+    const v = [d[y0 * W + x0], d[y0 * W + x1], d[y1 * W + x0], d[y1 * W + x1]], wt = [(1 - tx) * (1 - ty), tx * (1 - ty), (1 - tx) * ty, tx * ty];
+    let s = 0, ws = 0;
+    for (let k = 0; k < 4; k++) if (!isNaN(v[k])) { s += v[k] * wt[k]; ws += wt[k]; }
+    if (ws > 0.01) return s / ws;
+  }
+  return null;
+}
+// Fills gaps (null) along a line by straight-line interpolation between the nearest known values.
+function fillGaps(vals) {
+  const out = vals.slice(), n = out.length;
+  let last = -1;
+  for (let i = 0; i <= n; i++) {
+    if (i < n && out[i] == null) continue;
+    if (last >= 0 && i < n && i - last > 1) for (let k = last + 1; k < i; k++) out[k] = out[last] + (out[i] - out[last]) * (k - last) / (i - last);
+    else if (last < 0 && i < n) for (let k = 0; k < i; k++) out[k] = out[i];
+    else if (i === n && last >= 0) for (let k = last + 1; k < n; k++) out[k] = out[last];
+    if (i < n) last = i;
+  }
+  return out;
+}
+// Ground heights for a scan. grids: DEM tiles; U: lat/lon from metres (makeUnprojector).
+// The terrain model is bare ground, so on bridges it gives the river or road below: track points
+// on a bridge (or in a tunnel) are bridged with a straight line between the two ends instead.
+function applyElevation(out, grids, unprojFactory, info) {
+  const U = unprojFactory(out.meta.origin.lat, out.meta.origin.lon);
+  const at = xy => { const [la, lo] = U(xy); return sampleGrid(grids, la, lo); };
+  const cl = out.route.centerline && out.route.centerline.points && out.route.centerline.points.length > 1 ? out.route.centerline : null;
+  const line = cl ? cl.points : out.route.points;
+  const span = (out.route.width || 8) / 2 + 2;
+  const decks = (out.roads || []).filter(r => r.bridge || r.tunnel);
+  const onDeck = p => decks.some(r => { for (let i = 1; i < r.points.length; i++) if (distPointSeg(p, r.points[i - 1], r.points[i]) <= Math.max(4, Math.min(span, (r.width || 4) / 2 + 2))) return true; return false; });
+  const deck = line.map(onDeck);
+  const raw = line.map((p, i) => deck[i] ? null : at(p));
+  if (raw.every(v => v == null)) return null;   // area not covered
+  // bridged values, then smoothed over ±8 m so the kart doesn't feel every bump in the scan
+  const filled = fillGaps(raw);
+  const step = cl ? (cl.spacing || 2) : 0, K = cl ? Math.max(1, Math.round(8 / step)) : 0;
+  const smooth = filled.map((v, i) => { if (!K) return v; let s = 0, c = 0; for (let k = -K; k <= K; k++) { const j = out.route.closed ? (i + k + filled.length) % filled.length : i + k; if (j >= 0 && j < filled.length) { s += filled[j]; c++; } } return s / c; });
+  const base = Math.min(...smooth);
+  const rel = v => round2(v - base);
+  const grounds = { buildings: 0, points: 0 };
+  for (const b of out.buildings) {
+    const hs = b.footprint.map(at).filter(v => v != null);
+    if (hs.length) { b.ground = rel(Math.min(...hs)); grounds.buildings++; }   // lowest ground under the outline, so nothing floats
+  }
+  for (const p of out.points) { const v = at(p.pos); if (v != null) { p.ground = rel(v); grounds.points++; } }
+  for (const l of out.landmarks || []) { const v = Array.isArray(l.pos) ? at(l.pos) : null; if (v != null) l.ground = rel(v); }
+  // route.points (the raw line the game reads) get heights from the nearest smoothed centerline point
+  const nearestH = p => { let best = 0, bd = Infinity; for (let i = 0; i < line.length; i++) { const d = Math.hypot(line[i][0] - p[0], line[i][1] - p[1]); if (d < bd) { bd = d; best = i; } } return smooth[best]; };
+  out.route.elevation = cl ? out.route.points.map(p => rel(nearestH(p))) : smooth.map(rel);
+  if (cl) cl.elevation = smooth.map(rel);
+  // climb, descent and the steepest 20 m
+  let climb = 0, descent = 0, steep = { grade: 0, at: 0 };
+  const sp = cl ? (cl.spacing || 2) : null;
+  for (let i = 1; i < smooth.length; i++) { const d = smooth[i] - smooth[i - 1]; if (d > 0) climb += d; else descent -= d; }
+  if (sp) { const w = Math.max(1, Math.round(20 / sp)); for (let i = 0; i + w < smooth.length; i++) { const g = (smooth[i + w] - smooth[i]) / (w * sp) * 100; if (Math.abs(g) > Math.abs(steep.grade)) steep = { grade: Math.round(g * 10) / 10, at: Math.round(i * sp) }; } }
+  const bridged = deck.filter(Boolean).length;
+  out.meta.elevation = { source: DEM_SOURCE.name, service: DEM_SOURCE.service, licence: DEM_SOURCE.licence, attribution: DEM_SOURCE.attribution,
+    base: round2(base), units: 'metres above meta.elevation.base (base is metres above sea level, AHD)', groundOnly: 'bare ground: no buildings or trees',
+    metresPerSample: (info && info.metresPerSample) || null, trackLowest: 0, trackHighest: rel(Math.max(...smooth)),
+    climb: Math.round(climb * 10) / 10, descent: Math.round(descent * 10) / 10, steepest: steep,
+    bridgedPoints: bridged, bridgedNote: bridged ? 'Track points on bridges/in tunnels use a straight line between the two ends (the terrain model has no bridges).' : undefined,
+    counts: grounds };
+  out.meta.attribution = attributionFor({ overture: !!out.meta.overture, imagery: !!out.meta.imagery, elevation: true });
+  const q = out.meta.quality;
+  if (q && Array.isArray(q.notes)) {
+    q.notes = q.notes.filter(n => !/^Hills:/.test(n));
+    q.notes.push(`Hills: the track climbs ${Math.round(climb)} m in total and rises ${out.meta.elevation.trackHighest} m above its lowest point; steepest ${Math.abs(steep.grade)}% ${steep.grade >= 0 ? 'uphill' : 'downhill'} at ${steep.at} m.`);
+  }
+  return out.meta.elevation;
+}
+// base64 that works in browsers and Node.
+function bytesToBase64(bytes) {
+  const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 3) {
+    const a = bytes[i], b = bytes[i + 1], c = bytes[i + 2];
+    s += A[a >> 2] + A[((a & 3) << 4) | ((b || 0) >> 4)] + (i + 1 < bytes.length ? A[((b & 15) << 2) | ((c || 0) >> 6)] : '=') + (i + 2 < bytes.length ? A[c & 63] : '=');
+  }
+  return s;
+}
+function base64ToBytes(s) {
+  const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/', out = [];
+  for (let i = 0; i < s.length; i += 4) {
+    const n = [0, 1, 2, 3].map(k => A.indexOf(s[i + k]));
+    out.push((n[0] << 2) | (n[1] >> 4));
+    if (n[2] >= 0) out.push(((n[1] & 15) << 4) | (n[2] >> 2));
+    if (n[3] >= 0) out.push(((n[2] & 3) << 6) | n[3]);
+  }
+  return new Uint8Array(out);
+}
+// A height grid for the game: every `spacing` metres over the scan's bbox, heights in centimetres
+// above meta.elevation.base as little-endian 16-bit numbers (-32768 = no data), base64.
+function terrainFile(out, grids, unprojFactory, spacing) {
+  if (!out.meta.elevation) return null;
+  const U = unprojFactory(out.meta.origin.lat, out.meta.origin.lon), bb = out.meta.bbox, base = out.meta.elevation.base;
+  const w = Math.max(2, Math.ceil((bb.maxX - bb.minX) / spacing) + 1), h = Math.max(2, Math.ceil((bb.maxY - bb.minY) / spacing) + 1);
+  const bytes = new Uint8Array(w * h * 2), view = new DataView(bytes.buffer);
+  let missing = 0;
+  for (let r = 0; r < h; r++) for (let c = 0; c < w; c++) {
+    const [la, lo] = U([bb.minX + c * spacing, bb.maxY - r * spacing]);
+    const v = sampleGrid(grids, la, lo);
+    let cm = v == null ? -32768 : Math.round((v - base) * 100);
+    if (v != null) cm = Math.max(-32767, Math.min(32767, cm)); else missing++;
+    view.setInt16((r * w + c) * 2, cm, true);
+  }
+  return { format: 'kartmap-terrain', version: 1, name: out.meta.name, origin: out.meta.origin,
+    minX: bb.minX, maxY: bb.maxY, spacing, width: w, height: h, base,
+    encoding: 'int16 little-endian, centimetres above base, row by row from the north-west corner (minX, maxY) going east then south; -32768 = no data',
+    source: DEM_SOURCE.name, licence: DEM_SOURCE.licence, attribution: DEM_SOURCE.attribution, missing, data: bytesToBase64(bytes) };
 }
 
 // lat/lon from [east, north] metres (the reverse of makeProjector), for drawing the preview.
@@ -1833,6 +1986,8 @@ function invalidateScan() {
   els.exportBtn.disabled = true;
   els.sampleBtn.disabled = els.photosBtn.disabled = els.groundBtn.disabled = true;
   $('view3dBtn').disabled = true;
+  $('heightsBtn').disabled = $('terrainBtn').disabled = true;
+  demGrids = null;
   els.stats.textContent = 'Route or settings changed. Scan again to export.';
   els.stats.className = 'hint';
 }
@@ -2174,6 +2329,7 @@ async function scan() {
   els.sampleBtn.disabled = els.groundBtn.disabled = false;
   els.photosBtn.disabled = !out.landmarks.length;
   $('view3dBtn').disabled = false;
+  demGrids = null; $('heightsBtn').disabled = false; $('terrainBtn').disabled = true;
   const partial = data.remark && /error|timed out|out of memory/i.test(data.remark);
   const contract = loaderContractProblems(out);   // v8.2: would the game's loader choke on this file?
   if (partial) setStatus('Scan finished but the server warned the data may be incomplete: ' + data.remark, 'warn');
@@ -2415,6 +2571,7 @@ function showStats() {
     ['Road markings', c.markings || 0],
     ['Corners / checkpoints', `${(out.route.corners || []).length} / ${out.race ? out.race.checkpoints.length : 0}`],
     ['Shortcuts found', c.shortcuts || 0],
+    ...(out.meta.elevation ? [['Hills (climb / highest)', `${Math.round(out.meta.elevation.climb)} m / ${out.meta.elevation.trackHighest} m`]] : []),
     ['File size', (size / 1024).toFixed(0) + ' KB']
   ];
   if (c.skippedIncompleteShapes) rows.push(['Shapes skipped (incomplete in OSM)', c.skippedIncompleteShapes]);
@@ -2748,7 +2905,16 @@ async function open3D() {
   const gtex = new THREE.CanvasTexture(gcanvas);
   gtex.colorSpace = THREE.SRGBColorSpace; gtex.magFilter = THREE.NearestFilter; gtex.minFilter = THREE.NearestMipmapNearestFilter;
   const gw = gplan.width * gplan.metresPerPixel, gh = gplan.height * gplan.metresPerPixel;
-  const ground = new THREE.Mesh(new THREE.PlaneGeometry(gw, gh), new THREE.MeshLambertMaterial({ map: gtex }));
+  // v12a: with ground heights, the ground is a height field (one corner every ~8 m) instead of flat
+  const segX = demGrids ? Math.min(320, Math.ceil(gw / 8)) : 1, segY = demGrids ? Math.min(320, Math.ceil(gh / 8)) : 1;
+  const ggeo = new THREE.PlaneGeometry(gw, gh, segX, segY);
+  if (demGrids && out.meta.elevation) {
+    const Ug = makeUnprojector(out.meta.origin.lat, out.meta.origin.lon), base = out.meta.elevation.base, cxg = gplan.minX + gw / 2, cyg = gplan.maxY - gh / 2;
+    const pa = ggeo.attributes.position;
+    for (let i = 0; i < pa.count; i++) { const [la, lo] = Ug([cxg + pa.getX(i), cyg + pa.getY(i)]); const v = sampleGrid(demGrids, la, lo); pa.setZ(i, v == null ? 0 : v - base - 0.4); }
+    ggeo.computeVertexNormals();
+  }
+  const ground = new THREE.Mesh(ggeo, new THREE.MeshLambertMaterial({ map: gtex }));
   ground.rotation.x = -Math.PI / 2;
   ground.position.copy(P(gplan.minX + gw / 2, gplan.maxY - gh / 2, 0));
   ground.name = 'ground';
@@ -2762,7 +2928,7 @@ async function open3D() {
       for (const hole of b.holes) shape.holes.push(new THREE.Path(hole.map(q => new THREE.Vector2(q[0], q[1]))));
       const geo = new THREE.ExtrudeGeometry(shape, { depth: b.top - b.base, bevelEnabled: false });
       geo.rotateX(-Math.PI / 2);
-      geo.translate(0, b.base, 0);
+      geo.translate(0, b.base + b.ground, 0);
       const wall = b.blocks ? '#ff4d4d' : b.manual ? '#ffb703' : b.wall;
       const roof = b.blocks ? '#d00000' : (okColour(b.roof) ? b.roof : new THREE.Color(okColour(wall) ? wall : '#c9c9c9').multiplyScalar(0.72).getStyle());
       const m = new THREE.Mesh(geo, [mat(roof), mat(wall)]);
@@ -2773,20 +2939,21 @@ async function open3D() {
   // track: a flat ribbon just above the ground, white start line, cyan checkpoint posts
   const t = plan.track, pos = [];
   for (let i = 0; i < t.line.length - 1; i++) {
-    const a = P(...t.left[i], 0.08), b2 = P(...t.right[i], 0.08), c = P(...t.left[i + 1], 0.08), d = P(...t.right[i + 1], 0.08);
+    const e0 = t.elev[i] + 0.08, e1 = t.elev[i + 1] + 0.08;
+    const a = P(...t.left[i], e0), b2 = P(...t.right[i], e0), c = P(...t.left[i + 1], e1), d = P(...t.right[i + 1], e1);
     pos.push(a.x, a.y, a.z, b2.x, b2.y, b2.z, c.x, c.y, c.z, b2.x, b2.y, b2.z, d.x, d.y, d.z, c.x, c.y, c.z);
   }
   const tgeo = new THREE.BufferGeometry(); tgeo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); tgeo.computeVertexNormals();
   const track = new THREE.Mesh(tgeo, new THREE.MeshLambertMaterial({ color: '#3d3d48', side: THREE.DoubleSide })); track.name = 'track'; scene.add(track);
   if (plan.start) {
     const s = new THREE.Mesh(new THREE.BoxGeometry(plan.start.width || t.width, 0.05, 1.2), mat('#ffffff'));
-    s.position.copy(P(plan.start.pos[0], plan.start.pos[1], 0.12));
+    s.position.copy(P(plan.start.pos[0], plan.start.pos[1], plan.start.g + 0.12));
     s.rotation.y = Math.atan2(plan.start.dir[0], -plan.start.dir[1]);   // turns the box's depth axis to the travel direction (3D z = -north)
     s.name = 'start line'; scene.add(s);
   }
   for (const c of plan.checkpoints.slice(1)) {
     const post = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.15, 2.5, 6), mat('#00b4d8'));
-    post.position.copy(P(c.pos[0] - c.dir[1] * (t.width / 2 + 0.5), c.pos[1] + c.dir[0] * (t.width / 2 + 0.5), 1.25));
+    post.position.copy(P(c.pos[0] - c.dir[1] * (t.width / 2 + 0.5), c.pos[1] + c.dir[0] * (t.width / 2 + 0.5), c.g + 1.25));
     post.name = 'checkpoint ' + c.i; scene.add(post);
   }
   // trees and props: one "instanced" mesh each, so thousands stay fast
@@ -2797,13 +2964,13 @@ async function open3D() {
     list.forEach((it, i) => { place(it); dummy.updateMatrix(); m.setMatrixAt(i, dummy.matrix); });
     m.name = name; scene.add(m); return m;
   };
-  instanced(new THREE.CylinderGeometry(0.25, 0.35, 1, 5), mat('#6b4f2a'), plan.trees, tr => { dummy.position.copy(P(tr.x, tr.y, tr.h * 0.3)); dummy.scale.set(1, tr.h * 0.6, 1); }, 'tree trunks');
-  instanced(new THREE.IcosahedronGeometry(1, 0), mat('#3f7d3a', { flatShading: true }), plan.trees.filter(tr => tr.type !== 'palm'), tr => { dummy.position.copy(P(tr.x, tr.y, tr.h * 0.65)); dummy.scale.set(tr.r, tr.h * 0.4, tr.r); }, 'tree tops');
-  instanced(new THREE.ConeGeometry(1, 0.5, 6), mat('#4f8f3a', { flatShading: true }), plan.trees.filter(tr => tr.type === 'palm'), tr => { dummy.position.copy(P(tr.x, tr.y, tr.h * 0.95)); dummy.scale.set(tr.r, tr.r * 0.5, tr.r); }, 'palm tops');
-  instanced(new THREE.BoxGeometry(0.7, 0.9, 0.7), mat('#ffb703'), plan.props, pr => { dummy.position.copy(P(pr.x, pr.y, 0.45)); dummy.scale.set(1, 1, 1); }, 'props');
+  instanced(new THREE.CylinderGeometry(0.25, 0.35, 1, 5), mat('#6b4f2a'), plan.trees, tr => { dummy.position.copy(P(tr.x, tr.y, tr.g + tr.h * 0.3)); dummy.scale.set(1, tr.h * 0.6, 1); }, 'tree trunks');
+  instanced(new THREE.IcosahedronGeometry(1, 0), mat('#3f7d3a', { flatShading: true }), plan.trees.filter(tr => tr.type !== 'palm'), tr => { dummy.position.copy(P(tr.x, tr.y, tr.g + tr.h * 0.65)); dummy.scale.set(tr.r, tr.h * 0.4, tr.r); }, 'tree tops');
+  instanced(new THREE.ConeGeometry(1, 0.5, 6), mat('#4f8f3a', { flatShading: true }), plan.trees.filter(tr => tr.type === 'palm'), tr => { dummy.position.copy(P(tr.x, tr.y, tr.g + tr.h * 0.95)); dummy.scale.set(tr.r, tr.r * 0.5, tr.r); }, 'palm tops');
+  instanced(new THREE.BoxGeometry(0.7, 0.9, 0.7), mat('#ffb703'), plan.props, pr => { dummy.position.copy(P(pr.x, pr.y, pr.g + 0.45)); dummy.scale.set(1, 1, 1); }, 'props');
   for (const l of plan.landmarks) {
     const pin = new THREE.Mesh(new THREE.OctahedronGeometry(2, 0), mat('#e63946'));
-    pin.position.copy(P(l.x, l.y, 30)); pin.name = 'landmark ' + l.name; scene.add(pin);
+    pin.position.copy(P(l.x, l.y, l.g + 30)); pin.name = 'landmark ' + l.name; scene.add(pin);
   }
   // camera
   const camera = new THREE.PerspectiveCamera(60, 1, 0.5, diag * 3);
@@ -2841,7 +3008,7 @@ function toggleFly(track) {
   if (v3d.fly) { v3d.fly = null; $('v3dFly').textContent = '▶ Fly the lap'; v3d.controls.enabled = true; return; }
   const pts = track.line, cum = [0];
   for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
-  v3d.fly = { pts, cum, s: 0, total: cum[cum.length - 1], closed: track.closed };
+  v3d.fly = { pts, cum, s: 0, total: cum[cum.length - 1], closed: track.closed, elev: track.elev };
   v3d.controls.enabled = false;
   $('v3dFly').textContent = '■ Stop';
 }
@@ -2849,15 +3016,16 @@ function flyAt(f, s) {
   if (f.closed) s = ((s % f.total) + f.total) % f.total; else s = Math.max(0, Math.min(f.total, s));
   let i = 1; while (i < f.cum.length - 1 && f.cum[i] < s) i++;
   const a = f.pts[i - 1], b = f.pts[i], seg = (f.cum[i] - f.cum[i - 1]) || 1, k = (s - f.cum[i - 1]) / seg;
-  return [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k];
+  const e = f.elev ? f.elev[i - 1] + (f.elev[i] - f.elev[i - 1]) * k : 0;
+  return [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, e];
 }
 function stepFly(dt) {
   const f = v3d.fly;
   f.s += 25 * dt;
   if (!f.closed && f.s >= f.total) { toggleFly(); return; }
   const p = flyAt(f, f.s), q = flyAt(f, f.s + 15);
-  v3d.camera.position.set(p[0], 2.2, -p[1]);
-  v3d.camera.lookAt(q[0], 1.4, -q[1]);
+  v3d.camera.position.set(p[0], p[2] + 2.2, -p[1]);
+  v3d.camera.lookAt(q[0], q[2] + 1.4, -q[1]);
 }
 async function download3D(out) {
   const btn = $('v3dGlb');
@@ -2888,6 +3056,59 @@ function close3D() {
 }
 $('view3dBtn').onclick = open3D;
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && v3d) close3D(); });
+
+// ======================================================================
+// v12a (browser): ground heights from Queensland's LiDAR terrain model
+// ======================================================================
+let demGrids = null;   // the downloaded height tiles, kept for the terrain file and the 3D preview
+async function fetchDem(box, metresPerPixel) {
+  if (window.__demFetch) return window.__demFetch(box, metresPerPixel);   // tests
+  const plan = planImageTiles(box, metresPerPixel, CONFIG.imagery.maxWidth, CONFIG.imagery.maxHeight);
+  const grids = [];
+  for (let i = 0; i < plan.length; i++) {
+    const t = plan[i];
+    setStatus(`Downloading ground heights ${i + 1} of ${plan.length}…`);
+    const url = `${DEM_SOURCE.service}/exportImage?bbox=${t.west},${t.south},${t.east},${t.north}&bboxSR=4326&imageSR=4326&size=${t.width},${t.height}&format=bsq&pixelType=F32&interpolation=RSP_BilinearInterpolation&f=image`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`the elevation server replied ${res.status}`);
+    const buf = await res.arrayBuffer();
+    if (buf.byteLength < t.width * t.height * 4) throw new Error(`the elevation server sent ${buf.byteLength} bytes instead of ${t.width * t.height * 4} (it may be busy; try again)`);
+    grids.push({ box: t, width: t.width, height: t.height, data: parseBsqF32(buf, t.width, t.height) });
+  }
+  return grids;
+}
+async function getHeights() {
+  if (!scanResult) return;
+  const btn = $('heightsBtn'); btn.disabled = true;
+  try {
+    const U = makeUnprojector(scanResult.meta.origin.lat, scanResult.meta.origin.lon), bb = scanResult.meta.bbox;
+    const sw = U([bb.minX, bb.minY]), ne = U([bb.maxX, bb.maxY]);
+    const grids = await fetchDem({ south: sw[0], west: sw[1], north: ne[0], east: ne[1] }, 2);
+    setStatus('Working out heights…');
+    const e = applyElevation(scanResult, grids, makeUnprojector, { metresPerSample: 2 });
+    if (!e) { setStatus('No ground heights here: the Queensland terrain model has no data for this area (outside Queensland?).', 'warn'); return; }
+    demGrids = grids;
+    $('terrainBtn').disabled = false;
+    showStats();
+    setStatus(`Ground heights added: the track climbs ${Math.round(e.climb)} m per lap, its highest point is ${e.trackHighest} m above its lowest, steepest ${Math.abs(e.steepest.grade)}%.` +
+      (e.bridgedPoints ? ' Bridges are kept level between their ends.' : '') + ' Export JSON to save them.', 'ok');
+  } catch (err) {
+    setStatus('Ground heights failed: ' + (err instanceof TypeError ? "couldn't reach the Queensland elevation server (offline or blocked)" : err.message) + '. Your scan is unchanged.', 'err');
+  } finally { btn.disabled = false; }
+}
+function exportTerrain() {
+  if (!scanResult || !demGrids) return;
+  const tf = terrainFile(scanResult, demGrids, makeUnprojector, 4);
+  const safe = (scanResult.meta.name || 'route').replace(/[^a-z0-9_-]+/gi, '-').toLowerCase();
+  const file = `kartmap_${safe}_terrain.json`;
+  scanResult.meta.elevation.terrainFile = file;
+  scanResult.meta.elevation.terrainSpacing = tf.spacing;
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([JSON.stringify(tf)], { type: 'application/json' }));
+  a.download = file; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  setStatus(`Terrain file saved (${tf.width}×${tf.height} heights, every ${tf.spacing} m). Export JSON again so the level file names it.`, 'ok');
+}
+$('heightsBtn').onclick = getHeights;
+$('terrainBtn').onclick = exportTerrain;
 
 // ---- remember the last route between visits (optional; fails silently) ----
 function save() {

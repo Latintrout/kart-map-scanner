@@ -123,6 +123,8 @@ function runScannerTests(lib) {
   else check('v9b functions present', false, 'problemSpots not found (running against v9a?)');
   if (has('scene3dPlan')) runV11(lib, check, same);
   else check('v11 functions present', false, 'scene3dPlan not found (running against v9b?)');
+  if (has('applyElevation')) runV12a(lib, check, same);
+  else check('v12a functions present', false, 'applyElevation not found (running against v11?)');
 
   return results;
 }
@@ -327,7 +329,7 @@ function runV81(lib, check, same) {
 
   // --- guesses are marked ---
   check('v8.1 every building height says where it came from', out.buildings.every(b => ['osm', 'levels', 'estimated', 'default'].includes(b.heightSource)));
-  check('v8.1+ generator tag present', /^kart-map-scanner v(8\.\d+|9[a-z]|\d\d+)$/.test(out.meta.generator), out.meta.generator);
+  check('v8.1+ generator tag present', /^kart-map-scanner v(8\.\d+|\d+[a-z]?)$/.test(out.meta.generator), out.meta.generator);
 
   // --- speed: a South-Bank-sized scan must stay quick ---
   const big = [];
@@ -601,5 +603,59 @@ function runV11(lib, check, same) {
   // ground image plan: size and stored metres-per-pixel agree (v11 fix)
   const g = lib.groundImagePlan({ minX: 0, minY: 0, maxX: 5000, maxY: 1000 }, 1, 4096);
   check('v11 fix: ground image size matches its metres per pixel (5 km wide area)', g.width * g.metresPerPixel >= 5000 && (g.width - 1) * g.metresPerPixel < 5000 && g.width <= 4096, JSON.stringify(g));
+}
+
+function runV12a(lib, check, same) {
+  // the server's raw answer: 4 floats then a 1-byte mask (bits, first pixel = top bit)
+  const buf = new ArrayBuffer(4 * 4 + 1);
+  new Float32Array(buf, 0, 4).set([10, 11, 12, 13]);
+  new Uint8Array(buf, 16, 1)[0] = 0b10110000;   // pixel 2 (index 1) has no data
+  const g = lib.parseBsqF32(buf, 2, 2);
+  check('v12a raw height tiles: values read, "no data" pixels become gaps', g[0] === 10 && isNaN(g[1]) && g[2] === 12 && g[3] === 13, Array.from(g).join(','));
+  // a synthetic area: ground rises 5 m per 100 m going east; the river (a trench) runs north-south at x = 100..140 m
+  const la = -27.48, lo = 153.02, mLon = 111320 * Math.cos(la * Math.PI / 180);
+  const off = (dx, dy) => ({ lat: la + dy / 111320, lon: lo + dx / mLon });
+  const llOff = (dx, dy) => { const o = off(dx, dy); return [o.lat, o.lon]; };
+  const box = { west: lo - 100 / mLon, east: lo + 400 / mLon, south: la - 100 / 111320, north: la + 300 / 111320 };
+  const W = 250, H = 200, data = new Float32Array(W * H);
+  for (let r = 0; r < H; r++) for (let c = 0; c < W; c++) { const x = -100 + (c + 0.5) * 2; data[r * W + c] = (x >= 100 && x <= 140) ? -3 : 20 + 0.05 * x; }
+  const grids = [{ box, width: W, height: H, data }];
+  const v = lib.sampleGrid(grids, off(50, 50).lat, off(50, 50).lon);
+  check('v12a height lookup between pixels (bilinear)', Math.abs(v - 22.5) < 0.06, v);
+  check('v12a height lookup outside the tiles gives null', lib.sampleGrid(grids, la + 1, lo) === null);
+  check('v12a gaps filled with a straight line', same(lib.fillGaps([1, null, null, 4, null]), [1, 2, 3, 4, 4]) && same(lib.fillGaps([null, 2]), [2, 2]));
+  // a straight route east across the river on a bridge
+  const route = [llOff(0, 0), llOff(300, 0)];
+  const els = [
+    { type: 'way', id: 1, tags: { highway: 'residential' }, geometry: [off(0, 0), off(95, 0)] },
+    { type: 'way', id: 2, tags: { highway: 'residential', bridge: 'yes', layer: '1' }, geometry: [off(95, 0), off(145, 0)] },
+    { type: 'way', id: 3, tags: { highway: 'residential' }, geometry: [off(145, 0), off(300, 0)] },
+    { type: 'way', id: 4, tags: { building: 'yes' }, geometry: [off(200, 20), off(240, 20), off(240, 40), off(200, 40), off(200, 20)] },
+    { type: 'node', id: 5, lat: off(60, 10).lat, lon: off(60, 10).lon, tags: { natural: 'tree' } }
+  ];
+  const { out } = lib.buildOutput({ elements: els }, { route, waypoints: route, radius: 80, width: 8, loop: false, snapped: false, name: 'hill', now: 'X' });
+  const e = lib.applyElevation(out, grids, lib.makeUnprojector, { metresPerSample: 2 });
+  const ce = out.route.centerline.elevation, cp = out.route.centerline.points;
+  const mid = cp.findIndex(p => p[0] >= 120);
+  check('v12a heights for every track point, lowest = 0', ce.length === cp.length && out.route.elevation.length === out.route.points.length && Math.min(...ce) === 0, Math.min(...ce));
+  check('v12a base is metres above sea level at the lowest track point (~20 m)', Math.abs(e.base - 20) < 0.6, e.base);
+  check('v12a on the bridge the track stays level-ish between the ends, not down in the river', ce[mid] > 3.5 && ce[mid] < 8, ce[mid]);
+  check('v12a the rise is right away from the bridge (5 m per 100 m: ~12.5 m at 250 m)', Math.abs(ce[cp.findIndex(p => p[0] >= 250)] - 12.5) < 0.8, ce[cp.findIndex(p => p[0] >= 250)]);
+  check('v12a climb and steepest grade reported (~5%)', Math.abs(e.climb - 15) < 1.5 && Math.abs(Math.abs(e.steepest.grade) - 5) < 2.5 && e.bridgedPoints > 0, JSON.stringify(e));
+  const b = out.buildings[0];
+  check('v12a building sits on the lowest ground under its outline (west side at 200 m: ~10 m)', Math.abs(b.ground - 10) < 0.6, b.ground);
+  check('v12a trees and props get ground heights', out.points.every(p => typeof p.ground === 'number'));
+  check('v12a credits added (Queensland elevation, CC BY-SA)', /Ground heights/.test(out.meta.attribution) && e.licence === 'CC BY-SA' && out.meta.quality.notes.some(n => /^Hills:/.test(n)));
+  check('v12a file still passes the game-loader check', lib.loaderContractProblems(out).length === 0);
+  // terrain file round trip
+  const tf = lib.terrainFile(out, grids, lib.makeUnprojector, 5);
+  const bytes = lib.base64ToBytes(tf.data), dv = new DataView(bytes.buffer);
+  const cell = (cx, cy) => dv.getInt16((cy * tf.width + cx) * 2, true) / 100;
+  const xA = Math.round((50 - tf.minX) / 5), yA = Math.round((tf.maxY - 0) / 5);
+  check('v12a terrain file: size, encoding and a height read back (x 50 m → 2.5 m above base)', bytes.length === tf.width * tf.height * 2 && Math.abs(cell(xA, yA) - (20 + 0.05 * (tf.minX + xA * 5) - tf.base)) < 0.1, cell(xA, yA));
+  check('v12a base64 matches the standard one', typeof Buffer === 'undefined' || lib.bytesToBase64(new Uint8Array([1, 2, 3, 250, 251])) === Buffer.from([1, 2, 3, 250, 251]).toString('base64'));
+  check('v12a no data → no heights (area outside Queensland)', lib.applyElevation(JSON.parse(JSON.stringify(lib.buildOutput({ elements: els }, { route, waypoints: route, radius: 80, width: 8, loop: false, snapped: false, name: 'x', now: 'X' }).out)), [], lib.makeUnprojector) === null);
+  const p3 = lib.scene3dPlan(out);
+  check('v12a 3D plan carries the heights (track, building ground)', p3.hills && p3.track.elev.length === p3.track.line.length && p3.buildings[0].ground === b.ground);
 }
 
