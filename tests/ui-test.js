@@ -41,7 +41,7 @@ const overpass = { elements: [
     const ctx = await browser.newContext({ acceptDownloads: true, ...(ctxOpts || {}) });
     const page = await ctx.newPage();
     // v8.3: fake Overture reply (one height for GOMA's OSM way, one building OSM doesn't have)
-    await page.addInitScript(({ la, lo }) => {
+    await ctx.addInitScript(({ la, lo }) => {
       const off = (dx, dy) => [la + dy / 111320, lo + dx / (111320 * Math.cos(la * Math.PI / 180))];
       const sq = (x, y, s) => [off(x, y), off(x + s, y), off(x + s, y + s), off(x, y + s), off(x, y)];
       window.__overtureCalls = 0;
@@ -49,11 +49,11 @@ const overpass = { elements: [
         { id: 'ovGoma', osmId: 'w4', height: 20, heightFrom: 'OpenStreetMap', cls: null, isUnderground: false, ring: sq(50, 10, 30) },
         { id: 'ovNew', osmId: null, height: 7.5, heightFrom: 'Microsoft ML Buildings', cls: null, isUnderground: false, ring: sq(10, 40, 12) }]; };
     }, { la, lo });
-    if (mode === 'ovfail') await page.addInitScript(() => { window.__overtureFetch = async () => { throw new Error('test failure'); }; });
+    if (mode === 'ovfail') await ctx.addInitScript(() => { window.__overtureFetch = async () => { throw new Error('test failure'); }; });
     const errors = [];
     page.on('pageerror', e => errors.push(e.message));
     page.on('dialog', d => d.accept());
-    await page.route('**/*', async route => {
+    await ctx.route('**/*', async route => {
       const u = route.request().url();
       if (u.startsWith('http://scanner.test/')) return route.fulfill({ body: html, contentType: 'text/html' });
       const three = u.match(/unpkg\.com\/three@0\.160\.0\/(.+)$/);
@@ -295,6 +295,55 @@ const overpass = { elements: [
     check('v11 .glb has the buildings, track and ground in it', gjson.nodes.some(n => n.name === 'track') && gjson.nodes.some(n => n.name === 'ground') && gjson.nodes.some(n => n.name === 'buildings'), gjson.nodes.map(n => n.name).slice(0, 20).join(','));
     await page.click('#v3dClose');
     check('v11 Close removes the 3D view and the map still works', !(await page.$('#view3d')) && await page.isVisible('#map'));
+  }
+  if (V >= 12.2) {
+    // ---------- v12b: help card, redo, share link, measuring ----------
+    const cx2 = box.x + box.width / 2, cy2 = box.y + box.height / 2;
+    check('v12b help card can be shown and hidden', true);
+    if (await page.isHidden('#helpCard')) await page.click('#helpBtn');
+    check('v12b help card visible with the 5 steps', await page.isVisible('#helpCard') && (await page.$$('#helpCard li')).length === 5);
+    await page.click('#helpClose');
+    check('v12b help card hides', await page.isHidden('#helpCard'));
+    // undo / redo with a tree
+    await page.click('[data-mode="trees"]');
+    const treesNow = async () => +(/Trees you placed(\d+)/.exec(await page.textContent('#stats')) || [0, -1])[1];
+    if (await page.isDisabled('#exportBtn')) { await page.click('#scanBtn'); await page.waitForFunction(() => !document.getElementById('exportBtn').disabled, null, { timeout: 15000 }); }
+    const t0 = await treesNow();
+    await page.mouse.click(cx2 + 120, cy2 + 120); await page.waitForTimeout(100);
+    await page.click('#undoBtn'); await page.waitForTimeout(100);
+    const tU = await treesNow();
+    check('v12b Redo is available after Undo', !(await page.isDisabled('#redoBtn')));
+    await page.click('#redoBtn'); await page.waitForTimeout(100);
+    check('v12b Redo brings back what Undo removed', tU === t0 && (await treesNow()) === t0 + 1, [t0, tU, await treesNow()].join(','));
+    await page.keyboard.press('Control+z'); await page.waitForTimeout(100);
+    check('v12b Ctrl+Z undoes', (await treesNow()) === t0);
+    await page.keyboard.press('Control+y'); await page.waitForTimeout(100);
+    check('v12b Ctrl+Y redoes', (await treesNow()) === t0 + 1);
+    await page.click('[data-mode="pan"]');
+    // measuring
+    const ri0 = await page.textContent('#routeInfo');
+    await page.click('#measureBtn');
+    await page.mouse.click(cx2 - 100, cy2 + 150); await page.waitForTimeout(80);
+    await page.mouse.click(cx2 + 100, cy2 + 150); await page.waitForTimeout(80);
+    const ms = await page.textContent('#status');
+    const z = await page.evaluate(() => document.querySelector('.leaflet-container') && 0);
+    check('v12b measuring tape shows the distance and draws nothing on the route', /^Measured [\d.]+ (m|km)/.test(ms) && (await page.textContent('#routeInfo')) === ri0, ms);
+    await page.click('#measureBtn');
+    check('v12b measuring turns off', /Measuring off/.test(await page.textContent('#status')));
+    // share link
+    await page.fill('#name', 'shared-one'); await page.dispatchEvent('#name', 'change');
+    await page.click('#shareBtn'); await page.waitForTimeout(300);
+    const link = await page.inputValue('#shareOut');
+    check('v12b share link made (packed)', /^http:\/\/scanner\.test\/#t=z[A-Za-z0-9_-]+$/.test(link) && /(Link copied|Link ready)/.test(await page.textContent('#status')), link.slice(0, 80));
+    const p2 = await ctx.newPage(); const e2 = []; p2.on('pageerror', e => e2.push(e.message));
+    await p2.goto(link);
+    await p2.waitForFunction(() => /Opened a shared track|Couldn't open/.test(document.getElementById('status').textContent), null, { timeout: 15000 });
+    check('v12b opening the link loads the same track (points, name) and tidies the address', /Opened a shared track "shared-one"/.test(await p2.textContent('#status')) && (await p2.textContent('#routeInfo')).split(' ')[0] === (await page.textContent('#routeInfo')).split(' ')[0] && !/#t=/.test(p2.url()), await p2.textContent('#status') + ' | ' + p2.url());
+    check('v12b shared track brings its race settings and drawn trees', (await p2.textContent('#raceInfo')) === (await page.textContent('#raceInfo')));
+    await p2.goto('http://scanner.test/#t=zAAAA'); await p2.waitForTimeout(800);
+    check('v12b a broken link says why', /Couldn't open that share link: the link is incomplete/.test(await p2.textContent('#status')), await p2.textContent('#status'));
+    check('v12b no script errors on the second page', e2.length === 0, e2.join('; '));
+    await p2.close();
   }
   check('no script errors during the whole run', errors.length === 0, errors.join('; '));
   await ctx.close();

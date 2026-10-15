@@ -23,6 +23,7 @@ Draw a route on a real map, scan the area along it from free OpenStreetMap data,
 - **Draw missing buildings** (Building mode): click the corners, type a height.
 - **Race direction and start**: reverse the lap or click where the start line goes. Arrows and a 🏁 show the way round.
 - **Saved tracks**: keep several tracks in the browser, and back them all up to one file.
+- **Share link**: one link opens your exact track on another device (PC → phone). Also Redo (Ctrl+Y), a 📏 measuring tape on the map, and a short "How it works" card (the ? button).
 - **Works on a phone**: map on top, panel below (the ▲/▼ button gives either more room). Draw with one finger, pinch with two, long-press to delete. "Show problem" jumps to anything sitting on the track.
 - **Ground heights** from Queensland's free LiDAR terrain model: hills along the track and under every building, total climb and steepest slope, and a terrain file for the game.
 - **3D preview** after a scan: orbit around the level, "Fly the lap" at kart height, switch on retro pixels, or save a rough `.glb` model.

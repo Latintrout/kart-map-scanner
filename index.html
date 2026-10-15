@@ -94,7 +94,7 @@
 </head>
 <body>
 <aside id="panel">
-  <h1>KART <span>MAP</span> SCANNER</h1>
+  <h1>KART <span>MAP</span> SCANNER <button id="helpBtn" title="How it works" style="float:right;padding:2px 9px;font-size:13px">?</button></h1>
   <div class="sub">Draw a route on free OSM data, export it for Godot.</div>
 
   <section>
@@ -103,6 +103,18 @@
       <input id="search" type="text" placeholder="Suburb or street…">
       <button id="searchBtn" style="flex:0 0 auto">Go</button>
     </div>
+  </section>
+
+  <section id="helpCard" hidden>
+    <h2>How it works <button id="helpClose" style="float:right;padding:0 8px" title="Hide">✕</button></h2>
+    <ol class="hint" style="margin:0;padding-left:18px;color:var(--text)">
+      <li><b>Find</b> your area (search, or drag the map in ✋ Pan).</li>
+      <li><b>Draw</b> the route with ✎ Pen (hold and drag along roads). It snaps to roads.</li>
+      <li><b>Scan</b> area: grabs buildings, roads, trees and more around it.</li>
+      <li><b>Check</b> the map: red = blocking the track. Try 🧊 3D preview.</li>
+      <li><b>Export JSON</b> and drop it in the game's tracks folder.</li>
+    </ol>
+    <div class="hint" style="margin-top:4px">Extras (colours, heights, photos) are optional. 📏 (top-left of the map) measures distances. Ctrl+Z / Ctrl+Y undo and redo.</div>
   </section>
 
   <section>
@@ -114,7 +126,9 @@
     </div>
     <div class="row" style="margin-top:6px">
       <button id="libSaveBtn">Save current track</button>
+      <button id="shareBtn" title="A link that opens this track on another device">🔗 Share link</button>
     </div>
+    <input id="shareOut" type="text" readonly hidden style="margin-top:6px" aria-label="Share link">
     <div class="row" style="margin-top:6px">
       <button id="libBackupBtn">Back up all</button>
       <button id="libRestoreBtn">Restore backup</button>
@@ -151,6 +165,7 @@
     </div>
     <div class="row" style="margin-top:6px">
       <button id="undoBtn">Undo</button>
+      <button id="redoBtn" disabled>Redo</button>
       <button id="clearBtn">Clear</button>
     </div>
     <label class="inline"><input id="snap" type="checkbox" checked> Snap route to roads</label>
@@ -1370,7 +1385,7 @@ function buildOutput(data, o) {
     meta: {
       name: o.name || 'route',
       generated: o.now || new Date().toISOString(),
-      generator: 'kart-map-scanner v12a',
+      generator: 'kart-map-scanner v12b',
       origin: { lat: origin[0], lon: origin[1] },
       units: 'metres',
       axes: 'x = east, y = north. In Godot: Vector3(x, 0, -y)',
@@ -1762,6 +1777,51 @@ function terrainFile(out, grids, unprojFactory, spacing) {
     source: DEM_SOURCE.name, licence: DEM_SOURCE.licence, attribution: DEM_SOURCE.attribution, missing, data: bytesToBase64(bytes) };
 }
 
+// ======================================================================
+// v12b: share links (a whole track packed into the web address)
+// ======================================================================
+// Only what's needed to rebuild the track; coordinates rounded to ~10 cm.
+function trackForLink(t) {
+  const r6 = n => Math.round(n * 1e6) / 1e6, pts = a => (a || []).map(p => [r6(p[0]), r6(p[1])]);
+  const o = { v: 1, n: t.name || '', w: pts(t.waypoints), s: t.snap !== false ? 1 : 0, l: t.loop !== false ? 1 : 0, r: +t.radius || 100, k: +t.width || 8 };
+  if (t.race && (t.race.reverse || t.race.start)) o.rc = { rv: t.race.reverse ? 1 : 0, st: t.race.start ? pts([t.race.start])[0] : null };
+  if (t.trees && t.trees.length) o.tr = t.trees.map(x => [r6(x.lat), r6(x.lon), x.canopy]);
+  if (t.manualBuildings && t.manualBuildings.length) o.mb = t.manualBuildings.map(m => ({ g: pts(m.ring), h: m.height, ...(m.name ? { n: m.name } : {}) }));
+  return o;
+}
+function trackFromLink(o) {
+  if (!o || o.v !== 1 || !Array.isArray(o.w)) throw new Error('this link is not a Kart Map Scanner track');
+  const ok = p => Array.isArray(p) && p.length === 2 && Math.abs(p[0]) <= 90 && Math.abs(p[1]) <= 180;
+  if (!o.w.every(ok)) throw new Error('the track in this link is damaged');
+  return { name: String(o.n || ''), waypoints: o.w, snap: o.s !== 0, loop: o.l !== 0, radius: Math.min(300, Math.max(25, +o.r || 100)), width: Math.min(30, Math.max(3, +o.k || 8)),
+    race: o.rc ? { reverse: !!o.rc.rv, start: ok(o.rc.st) ? o.rc.st : null } : { reverse: false, start: null },
+    trees: (o.tr || []).filter(x => Array.isArray(x) && ok([x[0], x[1]])).map(x => ({ lat: x[0], lon: x[1], canopy: +x[2] || 10 })),
+    manualBuildings: (o.mb || []).filter(m => Array.isArray(m.g) && m.g.length >= 3 && m.g.every(ok) && m.h > 0).map(m => ({ ring: m.g, height: m.h, ...(m.n ? { name: String(m.n) } : {}) })) };
+}
+const b64url = bytes => bytesToBase64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const fromB64url = s => base64ToBytes(s.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((s.length + 3) % 4));
+// Packs a track into text for a link: squeezed with "deflate" when the browser can ("z" + data),
+// plain otherwise ("j" + data).
+async function packTrack(t) {
+  const json = new TextEncoder().encode(JSON.stringify(trackForLink(t)));
+  if (typeof CompressionStream === 'function') {
+    const zipped = new Uint8Array(await new Response(new Blob([json]).stream().pipeThrough(new CompressionStream('deflate-raw'))).arrayBuffer());
+    return 'z' + b64url(zipped);
+  }
+  return 'j' + b64url(json);
+}
+async function unpackTrack(s) {
+  let bytes;
+  try { bytes = fromB64url(String(s).slice(1)); } catch (e) { throw new Error('the link is incomplete'); }
+  if (s[0] === 'z') {
+    if (typeof DecompressionStream !== 'function') throw new Error('this browser is too old to open packed links');
+    try { bytes = new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).arrayBuffer()); }
+    catch (e) { throw new Error('the link is incomplete (was it cut off when copied?)'); }
+  } else if (s[0] !== 'j') throw new Error('this link is not a Kart Map Scanner track');
+  let o; try { o = JSON.parse(new TextDecoder().decode(bytes)); } catch (e) { throw new Error('the link is incomplete (was it cut off when copied?)'); }
+  return trackFromLink(o);
+}
+
 // lat/lon from [east, north] metres (the reverse of makeProjector), for drawing the preview.
 function makeUnprojector(lat0, lon0) {
   const R = 6378137, k = Math.PI / 180, c = Math.cos(lat0 * k);
@@ -1910,7 +1970,11 @@ function remember() {
   history.push({ waypoints: waypoints.map(p => p.slice()), trees: trees.map(t => ({ ...t })),
     manualBuildings: JSON.parse(JSON.stringify(manualBuildings)), raceOpts: { ...raceOpts } });
   if (history.length > 50) history.shift();
+  future = [];   // v12b: a new change ends the redo trail
+  if (typeof updateUndoButtons === 'function') updateUndoButtons();
 }
+let future = [];   // v12b: states that Undo stepped back from, for Redo
+function stateNow() { return { waypoints: waypoints.map(p => p.slice()), trees: trees.map(t => ({ ...t })), manualBuildings: JSON.parse(JSON.stringify(manualBuildings)), raceOpts: { ...raceOpts } }; }
 
 // ---- map ----
 const map = L.map('map', { preferCanvas: true, tapHold: true })   // v9b: tapHold = long-press acts as right-click on phones
@@ -2090,6 +2154,7 @@ async function snapMatch(pts, isCurrent) {
 
 // ---- Points mode: each click adds a point ----
 map.on('click', e => {
+  if (measuring) return;   // v12b: the measuring tape takes the click
   if (pickingStart) { setStartAt([e.latlng.lat, e.latlng.lng]); return; }
   if (mode === 'build') { addCorner(e); return; }
   if (mode === 'points') {
@@ -2135,7 +2200,7 @@ const penLine = L.polyline([], { color: '#1d3557', weight: 3, dashArray: '6 6', 
 let stroke = null;   // container pixel points of the stroke in progress
 
 els.map.addEventListener('pointerdown', e => {
-  if (mode !== 'pen' || e.button !== 0) return;
+  if (mode !== 'pen' || e.button !== 0 || measuring) return;
   if (e.pointerType === 'touch' && fingers.size > 1) return;   // v9b: second finger = pinch, not a new stroke
   if (e.target.closest('.leaflet-control, .leaflet-marker-icon')) return;   // let buttons and markers work normally
   stroke = [];
@@ -2197,9 +2262,7 @@ function setMode(m) {
 els.modeRow.addEventListener('click', e => { const b = e.target.closest('button'); if (b) setMode(b.dataset.mode); });
 setMode('pen');
 
-els.undoBtn.onclick = () => {
-  if (!history.length) { setStatus('Nothing to undo.'); return; }
-  const prev = history.pop();
+function restoreState(prev) {
   const routeChanged = JSON.stringify(prev.waypoints) !== JSON.stringify(waypoints);
   const raceChanged = JSON.stringify(prev.raceOpts || {}) !== JSON.stringify(raceOpts);
   waypoints = prev.waypoints;
@@ -2210,7 +2273,26 @@ els.undoBtn.onclick = () => {
   renderManualBuildings();
   if (routeChanged) rebuildRoute();   // only a route change needs re-snapping (and a re-scan)
   else if (raceChanged) { invalidateScan(); renderRace(); save(); }
+  updateUndoButtons();
+}
+function updateUndoButtons() { if (els.redoBtn) els.redoBtn.disabled = !future.length; }
+els.redoBtn = $('redoBtn');
+els.undoBtn.onclick = () => {
+  if (!history.length) { setStatus('Nothing to undo.'); return; }
+  future.push(stateNow());
+  restoreState(history.pop());
 };
+els.redoBtn.onclick = () => {
+  if (!future.length) { setStatus('Nothing to redo.'); return; }
+  history.push(stateNow());
+  restoreState(future.pop());
+};
+document.addEventListener('keydown', e => {
+  if (!(e.ctrlKey || e.metaKey) || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
+  const k = e.key.toLowerCase();
+  if (k === 'z' && !e.shiftKey) { e.preventDefault(); els.undoBtn.click(); }
+  else if (k === 'y' || (k === 'z' && e.shiftKey)) { e.preventDefault(); els.redoBtn.click(); }
+});
 els.clearBtn.onclick = () => {
   if (!waypoints.length) return;
   remember();
@@ -2766,18 +2848,22 @@ els.libSaveBtn.onclick = () => {
 els.libLoadBtn.onclick = async () => {
   const t = readLibrary().find(x => x.name === els.libSelect.value);
   if (!t) return;
+  await applyTrack(t);
+  setStatus(`Opened "${t.name}". Undo goes back to what you had before.`, 'ok');
+};
+// Puts a saved or shared track on the map (Undo goes back).
+async function applyTrack(t) {
   remember();
   waypoints = t.waypoints; trees = t.trees || []; manualBuildings = t.manualBuildings || [];
   raceOpts = t.race || { reverse: false, start: null };
   els.snap.checked = t.snap !== false; els.loop.checked = t.loop !== false;
   if (t.radius) { els.radius.value = t.radius; els.radiusVal.textContent = t.radius; }
   if (t.width) els.width.value = t.width;
-  els.name.value = t.name;
+  els.name.value = t.name || '';
   renderTrees(); renderManualBuildings();
   await rebuildRoute();
   if (waypoints.length) map.fitBounds(waypoints, { padding: [40, 40], maxZoom: 17 });
-  setStatus(`Opened "${t.name}". Undo goes back to what you had before.`, 'ok');
-};
+}
 els.libDeleteBtn.onclick = () => {
   const name = els.libSelect.value;
   if (!name) return;
@@ -3110,6 +3196,79 @@ function exportTerrain() {
 $('heightsBtn').onclick = getHeights;
 $('terrainBtn').onclick = exportTerrain;
 
+// ======================================================================
+// v12b (browser): share link, measuring, help card
+// ======================================================================
+$('shareBtn').onclick = async () => {
+  if (!waypoints.length) { setStatus('Draw a route first.', 'warn'); return; }
+  const link = location.origin + location.pathname + '#t=' + await packTrack(snapshot(els.name.value.trim()));
+  const box = $('shareOut');
+  box.value = link; box.hidden = false; box.select();
+  let how = 'Link ready below: copy it';
+  try { await navigator.clipboard.writeText(link); how = 'Link copied'; } catch (e) { /* clipboard blocked: the box is selected for a manual copy */ }
+  if (navigator.share && matchMedia('(pointer: coarse)').matches) { try { await navigator.share({ title: 'Kart track: ' + (els.name.value || 'route'), url: link }); how = 'Shared'; } catch (e) { /* cancelled */ } }
+  setStatus(`${how} (${link.length} characters). Open it on another device to get this exact track${link.length > 8000 ? ". It's long: some chat apps may cut it, so use Back up all for very long tracks" : ''}.`, link.length > 8000 ? 'warn' : 'ok');
+};
+// Opening a share link: load the track from the address, then tidy the address.
+async function openSharedLink() {
+  const m = /^#t=(.+)$/.exec(location.hash);
+  if (!m) return false;
+  try {
+    const t = await unpackTrack(m[1]);
+    await applyTrack(t);
+    setStatus(`Opened a shared track${t.name ? ' "' + t.name + '"' : ''}. Save it to keep it, or Undo to go back.`, 'ok');
+  } catch (e) {
+    setStatus("Couldn't open that share link: " + e.message + '.', 'err');
+  }
+  try { window.history.replaceState(null, '', location.pathname + location.search); } catch (e) {}   // (plain `history` is the Undo list here)
+  return true;
+}
+window.addEventListener('hashchange', openSharedLink);
+
+// ---- measuring tape (📏 on the map) ----
+let measuring = null;   // { pts, line, label }
+const MeasureCtl = L.Control.extend({
+  options: { position: 'topleft' },
+  onAdd() {
+    const b = L.DomUtil.create('button', 'leaflet-bar');
+    b.id = 'measureBtn'; b.type = 'button'; b.title = 'Measure a distance'; b.textContent = '📏';
+    b.style.cssText = 'width:34px;height:34px;font-size:16px;padding:0;background:#fff;color:#000;cursor:pointer';
+    L.DomEvent.disableClickPropagation(b);
+    b.onclick = () => toggleMeasure();
+    return b;
+  }
+});
+map.addControl(new MeasureCtl());
+function toggleMeasure() {
+  const b = $('measureBtn');
+  if (measuring) {
+    measuring.line.remove(); measuring.dots.remove(); measuring = null;
+    b.style.background = '#fff'; setMode(mode); setStatus('Measuring off.');
+    return;
+  }
+  measuring = { pts: [], line: L.polyline([], { color: '#ffbe0b', weight: 3, dashArray: '2 6', interactive: false }).addTo(map), dots: L.layerGroup().addTo(map) };
+  b.style.background = '#ffbe0b';
+  map.dragging.enable();
+  els.map.classList.add('drawing');
+  setStatus('Measuring: click points on the map. Click 📏 again to stop.');
+}
+function addMeasurePoint(ll) {
+  measuring.pts.push(ll);
+  measuring.line.setLatLngs(measuring.pts);
+  L.circleMarker(ll, { radius: 4, color: '#ffbe0b', weight: 2, fillColor: '#fff', fillOpacity: 1, interactive: false }).addTo(measuring.dots);
+  const total = routeLength(measuring.pts);
+  const last = measuring.pts.length > 1 ? dist(measuring.pts[measuring.pts.length - 2], ll) : 0;
+  setStatus(`Measured ${total >= 1000 ? (total / 1000).toFixed(2) + ' km' : total.toFixed(1) + ' m'}` + (measuring.pts.length > 2 ? ` (last bit ${last.toFixed(1)} m)` : '') + '. Click 📏 to stop.', 'ok');
+}
+// takes the click before the drawing modes do
+map.on('click', e => { if (measuring) addMeasurePoint([e.latlng.lat, e.latlng.lng]); });
+
+// ---- help card ----
+function showHelp(show) { $('helpCard').hidden = !show; }
+$('helpBtn').onclick = () => showHelp($('helpCard').hidden);
+$('helpClose').onclick = () => { showHelp(false); try { localStorage.setItem('kartmap-help-seen', '1'); } catch (e) {} };
+try { if (!localStorage.getItem('kartmap-help-seen') && !localStorage.getItem('kartmap-v1')) showHelp(true); } catch (e) { showHelp(true); }
+
 // ---- remember the last route between visits (optional; fails silently) ----
 function save() {
   try {
@@ -3120,7 +3279,8 @@ function save() {
     }));
   } catch (e) { /* storage blocked: tool still works, it just won't remember */ }
 }
-(function restore() {
+(async function restore() {
+  if (await openSharedLink()) return;   // v12b: a share link wins over the last route
   let s = null;
   try { s = JSON.parse(localStorage.getItem('kartmap-v1')); } catch (e) {}
   if (!s) return;

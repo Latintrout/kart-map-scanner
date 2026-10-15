@@ -125,6 +125,8 @@ function runScannerTests(lib) {
   else check('v11 functions present', false, 'scene3dPlan not found (running against v9b?)');
   if (has('applyElevation')) runV12a(lib, check, same);
   else check('v12a functions present', false, 'applyElevation not found (running against v11?)');
+  if (has('trackForLink')) runV12b(lib, check, same);
+  else check('v12b functions present', false, 'trackForLink not found (running against v12a?)');
 
   return results;
 }
@@ -657,5 +659,23 @@ function runV12a(lib, check, same) {
   check('v12a no data → no heights (area outside Queensland)', lib.applyElevation(JSON.parse(JSON.stringify(lib.buildOutput({ elements: els }, { route, waypoints: route, radius: 80, width: 8, loop: false, snapped: false, name: 'x', now: 'X' }).out)), [], lib.makeUnprojector) === null);
   const p3 = lib.scene3dPlan(out);
   check('v12a 3D plan carries the heights (track, building ground)', p3.hills && p3.track.elev.length === p3.track.line.length && p3.buildings[0].ground === b.ground);
+}
+
+function runV12b(lib, check, same) {
+  const t = { name: 'Grey St loop', waypoints: [[-27.4801234567, 153.0241234567], [-27.481, 153.025], [-27.482, 153.024]], snap: true, loop: true, radius: 150, width: 9,
+    race: { reverse: true, start: [-27.4805, 153.0245] }, trees: [{ lat: -27.4806, lon: 153.0246, canopy: 12 }],
+    manualBuildings: [{ ring: [[-27.48, 153.02], [-27.4801, 153.02], [-27.4801, 153.0201]], height: 7.5, name: 'Kiosk' }] };
+  const o = lib.trackForLink(t), back = lib.trackFromLink(JSON.parse(JSON.stringify(o)));
+  check('v12b share link keeps the route (to ~10 cm), settings, race, trees and drawn buildings', back.name === t.name && back.waypoints.length === 3 && Math.abs(back.waypoints[0][0] - t.waypoints[0][0]) < 1e-6 &&
+    back.snap && back.loop && back.radius === 150 && back.width === 9 && back.race.reverse && same(back.race.start, [-27.4805, 153.0245]) && back.trees[0].canopy === 12 && back.manualBuildings[0].name === 'Kiosk' && back.manualBuildings[0].height === 7.5, JSON.stringify(back));
+  let e1 = '', e2 = '';
+  try { lib.trackFromLink({ v: 2, w: [] }); } catch (e) { e1 = e.message; }
+  try { lib.trackFromLink({ v: 1, w: [[999, 0]] }); } catch (e) { e2 = e.message; }
+  check('v12b share link: wrong or damaged data gives a plain reason', /not a Kart Map Scanner track/.test(e1) && /damaged/.test(e2));
+  const lim = lib.trackFromLink({ v: 1, w: [[1, 2], [3, 4]], r: 9999, k: 0.1 });
+  check('v12b share link: silly settings are clamped to what the scanner allows', lim.radius === 300 && lim.width === 3);
+  const bytes = new Uint8Array([0, 255, 62, 63, 250]);
+  check('v12b base64 round trip', same(Array.from(lib.base64ToBytes(lib.bytesToBase64(bytes))), Array.from(bytes)));
+  check('v12b link packing functions exist (tested end to end in the page test)', typeof lib.packTrack === 'function' && typeof lib.unpackTrack === 'function');
 }
 
