@@ -1,6 +1,6 @@
 # kartmap file format (version 2)
 
-_Last updated for scanner v9a (2026-10-16). Fields marked **(v8)**, **(v8.1)**, **(v8.2)**, **(v8.3)** or **(v9a)** are newer than version 1. All are optional, so readers of version 1 files still work. Files say `"version": 2` from scanner v8.2 on, matching the "kartmap v2" the game's loader (brisbane-kart, `kartmap.gd`) was written for. That loader accepts versions 1 and 2 and **rejects anything higher**, so a future version 3 needs a loader update first._
+_Last updated for scanner v9a (2026-10-16; v9b made no format changes). Fields marked **(v8)**, **(v8.1)**, **(v8.2)**, **(v8.3)** or **(v9a)** are newer than version 1. All are optional, so readers of version 1 files still work. Files say `"version": 2` from scanner v8.2 on, matching the "kartmap v2" the game's loader (brisbane-kart, `kartmap.gd`) was written for. That loader accepts versions 1 and 2 and **rejects anything higher**, so a future version 3 needs a loader update first._
 
 **Guesses are always marked.** Any field ending in `Source` (`heightSource`, `widthSource`, `roofShapeSource`) says where a value came from. The values `default`, `estimated`, `guess` and **(v8.3)** `ml-estimate` mean it's a guess: later data (LiDAR, hand edits) may replace guesses freely, but must never replace real values (`osm`, `levels`, `lanes`, `lidar`, **(v8.3)** `overture`, **(v9a)** `manual`).
 

@@ -23,6 +23,7 @@ Draw a route on a real map, scan the area along it from free OpenStreetMap data,
 - **Draw missing buildings** (Building mode): click the corners, type a height.
 - **Race direction and start**: reverse the lap or click where the start line goes. Arrows and a 🏁 show the way round.
 - **Saved tracks**: keep several tracks in the browser, and back them all up to one file.
+- **Works on a phone**: map on top, panel below (the ▲/▼ button gives either more room). Draw with one finger, pinch with two, long-press to delete. "Show problem" jumps to anything sitting on the track.
 - **Export / Load** the level file. The format is documented in `docs/kartmap-format.md`.
 
 ## Tests

@@ -53,6 +53,31 @@
   select { width: 100%; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--text); font: inherit; }
   .race-flag { font-size: 20px; line-height: 20px; text-shadow: 0 0 3px #000; }
   .race-arrow { color: #fff; font-size: 14px; line-height: 14px; text-align: center; text-shadow: 0 0 3px #000, 0 0 2px #000; }
+  /* v9b: phone layout. Map on top, panel below; the ▲/▼ button gives one of them more room. */
+  #sheetBtn, #toast { display: none; }
+  @media (max-width: 760px) {
+    body { flex-direction: column; height: 100dvh; }
+    #map { order: 0; flex: none; height: 58dvh; }
+    #panel { order: 1; width: 100%; flex: 1; height: auto; min-height: 0; border-right: none; border-top: 1px solid var(--line); padding: 10px 12px 24px; }
+    body.sheet-up #map { height: 30dvh; }
+    body.map-big #map { height: 82dvh; }
+    #sheetBtn { display: block; position: fixed; left: 10px; z-index: 1000; top: calc(58dvh - 22px); padding: 6px 12px; border-radius: 16px;
+      background: var(--panel); box-shadow: 0 2px 6px #0008; font-size: 13px; }
+    body.sheet-up #sheetBtn { top: calc(30dvh - 22px); }
+    body.map-big #sheetBtn { top: calc(82dvh - 22px); }
+    #toast.show { display: block; position: fixed; left: 8px; right: 8px; top: 8px; z-index: 1001; padding: 8px 10px; border-radius: 8px;
+      background: #20202aee; box-shadow: 0 2px 8px #000a; font-size: 13px; }
+    #toast.warn { color: var(--warn); } #toast.err { color: var(--err); } #toast.ok { color: var(--ok); }
+    #modeRow { flex-wrap: wrap; }
+    #modeRow button { flex: 1 0 28%; }
+    input[type=text], input[type=number], select { font-size: 16px; }   /* stops phones zooming in on tap */
+    h1 { font-size: 16px; } .sub { display: none; }
+  }
+  @media (pointer: coarse) {
+    button, select { min-height: 40px; }
+    input[type=checkbox] { width: 20px; height: 20px; }
+    .leaflet-control-zoom { display: none; }   /* pinch to zoom instead */
+  }
   .legend span { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin: 0 4px 0 8px; vertical-align: middle; }
 .lm-photos{display:flex;gap:4px;margin:3px 0 4px}.lm-photos img{width:64px;height:48px;object-fit:cover;border-radius:3px;border:1px solid #ccc}
 </style>
@@ -120,7 +145,7 @@
     </div>
     <label class="inline"><input id="snap" type="checkbox" checked> Snap route to roads</label>
     <label class="inline"><input id="loop" type="checkbox" checked> Close into a loop (lap track)</label>
-    <div class="hint">Drag a numbered point to move it. Right-click a point to delete it.</div>
+    <div class="hint">Drag a numbered point to move it. Right-click (long-press on a phone) a point to delete it.</div>
     <div id="routeInfo" class="hint" style="margin-top:6px">No route yet.</div>
     <div class="row" style="margin-top:6px">
       <button id="reverseBtn" title="Race the other way round">⇄ Reverse direction</button>
@@ -144,7 +169,7 @@
     <h2>4. Result</h2>
     <div id="stats" class="hint">Nothing scanned yet.</div>
     <div class="legend hint" style="margin-top:6px">
-      <span style="background:#6c757d"></span>building<span style="background:#343a40"></span>road<span style="background:#e76f51"></span>bridge<span style="background:#7f4f24"></span>fence<span style="background:#52b788"></span>green<span style="background:#4ea8de"></span>water<span style="background:#9b2226;border-radius:50%"></span>landmark<span style="background:#ff4d4d"></span>blocks track<span style="background:#d63384"></span>shortcut<span style="background:#00b4d8;border-radius:50%"></span>checkpoint
+      <span style="background:#6c757d"></span>building<span style="background:#343a40"></span>road<span style="background:#e76f51"></span>bridge<span style="background:#7f4f24"></span>fence<span style="background:#52b788"></span>green<span style="background:#4ea8de"></span>water<span style="background:#9b2226;border-radius:50%"></span>landmark<span style="background:#ff4d4d"></span>blocks track<span style="background:transparent;border:2px solid #d00000;border-radius:50%"></span>on track<span style="background:#d63384"></span>shortcut<span style="background:#00b4d8;border-radius:50%"></span>checkpoint
     </div>
     <div class="row" style="margin-top:8px">
       <button id="exportBtn" class="primary" disabled>Export JSON</button>
@@ -167,6 +192,8 @@
   </section>
 </aside>
 <div id="map" class="pen"></div>
+<button id="sheetBtn" type="button" title="Give the map or the panel more room">▲ Panel</button>
+<div id="toast" role="status" aria-live="polite"></div>
 
 <script>
 // ======================================================================
@@ -1327,7 +1354,7 @@ function buildOutput(data, o) {
     meta: {
       name: o.name || 'route',
       generated: o.now || new Date().toISOString(),
-      generator: 'kart-map-scanner v9a',
+      generator: 'kart-map-scanner v9b',
       origin: { lat: origin[0], lon: origin[1] },
       units: 'metres',
       axes: 'x = east, y = north. In Godot: Vector3(x, 0, -y)',
@@ -1503,6 +1530,19 @@ function readLibraryBackup(j) {
 // Merges a backup into the library; tracks in the backup replace ones with the same name.
 function libraryMerge(list, tracks) { return tracks.slice().reverse().reduce((l, t) => libraryUpsert(l, t), list || []); }
 
+// v9b: where the things on the track are (buildings, fences, props), for "Show next problem".
+// Takes the preview list from buildOutput; returns [{ cat, xy: [x, y] metres, label }], nearest the start first.
+function problemSpots(preview) {
+  const mid = f => {
+    if (f.cat === 'building' || f.cat === 'part') return centroid(f.xy[0]);
+    if (f.cat === 'barrier') return f.xy[Math.floor(f.xy.length / 2)];
+    return f.xy;
+  };
+  const label = f => f.cat === 'barrier' ? 'Fence or wall across the track' : f.cat === 'point' ? `${String(f.kind).replace(/_/g, ' ')} on the track` : 'Building blocking the track';
+  return (preview || []).filter(f => f.onTrack).map(f => ({ cat: f.cat, xy: mid(f), label: label(f) }))
+    .sort((a, b) => Math.hypot(a.xy[0], a.xy[1]) - Math.hypot(b.xy[0], b.xy[1]));
+}
+
 // lat/lon from [east, north] metres (the reverse of makeProjector), for drawing the preview.
 function makeUnprojector(lat0, lon0) {
   const R = 6378137, k = Math.PI / 180, c = Math.cos(lat0 * k);
@@ -1654,7 +1694,8 @@ function remember() {
 }
 
 // ---- map ----
-const map = L.map('map', { preferCanvas: true }).setView([-27.47, 153.02], 15);
+const map = L.map('map', { preferCanvas: true, tapHold: true })   // v9b: tapHold = long-press acts as right-click on phones
+  .setView([-27.47, 153.02], 15);
 const baseLayers = {};
 for (const [label, b] of Object.entries(CONFIG.baseMaps)) baseLayers[label] = L.tileLayer(b.url, b.opts);
 let savedBase = null;
@@ -1670,6 +1711,13 @@ const wpLayer = L.layerGroup().addTo(map);
 function setStatus(msg, kind) {
   els.status.textContent = msg;
   els.status.className = kind || '';
+  // v9b: on a phone the status box is often scrolled out of sight, so show it over the map too.
+  const t = document.getElementById('toast');
+  if (t) {
+    t.textContent = msg; t.className = 'show ' + (kind || '');
+    clearTimeout(setStatus.timer);
+    if (kind !== 'err') setStatus.timer = setTimeout(() => { t.className = ''; }, /…$/.test(msg) ? 15000 : 5000);
+  }
 }
 
 // The scan radius drawn as a fat see-through line. Its pixel width is recalculated
@@ -1696,11 +1744,22 @@ function renderWaypoints() {
     });
     m.on('dragstart', remember);
     m.on('dragend', e => { const ll = e.target.getLatLng(); waypoints[i] = [ll.lat, ll.lng]; rebuildRoute(); });
-    m.on('contextmenu', () => { remember(); waypoints.splice(i, 1); rebuildRoute(); });
+    m.on('contextmenu', e => afterFingerLifts(e, () => { remember(); waypoints.splice(i, 1); rebuildRoute(); }));
     m.addTo(wpLayer);
   });
 }
 
+// v9b: a long-press on a phone fires "contextmenu" while the finger is still down. Deleting the
+// thing right away removes it from under the finger, so the finger-up never reaches the page and
+// Leaflet's long-press clean-up doesn't run: the next tap anywhere is swallowed (found in the
+// phone test). So on a long-press, wait for the finger to lift, then delete.
+function afterFingerLifts(e, fn) {
+  const oe = e && (e.originalEvent || e);
+  if (!oe || !oe._simulated) { fn(); return; }
+  const done = () => { document.removeEventListener('touchend', done, true); document.removeEventListener('touchcancel', done, true); setTimeout(fn, 0); };
+  document.addEventListener('touchend', done, true);
+  document.addEventListener('touchcancel', done, true);
+}
 function invalidateScan() {
   if (!scanResult) return;
   scanResult = null;
@@ -1833,7 +1892,7 @@ function renderTrees() {
     const c = L.circle([t.lat, t.lon], {
       radius: t.canopy / 2, color: '#1b4332', weight: 2, fillColor: '#40916c', fillOpacity: 0.55
     }).bindTooltip(`Tree ${i + 1}: ${t.canopy} m canopy. Right-click to remove.`);
-    c.on('contextmenu', ev => { L.DomEvent.stop(ev); remember(); trees.splice(i, 1); renderTrees(); });
+    c.on('contextmenu', ev => { L.DomEvent.stop(ev); afterFingerLifts(ev, () => { remember(); trees.splice(i, 1); renderTrees(); }); });
     c.addTo(treeLayer);
   });
   showStats();
@@ -1855,6 +1914,7 @@ let stroke = null;   // container pixel points of the stroke in progress
 
 els.map.addEventListener('pointerdown', e => {
   if (mode !== 'pen' || e.button !== 0) return;
+  if (e.pointerType === 'touch' && fingers.size > 1) return;   // v9b: second finger = pinch, not a new stroke
   if (e.target.closest('.leaflet-control, .leaflet-marker-icon')) return;   // let buttons and markers work normally
   stroke = [];
   els.map.setPointerCapture(e.pointerId);
@@ -1896,8 +1956,8 @@ function finishStroke() {
 const MODE_HINTS = {
   pen: 'Pen: hold the mouse button and drag along the roads. Draw in several strokes if you like; each continues the route.',
   points: 'Points: click to add a point. Good for a few corners; snapping fills in the roads between them.',
-  trees: 'Trees: click to place a tree. Switch to Satellite (top-right) to see the real ones. Right-click a tree to remove it.',
-  build: 'Building: click the corners of a building the map is missing (use Satellite, top-right). Set its height, then click the first corner again to finish. Right-click a drawn building to delete it.',
+  trees: 'Trees: click to place a tree. Switch to Satellite (top-right) to see the real ones. Right-click or long-press a tree to remove it.',
+  build: 'Building: click the corners of a building the map is missing (use Satellite, top-right). Set its height, then click the first corner again to finish. Right-click or long-press a drawn building to delete it.',
   pan: 'Pan: drag to move the map. Nothing gets drawn.'
 };
 function setMode(m) {
@@ -2250,9 +2310,15 @@ function drawPreview(preview) {
       else if (f.tunnel) L.polyline(f.xy.map(U), { color: '#6c757d', weight: 3, opacity: 0.8, dashArray: '4 6' }).bindTooltip('tunnel').addTo(featureLayer);
       else L.polyline(f.xy.map(U), { color: /footway|path|cycleway|steps/.test(f.kind) ? '#bc6c25' : '#343a40', weight: 2, opacity: 0.8 }).addTo(featureLayer);
     }
-    else if (f.cat === 'barrier') L.polyline(f.xy.map(U), { color: '#7f4f24', weight: 1.5, opacity: 0.9 }).addTo(featureLayer);
+    else if (f.cat === 'barrier') {
+      if (f.onTrack) L.polyline(f.xy.map(U), { color: '#d00000', weight: 4, opacity: 0.95 }).bindTooltip('Fence or wall crosses the track').addTo(featureLayer);
+      else L.polyline(f.xy.map(U), { color: '#7f4f24', weight: 1.5, opacity: 0.9 }).addTo(featureLayer);
+    }
     else if (f.cat === 'waterway') L.polyline(f.xy.map(U), { color: '#4ea8de', weight: 2 }).addTo(featureLayer);
-    else if (f.cat === 'point') L.circleMarker(U(f.xy), { radius: f.kind === 'tree' ? 3 : 2, weight: 0, fillOpacity: 0.9, fillColor: f.kind === 'tree' ? '#2d6a4f' : '#ffb703' }).bindTooltip(f.kind).addTo(featureLayer);
+    else if (f.cat === 'point') {
+      L.circleMarker(U(f.xy), { radius: f.kind === 'tree' ? 3 : 2, weight: 0, fillOpacity: 0.9, fillColor: f.kind === 'tree' ? '#2d6a4f' : '#ffb703' }).bindTooltip(f.kind).addTo(featureLayer);
+      if (f.onTrack) L.circleMarker(U(f.xy), { radius: 6, color: '#d00000', weight: 2, fill: false }).bindTooltip(f.kind.replace(/_/g, ' ') + ' on the track').addTo(featureLayer);
+    }
     else if (f.cat === 'landmark') L.circleMarker(U(f.xy), { radius: 7, color: '#fff', weight: 2, fillColor: '#9b2226', fillOpacity: 1 }).bindTooltip(`★ ${f.name} (${f.kind})`).addTo(featureLayer);
   }
 }
@@ -2291,7 +2357,9 @@ function showStats() {
   const qHtml = q ? `<details open style="margin-top:6px"><summary>Quality report</summary>` +
     `<div class="hint" style="margin-top:4px">Heights: ${q.heights.measured}% measured, ${q.heights.estimated}% estimated, ${q.heights.default}% default guess. Roofs: ${q.roofShapes.mapped}% mapped.</div>` +
     (q.notes.length ? `<ul style="margin:4px 0 0;padding-left:18px">${q.notes.map(n => `<li>${esc(n)}</li>`).join('')}</ul>` : '') + `</details>` : '';
-  els.stats.innerHTML = rows.map(([k, v]) => `<div><span>${k}</span><b>${v}</b></div>`).join('') + qHtml +
+  const probs = problemSpots(scanPreview);
+  const probHtml = probs.length ? `<button id="nextProblemBtn" style="width:100%;margin-top:6px">Show problem on the map (${probs.length})</button>` : '';
+  els.stats.innerHTML = rows.map(([k, v]) => `<div><span>${k}</span><b>${v}</b></div>`).join('') + qHtml + probHtml +
     (lm.length ? `<details style="margin-top:6px"><summary>Landmarks to model by hand (${lm.length})</summary>` +
       `<ul style="margin:4px 0 0;padding-left:18px">${lm.map(l => `<li>${esc(l.name)} <span class="hint">(${esc(l.kind)})</span>${photoHtml(l, esc)}</li>`).join('')}</ul></details>` : '');
 }
@@ -2397,7 +2465,7 @@ function renderManualBuildings() {
   manualBuildings.forEach((m, i) => {
     L.polygon(m.ring, { color: '#fb8500', weight: 2, fillColor: '#ffb703', fillOpacity: 0.6 })
       .bindTooltip(`${m.name || 'Building you drew'} (${m.height} m). Right-click to delete.`)
-      .on('contextmenu', ev => { L.DomEvent.stop(ev); remember(); manualBuildings.splice(i, 1); renderManualBuildings(); setStatus('Building deleted. Undo brings it back.'); })
+      .on('contextmenu', ev => { L.DomEvent.stop(ev); afterFingerLifts(ev, () => { remember(); manualBuildings.splice(i, 1); renderManualBuildings(); setStatus('Building deleted. Undo brings it back.'); }); })
       .addTo(mbLayer);
   });
   showStats();
@@ -2521,6 +2589,46 @@ els.libFile.onchange = async () => {
 };
 renderLibrary();
 renderRace();
+
+// ---- v9b: step through things on the track ----
+let problemIdx = -1;
+const problemMarker = L.circleMarker([0, 0], { radius: 18, color: '#ffbe0b', weight: 3, fill: false, interactive: false });
+els.stats.addEventListener('click', e => {
+  if (!e.target.closest('#nextProblemBtn') || !scanResult) return;
+  const probs = problemSpots(scanPreview);
+  if (!probs.length) return;
+  problemIdx = (problemIdx + 1) % probs.length;
+  const pr = probs[problemIdx];
+  const ll = makeUnprojector(scanResult.meta.origin.lat, scanResult.meta.origin.lon)(pr.xy);
+  map.setView(ll, Math.max(map.getZoom(), 18));
+  problemMarker.setLatLng(ll).addTo(map);
+  setStatus(`Problem ${problemIdx + 1} of ${probs.length}: ${pr.label}. Nudge the route, or leave it for the game to remove.`, 'warn');
+  e.target.textContent = `Next problem (${problemIdx + 1} of ${probs.length})`;
+});
+
+// ---- v9b: phone layout ----
+// Map/panel split button (only shown on narrow screens) cycles: normal → panel up → map big.
+const SHEET_LABELS = { '': '▲ Panel', 'sheet-up': '▼ Map', 'map-big': '▲ Panel' };
+let sheet = '';
+$('sheetBtn').onclick = () => {
+  if (sheet === '') sheet = 'sheet-up'; else if (sheet === 'sheet-up') sheet = 'map-big'; else sheet = '';
+  document.body.classList.remove('sheet-up', 'map-big');
+  if (sheet) document.body.classList.add(sheet);
+  $('sheetBtn').textContent = SHEET_LABELS[sheet];
+  setTimeout(() => map.invalidateSize(), 50);   // Leaflet must re-measure after the map changes size
+};
+window.addEventListener('resize', () => map.invalidateSize());
+$('toast').onclick = () => { $('toast').className = ''; };
+// Pen mode with two fingers = pinch-zoom, not drawing: if a second finger lands, drop the stroke.
+const fingers = new Set();
+els.map.addEventListener('pointerdown', e => {
+  if (e.pointerType !== 'touch') return;
+  fingers.add(e.pointerId);
+  if (fingers.size > 1 && stroke) { stroke = null; penLine.setLatLngs([]); }
+}, true);
+const fingerUp = e => fingers.delete(e.pointerId);
+els.map.addEventListener('pointerup', fingerUp, true);
+els.map.addEventListener('pointercancel', fingerUp, true);
 
 // ---- remember the last route between visits (optional; fails silently) ----
 function save() {

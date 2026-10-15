@@ -119,6 +119,8 @@ function runScannerTests(lib) {
   else check('v8.3 functions present', false, 'mergeOverture not found (running against v8.2?)');
   if (has('orientRoute')) runV9a(lib, check, same);
   else check('v9a functions present', false, 'orientRoute not found (running against v8.3?)');
+  if (has('problemSpots')) runV9b(lib, check, same);
+  else check('v9b functions present', false, 'problemSpots not found (running against v9a?)');
 
   return results;
 }
@@ -538,5 +540,25 @@ function runV9a(lib, check, same) {
   check('v9a library backup: wrong file and newer version give plain errors', /not a track library/.test(err) && /newer scanner/.test(err2));
   const merged = lib.libraryMerge([{ name: 'a', waypoints: [] }, { name: 'c', waypoints: [] }], lib.readLibraryBackup({ format: 'kartmap-library', version: 1, tracks: [{ name: 'a', waypoints: [[9, 9]] }, { name: 'x', waypoints: [] }, { bad: 1 }] }).tracks);
   check('v9a library restore: merges, backup wins on same name, junk skipped', merged.length === 3 && merged.find(x => x.name === 'a').waypoints.length === 1 && merged.some(x => x.name === 'x'));
+}
+
+function runV9b(lib, check, same) {
+  const la = -27.5, lo = 153.0;
+  const off = (dx, dy) => ({ lat: la + dy / 111320, lon: lo + dx / (111320 * Math.cos(la * Math.PI / 180)) });
+  const llOff = (dx, dy) => { const o = off(dx, dy); return [o.lat, o.lon]; };
+  const rect = (x, y, w, h) => [off(x, y), off(x + w, y), off(x + w, y + h), off(x, y + h), off(x, y)];
+  const route = [llOff(0, 0), llOff(300, 0)];
+  const data = { elements: [
+    { type: 'way', id: 1, tags: { building: 'yes' }, geometry: rect(200, -5, 10, 10) },          // across the track, 205 m out
+    { type: 'way', id: 2, tags: { barrier: 'fence' }, geometry: [off(100, -10), off(100, 10)] },   // crosses at 100 m
+    { type: 'node', id: 3, lat: off(50, 1).lat, lon: off(50, 1).lon, tags: { amenity: 'bench' } }, // on the track at 50 m
+    { type: 'way', id: 4, tags: { building: 'yes' }, geometry: rect(150, 40, 10, 10) }            // well clear
+  ] };
+  const { preview } = lib.buildOutput(data, { route, waypoints: route, radius: 100, width: 8, loop: false, snapped: false, name: 't', now: 'X' });
+  const ps = lib.problemSpots(preview);
+  check('v9b problem list: building, fence and bench on the track, nothing else', ps.length === 3, JSON.stringify(ps));
+  check('v9b problems are ordered nearest the start first, with plain labels', ps.length === 3 && /bench on the track/.test(ps[0].label) && /Fence or wall/.test(ps[1].label) && /Building blocking/.test(ps[2].label));
+  check('v9b problem spots sit where the things are', ps.length === 3 && Math.abs(ps[0].xy[0] - 50) < 1 && Math.abs(ps[2].xy[0] - 205) < 1, JSON.stringify(ps.map(p => p.xy)));
+  check('v9b no problems = empty list', lib.problemSpots([]).length === 0 && lib.problemSpots(null).length === 0);
 }
 

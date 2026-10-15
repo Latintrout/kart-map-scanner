@@ -36,8 +36,9 @@ const overpass = { elements: [
   const results = [];
   const check = (n, ok, d) => { results.push({ n, ok }); console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${!ok && d ? '  -> ' + d : ''}`); };
 
-  async function openPage(mode) {
-    const ctx = await browser.newContext({ acceptDownloads: true });
+  let benchAt = null;   // v9b: where the 'problem' mock puts a bench (on the drawn route)
+  async function openPage(mode, ctxOpts) {
+    const ctx = await browser.newContext({ acceptDownloads: true, ...(ctxOpts || {}) });
     const page = await ctx.newPage();
     // v8.3: fake Overture reply (one height for GOMA's OSM way, one building OSM doesn't have)
     await page.addInitScript(({ la, lo }) => {
@@ -59,7 +60,9 @@ const overpass = { elements: [
       if (u.includes('leaflet.css')) return route.fulfill({ body: leafletCss, contentType: 'text/css' });
       if (u.includes('/interpreter')) {
         if (mode === 'down') return route.fulfill({ status: 502, body: 'Bad Gateway', headers: { 'access-control-allow-origin': '*' } });
-        return route.fulfill({ body: JSON.stringify(overpass), contentType: 'application/json', headers: { 'access-control-allow-origin': '*' } });
+        const at = benchAt || off(2, 0);
+        const body = mode === 'problem' ? { elements: overpass.elements.concat([{ type: 'node', id: 99, lat: at.lat, lon: at.lon, tags: { amenity: 'bench' } }]) } : overpass;
+        return route.fulfill({ body: JSON.stringify(body), contentType: 'application/json', headers: { 'access-control-allow-origin': '*' } });
       }
       if (u.includes('router.project-osrm.org')) return route.fulfill({ body: JSON.stringify({ code: 'NoRoute' }), contentType: 'application/json', headers: { 'access-control-allow-origin': '*' } });
       if (u.includes('spatial-img.information.qld.gov.au')) return route.fulfill({ body: aerial, contentType: 'image/png', headers: { 'access-control-allow-origin': '*' } });
@@ -256,6 +259,67 @@ const overpass = { elements: [
     const m3 = await o.page.textContent('#status');
     check('v8.3 Overture failing still gives a scan (OSM only) with a plain warning', /Scan done/.test(m3) && /Overture skipped: test failure/.test(m3), m3);
     await o.ctx.close();
+  }
+  if (V >= 9.2) {
+    // ---------- v9b: phone layout (Pixel-sized screen, real touch) ----------
+    const ph = await openPage('problem', { viewport: { width: 412, height: 915 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 });
+    const pg = ph.page;
+    const cdp = await pg.context().newCDPSession(pg);
+    const touch = async (type, pts) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: pts.map(([x, y], i) => ({ x, y, id: i })) });
+    const lay = await pg.evaluate(() => ({ sw: document.documentElement.scrollWidth, map: document.getElementById('map').getBoundingClientRect().toJSON(), panel: document.getElementById('panel').getBoundingClientRect().toJSON(), btn: getComputedStyle(document.getElementById('sheetBtn')).display }));
+    check('v9b phone: no sideways scrolling, map on top, panel below', lay.sw <= 412 && lay.map.top === 0 && lay.map.width === 412 && lay.map.height > 450 && lay.panel.top >= lay.map.bottom - 1 && lay.btn === 'block', JSON.stringify(lay));
+    await pg.tap('#sheetBtn'); await pg.waitForTimeout(150);
+    const up = await pg.evaluate(() => ({ h: document.getElementById('map').getBoundingClientRect().height, leaf: document.querySelector('.leaflet-container').clientHeight, label: document.getElementById('sheetBtn').textContent }));
+    await pg.tap('#sheetBtn'); await pg.waitForTimeout(150);
+    const big = await pg.evaluate(() => document.getElementById('map').getBoundingClientRect().height);
+    await pg.tap('#sheetBtn'); await pg.waitForTimeout(150);
+    check('v9b phone: the ▲/▼ button cycles panel-up, map-big, normal', up.h < 300 && /Map/.test(up.label) && big > 700, JSON.stringify({ up, big }));
+    const mb = await pg.locator('#map').boundingBox();
+    const mx = mb.x + mb.width / 2, my = mb.y + mb.height / 2;
+    await pg.tap('[data-mode="pen"]');
+    await pg.uncheck('#snap');
+    await touch('touchStart', [[mx - 80, my]]);
+    for (let i = 1; i <= 16; i++) { await touch('touchMove', [[mx - 80 + i * 10, my - (i > 8 ? (i - 8) * 10 : 0)]]); await pg.waitForTimeout(16); }
+    await touch('touchEnd', []);
+    await pg.waitForTimeout(400);
+    const ri = await pg.textContent('#routeInfo');
+    check('v9b phone: one-finger drag in Pen mode draws the route', /^\d+ points/.test(ri) && +ri.match(/^(\d+)/)[1] >= 2, ri);
+    const before = +ri.match(/^(\d+)/)[1];
+    await touch('touchStart', [[mx - 60, my + 60]]);
+    await touch('touchStart', [[mx - 60, my + 60], [mx + 60, my + 100]]);
+    for (let i = 1; i <= 6; i++) await touch('touchMove', [[mx - 60 - i * 8, my + 60 - i * 8], [mx + 60 + i * 8, my + 100 + i * 8]]);
+    await touch('touchEnd', []);
+    await pg.waitForTimeout(400);
+    const after = +(await pg.textContent('#routeInfo')).match(/^(\d+)/)[1];
+    check('v9b phone: two-finger pinch does not draw', after === before, before + ' -> ' + after);
+    // long-press the last route point to delete it (phones have no right-click)
+    // a route point that isn't hidden under a map button
+    const last = await pg.evaluate(() => { for (const el of [...document.querySelectorAll('.leaflet-marker-icon.wp')].reverse()) { const r = el.getBoundingClientRect(), x = r.x + r.width / 2, y = r.y + r.height / 2; if (document.elementFromPoint(x, y) === el) return [x, y]; } return null; });
+    await pg.evaluate(() => { window.__ev = []; for (const t of ['touchstart', 'pointerdown', 'contextmenu', 'touchend', 'click']) document.addEventListener(t, e => window.__ev.push(t + ':' + (e.target.className && e.target.className.baseVal === undefined ? e.target.className : e.target.tagName) + (e._simulated ? ':sim' : '')), true); });
+    await touch('touchStart', [last]); await pg.waitForTimeout(900); await touch('touchEnd', []);
+    if (process.env.DEBUG) console.log('events', JSON.stringify(await pg.evaluate(() => window.__ev)), JSON.stringify(last));
+    await pg.waitForTimeout(400);
+    const afterHold = +(await pg.textContent('#routeInfo')).match(/^(\d+)/)[1];
+    check('v9b phone: long-press a point deletes it', afterHold === after - 1, after + ' -> ' + afterHold);
+    const wp = (await pg.evaluate(() => JSON.parse(localStorage.getItem('kartmap-v1')).waypoints))[0];
+    benchAt = { lat: wp[0], lon: wp[1] };
+    if (process.env.DEBUG) await pg.evaluate(() => { window.__ev = []; });
+    await pg.tap('#scanBtn');
+    if (process.env.DEBUG) { await pg.waitForTimeout(300); console.log('tap events', JSON.stringify(await pg.evaluate(() => window.__ev))); }
+    await pg.waitForFunction(() => !document.getElementById('exportBtn').disabled, null, { timeout: 15000 }).catch(async () => console.log('scan status:', await pg.textContent('#status'), await pg.textContent('#routeInfo')));
+    check('v9b phone: scan works', /Scan done/.test(await pg.textContent('#status')), await pg.textContent('#status'));
+    const pb = await pg.$('#nextProblemBtn');
+    check('v9b "Show problem" button appears when something is on the track', !!pb);
+    if (pb) {
+      await pb.tap(); await pg.waitForTimeout(300);
+      check('v9b "Show problem" zooms to it and says what it is', /Problem 1 of \d+: bench on the track/.test(await pg.textContent('#status')), await pg.textContent('#status'));
+    }
+    if (process.env.SHOT2) { await pg.screenshot({ path: process.env.SHOT2 }); await pg.tap('#sheetBtn'); await pg.waitForTimeout(200); await pg.screenshot({ path: process.env.SHOT2.replace('.png', '-up.png') }); }
+    check('v9b phone: status also shows over the map (toast), tap hides it', await pg.isVisible('#toast') && /Problem 1/.test(await pg.textContent('#toast')));
+    await pg.tap('#toast'); await pg.waitForTimeout(100);
+    check('v9b phone: toast hides on tap', !(await pg.isVisible('#toast')));
+    check('v9b phone: no script errors', ph.errors.length === 0, ph.errors.join('; '));
+    await ph.ctx.close();
   }
   await browser.close();
   const failed = results.filter(r => !r.ok).length;
