@@ -117,6 +117,8 @@ function runScannerTests(lib) {
   else check('v8.2 functions present', false, 'loaderContractProblems not found (running against v8.1?)');
   if (has('mergeOverture', 'rankNearbyPhotos')) runV83(lib, check, same);
   else check('v8.3 functions present', false, 'mergeOverture not found (running against v8.2?)');
+  if (has('orientRoute')) runV9a(lib, check, same);
+  else check('v9a functions present', false, 'orientRoute not found (running against v8.3?)');
 
   return results;
 }
@@ -321,7 +323,7 @@ function runV81(lib, check, same) {
 
   // --- guesses are marked ---
   check('v8.1 every building height says where it came from', out.buildings.every(b => ['osm', 'levels', 'estimated', 'default'].includes(b.heightSource)));
-  check('v8.1+ generator tag present', /^kart-map-scanner v8\.\d+$/.test(out.meta.generator));
+  check('v8.1+ generator tag present', /^kart-map-scanner v(8\.\d+|9[a-z]|\d\d+)$/.test(out.meta.generator), out.meta.generator);
 
   // --- speed: a South-Bank-sized scan must stay quick ---
   const big = [];
@@ -478,3 +480,63 @@ function runV83(lib, check, same) {
 }
 
 if (typeof module !== 'undefined') module.exports = { runScannerTests };
+
+function runV9a(lib, check, same) {
+  const la = -27.52, lo = 153.05;
+  const off = (dx, dy) => ({ lat: la + dy / 111320, lon: lo + dx / (111320 * Math.cos(la * Math.PI / 180)) });
+  const llOff = (dx, dy) => { const o = off(dx, dy); return [o.lat, o.lon]; };
+  const rect = (x, y, w, h) => [off(x, y), off(x + w, y), off(x + w, y + h), off(x, y + h), off(x, y)];
+  const loop = [llOff(0, 0), llOff(200, 0), llOff(200, 200), llOff(0, 200), llOff(0, 0)];
+  const near = (a, b, m) => lib.dist(a, b) < m;
+
+  // --- direction and start ---
+  const rev = lib.orientRoute(loop, { reverse: true, loop: true });
+  check('v9a reverse flips the route order', near(rev[1], llOff(0, 200), 0.01) && near(rev[3], llOff(200, 0), 0.01));
+  const L0 = lib.routeLength(loop);
+  const rot = lib.orientRoute(loop, { loop: true, start: llOff(203, 120) });   // 3 m off the east side, 120 m up
+  check('v9a start moves to the nearest point on the loop (snapped onto the line)', near(rot[0], llOff(200, 120), 0.05), JSON.stringify(rot[0]));
+  check('v9a moved-start loop is closed and the same length', near(rot[0], rot.at(-1), 0.01) && Math.abs(lib.routeLength(rot) - L0) < 0.05, lib.routeLength(rot) + ' vs ' + L0);
+  check('v9a moved start keeps the drawing direction (next corner is the NE one)', near(rot[1], llOff(200, 200), 0.01));
+  const both = lib.orientRoute(loop, { loop: true, reverse: true, start: llOff(203, 120) });
+  check('v9a reverse + start: same start, other way round (next corner is the SE one)', near(both[0], llOff(200, 120), 0.05) && near(both[1], llOff(200, 0), 0.01));
+  const line = [llOff(0, 0), llOff(100, 0), llOff(100, 100)];
+  check('v9a not a loop: start is ignored, reverse still works', same(lib.orientRoute(line, { loop: false, start: llOff(100, 50) }), line) && near(lib.orientRoute(line, { reverse: true })[0], llOff(100, 100), 0.01));
+  check('v9a orientRoute leaves its input alone', near(loop[0], llOff(0, 0), 0.001) && loop.length === 5);
+  const arrows = lib.arrowsAlong(loop, 100);
+  check('v9a direction arrows every 100 m with the right heading (east = 90°, north = 0°)', arrows.length === 8 && Math.abs(arrows[0].bearing - 90) <= 1 && Math.abs(arrows[2].bearing - 0) <= 1 && Math.abs(arrows[4].bearing - 270) <= 1, JSON.stringify(arrows.map(a => a.bearing)));
+
+  // the race layout follows the oriented route
+  const data = { elements: [{ type: 'way', id: 1, tags: { highway: 'residential' }, geometry: loop.map(p => ({ lat: p[0], lon: p[1] })) }] };
+  const base = { waypoints: loop.slice(0, 4), radius: 100, width: 8, loop: true, snapped: false, name: 't', now: 'X' };
+  const a = lib.buildOutput(data, { ...base, route: loop }).out;
+  const b = lib.buildOutput(data, { ...base, route: lib.orientRoute(loop, { loop: true, reverse: true, start: llOff(203, 120) }), reverse: true, start: llOff(200, 120) }).out;
+  const P = lib.makeProjector(b.meta.origin.lat, b.meta.origin.lon);
+  check('v9a export records the race settings', b.route.reversed === true && Array.isArray(b.route.startPoint) && a.route.reversed === false && !('startPoint' in JSON.parse(JSON.stringify(a.route))));
+  check('v9a start line sits at the picked start', b.race && Math.hypot(b.race.startLine.pos[0], b.race.startLine.pos[1]) < 3, b.race && JSON.stringify(b.race.startLine.pos));
+  check('v9a reversed race heads the other way (south along the east side)', b.race && b.race.startLine.dir[1] < -0.9, b.race && JSON.stringify(b.race.startLine.dir));
+  check('v9a waypoints stay as drawn (so the route reloads unchanged)', same(b.route.waypoints, loop.slice(0, 4)));
+
+  // --- hand-drawn buildings ---
+  const ring = rect(50, 50, 20, 10).slice(0, 4).map(g => [g.lat, g.lon]);
+  const fin = lib.withManualExtras(a, [], [{ ring, height: 7.5, name: 'Kiosk' }, { ring: ring.slice(0, 2), height: 5 }, { ring, height: 0 }]);
+  const mb = fin.buildings.filter(x => x.source === 'manual');
+  const Pa = lib.makeProjector(a.meta.origin.lat, a.meta.origin.lon);
+  check('v9a drawn building exported (bad ones skipped), labelled manual', mb.length === 1 && mb[0].id === 'mb1' && mb[0].heightSource === 'manual' && mb[0].height === 7.5 && mb[0].name === 'Kiosk' && fin.meta.counts.manualBuildings === 1);
+  check('v9a drawn building footprint in metres, open ring', mb[0].footprint.length === 4 && Math.abs(mb[0].footprint[0][0] - Pa(ring[0][0], ring[0][1])[0]) < 0.01);
+  check('v9a drawn buildings kept for reloading; scan result untouched', fin.manualBuildings.length === 3 && a.buildings.every(x => x.source !== 'manual') && !('manualBuildings' in a));
+  check('v9a file with drawn buildings passes the game-loader check', lib.loaderContractProblems(fin).length === 0, JSON.stringify(lib.loaderContractProblems(fin)));
+  check('v9a manual trees still work alongside', lib.withManualExtras(a, [{ lat: la, lon: lo, canopy: 9 }], []).meta.counts.manualTrees === 1);
+
+  // --- library ---
+  let lib1 = lib.libraryUpsert([], { name: 'a', waypoints: [] });
+  lib1 = lib.libraryUpsert(lib1, { name: 'b', waypoints: [] });
+  lib1 = lib.libraryUpsert(lib1, { name: 'a', waypoints: [[1, 2]] });
+  check('v9a library: same name replaces, newest first', lib1.length === 2 && lib1[0].name === 'a' && lib1[0].waypoints.length === 1);
+  check('v9a library: delete by name', same(lib.libraryRemove(lib1, 'a').map(x => x.name), ['b']));
+  let err = ''; try { lib.readLibraryBackup({ format: 'kartmap' }); } catch (e) { err = e.message; }
+  let err2 = ''; try { lib.readLibraryBackup({ format: 'kartmap-library', version: 99, tracks: [] }); } catch (e) { err2 = e.message; }
+  check('v9a library backup: wrong file and newer version give plain errors', /not a track library/.test(err) && /newer scanner/.test(err2));
+  const merged = lib.libraryMerge([{ name: 'a', waypoints: [] }, { name: 'c', waypoints: [] }], lib.readLibraryBackup({ format: 'kartmap-library', version: 1, tracks: [{ name: 'a', waypoints: [[9, 9]] }, { name: 'x', waypoints: [] }, { bad: 1 }] }).tracks);
+  check('v9a library restore: merges, backup wins on same name, junk skipped', merged.length === 3 && merged.find(x => x.name === 'a').waypoints.length === 1 && merged.some(x => x.name === 'x'));
+}
+

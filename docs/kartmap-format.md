@@ -1,8 +1,8 @@
 # kartmap file format (version 2)
 
-_Last updated for scanner v8.3 (2026-10-15). Fields marked **(v8)**, **(v8.1)**, **(v8.2)** or **(v8.3)** are newer than version 1. All are optional, so readers of version 1 files still work. Files say `"version": 2` from scanner v8.2 on, matching the "kartmap v2" the game's loader (brisbane-kart, `kartmap.gd`) was written for. That loader accepts versions 1 and 2 and **rejects anything higher**, so a future version 3 needs a loader update first._
+_Last updated for scanner v9a (2026-10-16). Fields marked **(v8)**, **(v8.1)**, **(v8.2)**, **(v8.3)** or **(v9a)** are newer than version 1. All are optional, so readers of version 1 files still work. Files say `"version": 2` from scanner v8.2 on, matching the "kartmap v2" the game's loader (brisbane-kart, `kartmap.gd`) was written for. That loader accepts versions 1 and 2 and **rejects anything higher**, so a future version 3 needs a loader update first._
 
-**Guesses are always marked.** Any field ending in `Source` (`heightSource`, `widthSource`, `roofShapeSource`) says where a value came from. The values `default`, `estimated`, `guess` and **(v8.3)** `ml-estimate` mean it's a guess: later data (LiDAR, hand edits) may replace guesses freely, but must never replace real values (`osm`, `levels`, `lanes`, `lidar`, **(v8.3)** `overture`).
+**Guesses are always marked.** Any field ending in `Source` (`heightSource`, `widthSource`, `roofShapeSource`) says where a value came from. The values `default`, `estimated`, `guess` and **(v8.3)** `ml-estimate` mean it's a guess: later data (LiDAR, hand edits) may replace guesses freely, but must never replace real values (`osm`, `levels`, `lanes`, `lidar`, **(v8.3)** `overture`, **(v9a)** `manual`).
 
 Files ending in `.json` named `kartmap_<name>_<date>.json` come from Brandon's Kart Map Scanner
 (https://latintrout.github.io/kart-map-scanner/). The scanner reads free OpenStreetMap (OSM) data
@@ -35,6 +35,7 @@ into a level in the Godot kart game.
 | `markings` | **(v8.1)** Road markings: crossings, stop lines, give-way lines |
 | `race` | **(v8.1)** Suggested start line, start grid, checkpoints and shortcuts |
 | `manualTrees` | Copy of hand-placed trees in lat/lon (only used by the scanner to reload a file; the game can ignore it) |
+| `manualBuildings` | **(v9a)** Copy of hand-drawn buildings in lat/lon, `[{ ring, height, name? }]` (for reloading; the game uses the copies in `buildings`) |
 
 ## meta
 
@@ -57,12 +58,14 @@ into a level in the Godot kart game.
 
 | Key | Meaning |
 |---|---|
-| `points` | Track centreline, in order. If `closed` is true, the last point equals the first |
+| `points` | Track centreline, **in race order** (from v9a it is already reversed and/or starts at the chosen start; the first point is the start/finish). If `closed` is true, the last point equals the first |
 | `width` | Track width in metres |
 | `length` | Track length in metres |
 | `closed` | `true` = lap track (loop) |
 | `snappedToRoads` | `true` if snapped to car roads; `false` if drawn by hand (e.g. along footpaths) |
-| `waypoints` | The scanner's editing points in lat/lon. The game should ignore these |
+| `waypoints` | The scanner's editing points in lat/lon, in the order they were drawn. The game should ignore these |
+| `reversed` | **(v9a)** `true` if the race runs against the drawing direction (already applied to `points`) |
+| `startPoint` | **(v9a)** `[lat, lon]` of the start picked by hand on a loop (already applied to `points`; `meta.origin` sits there too) |
 | `centerline` | **(v8.1)** `{ spacing, points, length }`: the track line smoothed (corners rounded about 5 m) with points exactly `spacing` (2 m) apart. **Use this for the track surface**; `points` is the raw line |
 | `corners` | **(v8.1)** `[{ at, pos, angle }]`: turns of more than 35°. `at` = metres along the centerline, `angle` in degrees (+ left, − right) |
 
@@ -96,6 +99,7 @@ Each: `{ id, kind, name?, height, heightSource, footprint, holes?, roofShape?, r
 - **(v8.1)** `trackDist`: metres from the track; `onTrack: true` if it overlaps the track corridor (`width / 2`).
 - **(v8.3)** `source: "overture"`: a building OSM doesn't have, added from Overture Maps (id starts with `ov-`). Only added when it doesn't overlap an OSM building and isn't underground.
 - **(v8.3)** `sampledRoofColour`: hex colour read from the aerial photo (median of the roof). Only present after "Sample colours". A mapped `roofColour` always wins; use this when there is none.
+- **(v9a)** `source: "manual"`, `heightSource: "manual"`: a building drawn by hand in the scanner (id `mb1`, `mb2`…), with the height typed in. Treat the height as real. Roof is `flat` (`roofShapeSource: "guess"`). No `trackDist` / `onTrack` on these.
 - `holes` (optional) lists courtyards to cut out, each its own polygon.
 - **(v8) Looks, when OSM has them (all optional):**
   - `roofShape`: `flat`, `gabled`, `hipped`, `pyramidal`, `skillion`, `dome`…
@@ -172,7 +176,7 @@ Suggestions only (`suggested: true`). The game or a later editor may move them.
 
 ## IDs
 
-`w123` = OSM way, `n123` = OSM node, `r123` = OSM multipolygon (`r123-2` = its second piece), `m1` = manual tree, `w123-4` = 4th tree generated from tree row `w123`, `L1` = landmark, **(v8.3)** `ov-<overture id>` = building added from Overture. IDs are unique within a file.
+`w123` = OSM way, `n123` = OSM node, `r123` = OSM multipolygon (`r123-2` = its second piece), `m1` = manual tree, `w123-4` = 4th tree generated from tree row `w123`, `L1` = landmark, **(v8.3)** `ov-<overture id>` = building added from Overture, **(v9a)** `mb1` = building drawn by hand. IDs are unique within a file.
 
 ## Level-building rules (agreed decisions)
 

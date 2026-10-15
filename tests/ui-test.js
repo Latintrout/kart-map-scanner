@@ -5,6 +5,9 @@ const path = require('path');
 
 const PAGE = process.argv[2];
 const html = fs.readFileSync(PAGE, 'utf8');
+// Scanner version as a number: v8 = 8, v8.3 = 8.3, v9a = 9.1, v9b = 9.2, v11 = 11 (so later versions run the older checks too).
+const verOf = g => { const m = /kart-map-scanner v(\d+)(?:\.(\d+)|([a-z]))?/.exec(g || ''); if (!m) return 0; return +m[1] + (m[2] ? +m[2] / 10 : m[3] ? (m[3].charCodeAt(0) - 96) / 10 : 0); };
+const V = verOf(html);
 const leafletJs = fs.readFileSync(path.join(__dirname, 'node_modules/leaflet/dist/leaflet.js'));
 const leafletCss = fs.readFileSync(path.join(__dirname, 'node_modules/leaflet/dist/leaflet.css'));
 const aerial = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAGUlEQVR4nGPcYKXHQApgIkn1qIZRDUNKAwCMDwE42muDSwAAAABJRU5ErkJggg==', 'base64');   // solid #b03a2e
@@ -82,7 +85,7 @@ const overpass = { elements: [
   // ---------- normal scan ----------
   const { page, ctx, errors } = await openPage('ok');
   check('page loads with no script errors', errors.length === 0, errors.join('; '));
-  check('mode buttons: Pen, Points, Trees, Pan', (await page.$$eval('#modeRow button', b => b.map(x => x.dataset.mode).join(','))) === 'pen,points,trees,pan');
+  check('mode buttons: Pen, Points, Trees, (v9a: Building,) Pan', (await page.$$eval('#modeRow button', b => b.map(x => x.dataset.mode).join(','))) === (V >= 9.1 ? 'pen,points,trees,build,pan' : 'pen,points,trees,pan'));
   // draw 3 points in Points mode with snapping off (straight lines)
   await page.click('[data-mode="points"]');
   await page.uncheck('#snap');
@@ -100,11 +103,11 @@ const overpass = { elements: [
   check('stats show bridges / tunnels 1 / 1', /Bridges \/ tunnels1 \/ 1/.test(stats), stats);
   check('stats show fences 1', /Fences, walls, hedges1/.test(stats));
   // v8.2: cafés count as props again (the game draws outdoor tables for them), so v8.2+ shows 2.
-  const v82 = /kart-map-scanner v8\.([2-9]|\d\d)/.test(html);
+  const v82 = V >= 8.2;
   check(v82 ? 'stats show props 2 (picnic table + cafe tables)' : 'stats show props 1 (picnic table, not the cafe)', new RegExp('Props \\(benches, lamps, signs…\\)' + (v82 ? 2 : 1)).test(stats), stats);
   check('stats show landmarks 2', /Landmarks2/.test(stats), stats);
   check('landmark list names Streets Beach and GOMA', /Streets Beach/.test(stats) && /Gallery of Modern Art/.test(stats));
-  if (/Quality report/.test(stats) || /v8\.[1-9]/.test(html)) {
+  if (/Quality report/.test(stats) || V >= 8.1) {
     check('v8.1 stats show the quality report and race layout rows', /Quality report/.test(stats) && /Corners \/ checkpoints/.test(stats) && /Shortcuts found/.test(stats), stats.slice(0, 400));
     // The map draws in canvas mode (one bitmap), so count white-ish pixels: the smooth line and
     // start grid are the only white things drawn.
@@ -127,18 +130,18 @@ const overpass = { elements: [
   check('export has v8 fields (barriers, landmarks, bridge flag, roof shape)',
     j.barriers.length === 1 && j.landmarks.length === 2 && j.roads.some(r => r.bridge) && j.buildings[0].roofShape === 'flat');
   check('export keeps the pool hole and the manual tree', j.areas.some(a => a.kind === 'swimming_pool' && a.holes) && j.points.some(p => p.source === 'manual'));
-  check('export format version (1 up to v8.1, 2 from v8.2), generator v8.x', j.version === (/v8\.[01]$|v8$/.test(j.meta.generator) ? 1 : 2) && /^kart-map-scanner v8/.test(j.meta.generator), j.version + ' ' + j.meta.generator);
-  if (/v8\.[1-9]/.test(j.meta.generator)) {
+  check('export format version (1 up to v8.1, 2 from v8.2), generator tag', j.version === (verOf(j.meta.generator) < 8.2 ? 1 : 2) && verOf(j.meta.generator) === V, j.version + ' ' + j.meta.generator);
+  if (V >= 8.1) {
     check('v8.1 export has smooth track line, corners and race layout', j.route.centerline && j.route.centerline.points.length > 10 && Array.isArray(j.route.corners) && j.race && j.race.checkpoints.length >= 8 && j.race.grid.length === 8);
     check('v8.1 export has quality report with notes', j.meta.quality && Array.isArray(j.meta.quality.notes));
     // v8.2 moved parts into the buildings list (part: true), so buildingParts only exists in v8.1 files.
-    check('v8.1+ export has railways/markings arrays, and parts in the right place for its version', Array.isArray(j.railways) && Array.isArray(j.markings) && (/v8\.1$/.test(j.meta.generator) ? Array.isArray(j.buildingParts) : !('buildingParts' in j)));
+    check('v8.1+ export has railways/markings arrays, and parts in the right place for its version', Array.isArray(j.railways) && Array.isArray(j.markings) && (V === 8.1 ? Array.isArray(j.buildingParts) : !('buildingParts' in j)));
     check('v8.1 every building has a roof shape and says if it is a guess', j.buildings.every(b => b.roofShape && /^(osm|guess)$/.test(b.roofShapeSource)));
   }
   // undo removes the tree
   await page.click('#undoBtn'); await page.waitForTimeout(100);
   check('Undo removes the placed tree', /Trees you placed0/.test(await page.textContent('#stats')));
-  if (/kart-map-scanner v8\.([3-9]|\d\d)/.test(html)) {
+  if (V >= 8.3) {
     // ---------- v8.3 extras ----------
     check('v8.3 Overture was asked once during the scan', (await page.evaluate(() => window.__overtureCalls)) === 1);
     check('v8.3 scan status reports what Overture added', /Overture added 1 buildings/.test(status), status);
@@ -169,6 +172,65 @@ const overpass = { elements: [
     check('v8.3 export: landmark photo with licence, author and "nearby" warning', sb.photos && sb.photos[0].licence === 'CC BY-SA 4.0' && sb.photos[0].author === 'Tester' && sb.photosFrom === 'nearby', JSON.stringify(sb));
     check('v8.3 file still version 2 (loader-compatible)', j3.version === 2);
   }
+  if (V >= 9.1) {
+    // ---------- v9a: draw a building, race direction/start, track library ----------
+    const cx = box.x + box.width / 2, cy = box.y + box.height / 2;
+    const scanAgain = async () => { await page.click('#scanBtn'); await page.waitForFunction(() => !document.getElementById('exportBtn').disabled, null, { timeout: 15000 }); };
+    const exportNow = async name => { const [d] = await Promise.all([page.waitForEvent('download'), page.click('#exportBtn')]); const f = path.join(__dirname, name); await d.saveAs(f); return JSON.parse(fs.readFileSync(f, 'utf8')); };
+    await page.click('[data-mode="build"]');
+    check('v9a Building mode shows its options', await page.isVisible('#bHeight'));
+    await page.fill('#bHeight', '7.5'); await page.fill('#bName', 'Kiosk');
+    for (const [dx, dy] of [[-150, 80], [-110, 80], [-110, 110], [-150, 110]]) { await page.mouse.click(cx + dx, cy + dy); await page.waitForTimeout(80); }
+    check('v9a 4 corners make Finish available', !(await page.isDisabled('#bFinishBtn')));
+    await page.mouse.click(cx - 150, cy + 80);   // first corner again = finish
+    await page.waitForTimeout(200);
+    check('v9a clicking the first corner finishes the building', /Building added \(7\.5 m\)/.test(await page.textContent('#status')) && /Buildings you drew1/.test(await page.textContent('#stats')), await page.textContent('#status'));
+    const j9 = await exportNow('export9a.json');
+    const mb = j9.buildings.find(b => b.id === 'mb1');
+    check('v9a export has the drawn building (no re-scan needed)', mb && mb.height === 7.5 && mb.name === 'Kiosk' && mb.heightSource === 'manual' && mb.footprint.length === 4 && j9.manualBuildings.length === 1);
+    await page.click('#undoBtn'); await page.waitForTimeout(100);
+    check('v9a Undo removes the drawn building', /Buildings you drew0/.test(await page.textContent('#stats')));
+    await page.click('[data-mode="pan"]');
+    // direction
+    await page.click('#reverseBtn');
+    check('v9a Reverse: info says reversed and the scan must be redone', /reversed/.test(await page.textContent('#raceInfo')) && await page.isDisabled('#exportBtn'));
+    await scanAgain();
+    const jr = await exportNow('export9a-rev.json');
+    check('v9a export says reversed; route runs the other way', jr.route.reversed === true && Math.hypot(jr.route.points[1][0] - j.route.points.at(-2)[0], jr.route.points[1][1] - j.route.points.at(-2)[1]) < 1, JSON.stringify([jr.route.points.slice(0, 2), j.route.points.slice(-2)]));
+    // start
+    await page.click('#startBtn');
+    await page.mouse.click(cx + 30, cy);   // middle of the first leg
+    await page.waitForTimeout(150);
+    check('v9a Pick start: clicking the route moves the start', /Start moved/.test(await page.textContent('#status')), await page.textContent('#status'));
+    await page.click('#startBtn'); await page.mouse.click(cx + 300, cy + 200); await page.waitForTimeout(150);
+    check('v9a Pick start: clicking far from the route is refused with a reason', /from the route/.test(await page.textContent('#status')), await page.textContent('#status'));
+    await scanAgain();
+    const js = await exportNow('export9a-start.json');
+    const sp = js.route.startPoint;
+    check('v9a export has the start point, and the start line is there', Array.isArray(sp) && js.race && Math.hypot(js.race.startLine.pos[0] - js.route.points[0][0], js.race.startLine.pos[1] - js.route.points[0][1]) < 5 && Math.abs(js.route.length - j.route.length) < 1, JSON.stringify({ sp, len: [js.route.length, j.route.length] }));
+    // library
+    await page.fill('#name', 'ui-lib'); await page.dispatchEvent('#name', 'change');
+    await page.click('#libSaveBtn');
+    check('v9a library: save adds the track', (await page.$$eval('#libSelect option', o => o.map(x => x.value))).includes('ui-lib') && /Saved "ui-lib"/.test(await page.textContent('#status')));
+    await page.click('#clearBtn'); await page.waitForTimeout(100);
+    check('v9a (route cleared)', /No route yet/.test(await page.textContent('#routeInfo')));
+    await page.selectOption('#libSelect', 'ui-lib'); await page.click('#libLoadBtn'); await page.waitForTimeout(300);
+    check('v9a library: open brings the route and race settings back', /3 points/.test(await page.textContent('#routeInfo')) && /reversed/.test(await page.textContent('#raceInfo')) && /start moved/.test(await page.textContent('#raceInfo')), await page.textContent('#raceInfo'));
+    const [bd] = await Promise.all([page.waitForEvent('download'), page.click('#libBackupBtn')]);
+    const bf = path.join(__dirname, 'library.json'); await bd.saveAs(bf);
+    const bj = JSON.parse(fs.readFileSync(bf, 'utf8'));
+    check('v9a library backup file', bj.format === 'kartmap-library' && bj.tracks.length === 1 && bj.tracks[0].name === 'ui-lib' && bj.tracks[0].race.reverse === true);
+    await page.click('#libDeleteBtn');
+    check('v9a library: delete, with a way back', (await page.$$eval('#libSelect option', o => o.map(x => x.value).join(','))) === '' && await page.isVisible('#status button'));
+    await page.click('#status button');
+    check('v9a library: Bring it back works', (await page.$$eval('#libSelect option', o => o.map(x => x.value))).includes('ui-lib'));
+    await page.click('#libDeleteBtn');
+    await page.setInputFiles('#libFile', bf); await page.waitForTimeout(200);
+    check('v9a library: restore from backup', (await page.$$eval('#libSelect option', o => o.map(x => x.value))).includes('ui-lib') && /Restored 1 track/.test(await page.textContent('#status')));
+    await page.setInputFiles('#libFile', path.join(__dirname, 'export.json')); await page.waitForTimeout(200);
+    if (process.env.SHOT) { await page.click('[data-mode="build"]'); for (const [dx, dy] of [[-150, 80], [-110, 80], [-110, 110]]) await page.mouse.click(cx + dx, cy + dy); await page.screenshot({ path: process.env.SHOT }); await page.click('#bCancelBtn'); await page.click('[data-mode="pan"]'); }
+    check('v9a library: restoring a non-library file explains why', /not a track library backup/.test(await page.textContent('#status')));
+  }
   check('no script errors during the whole run', errors.length === 0, errors.join('; '));
   await ctx.close();
 
@@ -184,7 +246,7 @@ const overpass = { elements: [
   check('server down (502): plain "down, their side" message with status link', /server is down/.test(msg) && /their side/.test(msg) && /api\/status/.test(msg), msg);
   await d.ctx.close();
 
-  if (/kart-map-scanner v8\.([3-9]|\d\d)/.test(html)) {
+  if (V >= 8.3) {
     const o = await openPage('ovfail');
     await o.page.click('[data-mode="points"]'); await o.page.uncheck('#snap');
     const b3 = await o.page.locator('#map').boundingBox();

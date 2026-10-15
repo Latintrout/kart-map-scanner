@@ -20,6 +20,9 @@ Draw a route on a real map, scan the area along it from free OpenStreetMap data,
   - *Find landmark photos*: links up to 3 Wikimedia Commons reference photos per landmark.
   - *Export ground image*: a top-down PNG (1 m per pixel) for the game's ground texture.
 - **Place trees by hand** on the satellite view where the map data has none.
+- **Draw missing buildings** (Building mode): click the corners, type a height.
+- **Race direction and start**: reverse the lap or click where the start line goes. Arrows and a 🏁 show the way round.
+- **Saved tracks**: keep several tracks in the browser, and back them all up to one file.
 - **Export / Load** the level file. The format is documented in `docs/kartmap-format.md`.
 
 ## Tests

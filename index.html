@@ -50,6 +50,9 @@
   .wp.start { background: #2a9d8f; }
   .wp.small { font-size: 0; border-width: 1px; }
   #map.pen { cursor: crosshair; touch-action: none; }
+  select { width: 100%; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--text); font: inherit; }
+  .race-flag { font-size: 20px; line-height: 20px; text-shadow: 0 0 3px #000; }
+  .race-arrow { color: #fff; font-size: 14px; line-height: 14px; text-align: center; text-shadow: 0 0 3px #000, 0 0 2px #000; }
   .legend span { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin: 0 4px 0 8px; vertical-align: middle; }
 .lm-photos{display:flex;gap:4px;margin:3px 0 4px}.lm-photos img{width:64px;height:48px;object-fit:cover;border-radius:3px;border:1px solid #ccc}
 </style>
@@ -68,11 +71,30 @@
   </section>
 
   <section>
+    <h2>Saved tracks</h2>
+    <div class="row">
+      <select id="libSelect" style="flex:2"><option value="">(no saved tracks)</option></select>
+      <button id="libLoadBtn" style="flex:0 0 auto" disabled>Open</button>
+      <button id="libDeleteBtn" style="flex:0 0 auto" disabled>Delete</button>
+    </div>
+    <div class="row" style="margin-top:6px">
+      <button id="libSaveBtn">Save current track</button>
+    </div>
+    <div class="row" style="margin-top:6px">
+      <button id="libBackupBtn">Back up all</button>
+      <button id="libRestoreBtn">Restore backup</button>
+    </div>
+    <input id="libFile" type="file" accept=".json,application/json" hidden>
+    <div class="hint" style="margin-top:4px">Saved in this browser only. "Back up all" downloads a file you can restore on another computer or browser.</div>
+  </section>
+
+  <section>
     <h2>2. Draw the route</h2>
     <div class="row" id="modeRow">
       <button data-mode="pen" class="on">✎ Pen</button>
       <button data-mode="points">• Points</button>
       <button data-mode="trees">🌳 Trees</button>
+      <button data-mode="build">🏠 Building</button>
       <button data-mode="pan">✋ Pan</button>
     </div>
     <div id="modeHint" class="hint" style="margin-top:4px">Pen: hold the mouse button and drag along the roads. Draw in several strokes if you like; each continues the route.</div>
@@ -80,6 +102,17 @@
       <label>Canopy size: <b id="canopyVal">10</b> m across
         <input id="canopy" type="range" min="3" max="25" step="1" value="10"></label>
       <button id="clearTreesBtn" style="width:100%">Clear all trees</button>
+    </div>
+    <div id="buildOpts" hidden style="margin-top:6px">
+      <div class="row">
+        <label>Height (m) <input id="bHeight" type="number" min="2" max="300" step="0.5" value="6"></label>
+        <label>Name (optional) <input id="bName" type="text" placeholder="e.g. Pool kiosk"></label>
+      </div>
+      <div class="row">
+        <button id="bFinishBtn" disabled>Finish building</button>
+        <button id="bCancelBtn" disabled>Cancel</button>
+      </div>
+      <div id="bInfo" class="hint" style="margin-top:4px">Click each corner. Click the first corner again (or double-click) to finish.</div>
     </div>
     <div class="row" style="margin-top:6px">
       <button id="undoBtn">Undo</button>
@@ -89,6 +122,11 @@
     <label class="inline"><input id="loop" type="checkbox" checked> Close into a loop (lap track)</label>
     <div class="hint">Drag a numbered point to move it. Right-click a point to delete it.</div>
     <div id="routeInfo" class="hint" style="margin-top:6px">No route yet.</div>
+    <div class="row" style="margin-top:6px">
+      <button id="reverseBtn" title="Race the other way round">⇄ Reverse direction</button>
+      <button id="startBtn" title="Then click the route where the start line should be">⚑ Pick start</button>
+    </div>
+    <div id="raceInfo" class="hint" style="margin-top:4px"></div>
   </section>
 
   <section>
@@ -1289,7 +1327,7 @@ function buildOutput(data, o) {
     meta: {
       name: o.name || 'route',
       generated: o.now || new Date().toISOString(),
-      generator: 'kart-map-scanner v8.3',
+      generator: 'kart-map-scanner v9a',
       origin: { lat: origin[0], lon: origin[1] },
       units: 'metres',
       axes: 'x = east, y = north. In Godot: Vector3(x, 0, -y)',
@@ -1318,6 +1356,8 @@ function buildOutput(data, o) {
       closed: !!o.loop,
       snappedToRoads: !!o.snapped,
       waypoints: o.waypoints,  // lat/lon clicks, so the tool can reload and edit this route
+      reversed: !!o.reverse,   // v9a: race runs against the drawing direction
+      startPoint: o.start || undefined,   // v9a: [lat, lon] you picked as the start (loops only)
       centerline,              // v8.1: smoothed, evenly spaced version of points
       corners                  // v8.1: turns of more than 35°
     },
@@ -1370,6 +1410,98 @@ function withManualTrees(out, trees) {
     manualTrees: trees.map(t => ({ lat: t.lat, lon: t.lon, canopy: t.canopy }))   // so Load JSON can bring them back
   };
 }
+
+// ======================================================================
+// v9a: race direction and start, hand-drawn buildings, track library
+// ======================================================================
+// Turns the drawn route into the race route: optionally reversed, and (on a loop) starting at
+// the point nearest `start` ([lat, lon]). Works on the final, already-snapped line, so it never
+// re-snaps (re-snapping a reversed route can detour around one-way streets).
+function orientRoute(latlngs, opts) {
+  let pts = latlngs.map(p => p.slice());
+  if (!opts || pts.length < 2) return pts;
+  if (opts.reverse) pts.reverse();
+  if (!opts.loop || !opts.start || pts.length < 3) return pts;
+  if (dist(pts[0], pts[pts.length - 1]) < 1) pts.pop();     // work on the open ring, close it again at the end
+  const k = Math.PI / 180, c = Math.cos(opts.start[0] * k);
+  const XY = q => [(q[1] - opts.start[1]) * c, q[0] - opts.start[0]];   // flat, start at [0, 0] (degrees, east scaled)
+  let best = { d: Infinity, i: 0, t: 0 };
+  for (let i = 0; i < pts.length; i++) {
+    const a = XY(pts[i]), b = XY(pts[(i + 1) % pts.length]);
+    const dx = b[0] - a[0], dy = b[1] - a[1], L = dx * dx + dy * dy;
+    const t = L ? Math.max(0, Math.min(1, -(a[0] * dx + a[1] * dy) / L)) : 0;
+    const d = Math.hypot(a[0] + t * dx, a[1] + t * dy);
+    if (d < best.d) best = { d, i, t };
+  }
+  const a = pts[best.i], b = pts[(best.i + 1) % pts.length];
+  const q = [a[0] + (b[0] - a[0]) * best.t, a[1] + (b[1] - a[1]) * best.t];
+  const ring = [q];
+  for (let n = 1; n <= pts.length; n++) {
+    const r = pts[(best.i + n) % pts.length];
+    if (dist(r, ring[ring.length - 1]) > 0.01) ring.push(r);
+  }
+  if (dist(ring[ring.length - 1], q) > 0.01) ring.push(q.slice()); else ring[ring.length - 1] = q.slice();
+  return ring;
+}
+// Points every `step` metres along a line with the travel direction there (degrees, 0 = north,
+// clockwise), for the direction arrows on the map. Skips the very start (the start flag sits there).
+function arrowsAlong(latlngs, step) {
+  const out = [];
+  let next = step / 2, run = 0;
+  for (let i = 1; i < latlngs.length; i++) {
+    const a = latlngs[i - 1], b = latlngs[i], d = dist(a, b);
+    if (!d) continue;
+    const k = Math.PI / 180;
+    const bearing = (Math.atan2((b[1] - a[1]) * Math.cos(a[0] * k), b[0] - a[0]) / k + 360) % 360;
+    while (next <= run + d) {
+      const t = (next - run) / d;
+      out.push({ pos: [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t], bearing: Math.round(bearing) });
+      next += step;
+    }
+    run += d;
+  }
+  return out;
+}
+// Hand-drawn buildings for export. Each { ring: [[lat, lon]…] (open, 3+ corners), height, name? }.
+function manualBuildingsFor(out, list) {
+  const P = makeProjector(out.meta.origin.lat, out.meta.origin.lon);
+  return (list || []).filter(m => Array.isArray(m.ring) && m.ring.length >= 3 && m.height > 0).map((m, i) => {
+    const b = { id: 'mb' + (i + 1), kind: 'yes', height: round2(m.height), heightSource: 'manual', source: 'manual',
+      footprint: m.ring.map(q => P(q[0], q[1])), roofShape: 'flat', roofShapeSource: 'guess' };
+    if (m.name) b.name = m.name;
+    return b;
+  });
+}
+// Adds your hand-placed trees (v7) and hand-drawn buildings (v9a) to a scan result at export
+// time, so neither needs a re-scan. Returns a new object; the scan result is left untouched.
+function withManualExtras(out, trees, buildings) {
+  const t = withManualTrees(out, trees);
+  const mb = manualBuildingsFor(out, buildings);
+  return {
+    ...t,
+    meta: { ...t.meta, counts: { ...t.meta.counts, manualBuildings: mb.length } },
+    buildings: t.buildings.concat(mb),
+    manualBuildings: (buildings || []).map(m => ({ ring: m.ring, height: m.height, ...(m.name ? { name: m.name } : {}) }))   // so Load JSON can bring them back
+  };
+}
+// ---- track library (saved in the browser) ----
+const LIBRARY_VERSION = 1;
+// Adds or replaces (same name) a track. Returns a new list, newest first.
+function libraryUpsert(list, entry) {
+  const rest = (list || []).filter(e => e.name !== entry.name);
+  return [entry, ...rest];
+}
+function libraryRemove(list, name) { return (list || []).filter(e => e.name !== name); }
+// Checks a library backup file. Returns { tracks } or throws a plain-English error.
+function readLibraryBackup(j) {
+  if (!j || j.format !== 'kartmap-library') throw new Error('not a track library backup');
+  if (j.version > LIBRARY_VERSION) throw new Error('made by a newer scanner (library version ' + j.version + ')');
+  const tracks = (Array.isArray(j.tracks) ? j.tracks : []).filter(t => t && typeof t.name === 'string' && Array.isArray(t.waypoints));
+  if (!tracks.length) throw new Error('the backup has no tracks in it');
+  return { tracks };
+}
+// Merges a backup into the library; tracks in the backup replace ones with the same name.
+function libraryMerge(list, tracks) { return tracks.slice().reverse().reduce((l, t) => libraryUpsert(l, t), list || []); }
 
 // lat/lon from [east, north] metres (the reverse of makeProjector), for drawing the preview.
 function makeUnprojector(lat0, lon0) {
@@ -1492,7 +1624,11 @@ const els = {
   width: $('width'), scanBtn: $('scanBtn'), status: $('status'), stats: $('stats'),
   exportBtn: $('exportBtn'), loadBtn: $('loadBtn'), loadFile: $('loadFile'),
   useOverture: $('useOverture'), sampleBtn: $('sampleBtn'), photosBtn: $('photosBtn'), groundBtn: $('groundBtn'),
-  treeOpts: $('treeOpts'), canopy: $('canopy'), canopyVal: $('canopyVal'), clearTreesBtn: $('clearTreesBtn')
+  treeOpts: $('treeOpts'), canopy: $('canopy'), canopyVal: $('canopyVal'), clearTreesBtn: $('clearTreesBtn'),
+  buildOpts: $('buildOpts'), bHeight: $('bHeight'), bName: $('bName'), bFinishBtn: $('bFinishBtn'), bCancelBtn: $('bCancelBtn'), bInfo: $('bInfo'),
+  reverseBtn: $('reverseBtn'), startBtn: $('startBtn'), raceInfo: $('raceInfo'),
+  libSelect: $('libSelect'), libLoadBtn: $('libLoadBtn'), libDeleteBtn: $('libDeleteBtn'), libSaveBtn: $('libSaveBtn'),
+  libBackupBtn: $('libBackupBtn'), libRestoreBtn: $('libRestoreBtn'), libFile: $('libFile')
 };
 
 // ---- state ----
@@ -1502,13 +1638,18 @@ let routeSnapped = false;
 let scanResult = null;     // export-ready data from the last scan (OSM only; your trees are added at export)
 let scanPreview = [];      // shapes from the last scan, for redrawing
 let trees = [];            // trees you placed: { lat, lon, canopy (metres across) }
-let mode = 'pen';          // 'pen' | 'points' | 'trees' | 'pan'
+let mode = 'pen';          // 'pen' | 'points' | 'trees' | 'build' | 'pan'
+let manualBuildings = [];  // v9a: buildings you drew: { ring: [[lat, lon]…], height, name? }
+let draft = null;          // v9a: corners of the building being drawn
+let raceOpts = { reverse: false, start: null };   // v9a: race direction and start point ([lat, lon], loops only)
+let pickingStart = false;  // v9a: next map click sets the start
 let routeReq = 0;          // ignores old routing replies if you click faster than the server answers
 let history = [];          // earlier copies of { waypoints, trees }, so Undo can step back a whole action
 
 // Call BEFORE changing waypoints or trees, so Undo can restore what was there.
 function remember() {
-  history.push({ waypoints: waypoints.map(p => p.slice()), trees: trees.map(t => ({ ...t })) });
+  history.push({ waypoints: waypoints.map(p => p.slice()), trees: trees.map(t => ({ ...t })),
+    manualBuildings: JSON.parse(JSON.stringify(manualBuildings)), raceOpts: { ...raceOpts } });
   if (history.length > 50) history.shift();
 }
 
@@ -1578,6 +1719,7 @@ function setRoute(latlngs, snapped) {
   els.routeInfo.textContent = latlngs.length >= 2
     ? `${waypoints.length} points · ${(routeLength(latlngs) / 1000).toFixed(2)} km · ${snapped ? 'follows roads' : 'straight lines'}`
     : (waypoints.length ? '1 point. Add more to make a route.' : 'No route yet.');
+  renderRace();
   save();
 }
 
@@ -1667,6 +1809,8 @@ async function snapMatch(pts, isCurrent) {
 
 // ---- Points mode: each click adds a point ----
 map.on('click', e => {
+  if (pickingStart) { setStartAt([e.latlng.lat, e.latlng.lng]); return; }
+  if (mode === 'build') { addCorner(e); return; }
   if (mode === 'points') {
     remember();
     waypoints.push([e.latlng.lat, e.latlng.lng]);
@@ -1753,6 +1897,7 @@ const MODE_HINTS = {
   pen: 'Pen: hold the mouse button and drag along the roads. Draw in several strokes if you like; each continues the route.',
   points: 'Points: click to add a point. Good for a few corners; snapping fills in the roads between them.',
   trees: 'Trees: click to place a tree. Switch to Satellite (top-right) to see the real ones. Right-click a tree to remove it.',
+  build: 'Building: click the corners of a building the map is missing (use Satellite, top-right). Set its height, then click the first corner again to finish. Right-click a drawn building to delete it.',
   pan: 'Pan: drag to move the map. Nothing gets drawn.'
 };
 function setMode(m) {
@@ -1760,8 +1905,11 @@ function setMode(m) {
   for (const b of els.modeRow.querySelectorAll('button')) b.classList.toggle('on', b.dataset.mode === m);
   els.modeHint.textContent = MODE_HINTS[m];
   els.treeOpts.hidden = m !== 'trees';
+  els.buildOpts.hidden = m !== 'build';
+  if (m !== 'build' && draft) cancelDraft();
+  if (m === 'build') map.doubleClickZoom.disable(); else map.doubleClickZoom.enable();
   els.map.classList.toggle('pen', m === 'pen');
-  els.map.classList.toggle('drawing', m === 'points' || m === 'trees');
+  els.map.classList.toggle('drawing', m === 'points' || m === 'trees' || m === 'build');
   if (m === 'pen') map.dragging.disable(); else map.dragging.enable();   // in Pen mode, dragging draws instead of panning
 }
 els.modeRow.addEventListener('click', e => { const b = e.target.closest('button'); if (b) setMode(b.dataset.mode); });
@@ -1771,10 +1919,15 @@ els.undoBtn.onclick = () => {
   if (!history.length) { setStatus('Nothing to undo.'); return; }
   const prev = history.pop();
   const routeChanged = JSON.stringify(prev.waypoints) !== JSON.stringify(waypoints);
+  const raceChanged = JSON.stringify(prev.raceOpts || {}) !== JSON.stringify(raceOpts);
   waypoints = prev.waypoints;
   trees = prev.trees;
+  if (prev.manualBuildings) manualBuildings = prev.manualBuildings;
+  if (prev.raceOpts) raceOpts = prev.raceOpts;
   renderTrees();
+  renderManualBuildings();
   if (routeChanged) rebuildRoute();   // only a route change needs re-snapping (and a re-scan)
+  else if (raceChanged) { invalidateScan(); renderRace(); save(); }
 };
 els.clearBtn.onclick = () => {
   if (!waypoints.length) return;
@@ -1880,9 +2033,11 @@ async function scan() {
   }
   els.scanBtn.disabled = false;
 
+  const isLoop = els.loop.checked && waypoints.length >= 3;
   const { out, preview } = buildOutput(data, {
-    route: routeLatLngs, waypoints, radius, width: +els.width.value || 8,
-    loop: els.loop.checked && waypoints.length >= 3, snapped: routeSnapped, name: els.name.value.trim(), overture
+    route: orientRoute(routeLatLngs, { ...raceOpts, loop: isLoop }), waypoints, radius, width: +els.width.value || 8,
+    loop: isLoop, snapped: routeSnapped, name: els.name.value.trim(), overture,
+    reverse: raceOpts.reverse, start: isLoop && raceOpts.start ? raceOpts.start : null
   });
   scanResult = out;
   scanPreview = preview;
@@ -2103,7 +2258,7 @@ function drawPreview(preview) {
 }
 function showStats() {
   if (!scanResult) return;
-  const out = withManualTrees(scanResult, trees);
+  const out = withManualExtras(scanResult, trees, manualBuildings);
   const c = out.meta.counts;
   const size = new Blob([prettyJSON(out)]).size;
   const osmTrees = out.points.filter(p => p.kind === 'tree' && p.source !== 'manual').length;
@@ -2118,6 +2273,7 @@ function showStats() {
     ['Creeks / drains', c.waterways],
     ['Trees (OSM)', osmTrees],
     ['Trees you placed', c.manualTrees],
+    ['Buildings you drew', c.manualBuildings || 0],
     ['Props (benches, lamps, signs…)', props],
     ['Landmarks', c.landmarks || 0],
     ['Building parts (towers)', c.buildingParts || 0],
@@ -2149,7 +2305,7 @@ function photoHtml(l, esc) {
 // ---- export / load ----
 els.exportBtn.onclick = () => {
   if (!scanResult) return;
-  const final = withManualTrees(scanResult, trees);
+  const final = withManualExtras(scanResult, trees, manualBuildings);
   const safe = (final.meta.name || 'route').replace(/[^a-z0-9_-]+/gi, '-').toLowerCase();
   const blob = new Blob([prettyJSON(final)], { type: 'application/json' });
   const a = document.createElement('a');
@@ -2169,7 +2325,10 @@ els.loadFile.onchange = async () => {
     remember();
     waypoints = j.route.waypoints;
     trees = Array.isArray(j.manualTrees) ? j.manualTrees.map(t => ({ lat: t.lat, lon: t.lon, canopy: t.canopy || 10 })) : [];
+    manualBuildings = Array.isArray(j.manualBuildings) ? j.manualBuildings.filter(m => Array.isArray(m.ring) && m.height > 0) : [];
+    raceOpts = { reverse: !!j.route.reversed, start: Array.isArray(j.route.startPoint) ? j.route.startPoint : null };
     renderTrees();
+    renderManualBuildings();
     els.loop.checked = !!j.route.closed;
     els.snap.checked = !!j.route.snappedToRoads;
     if (j.route.width) els.width.value = j.route.width;
@@ -2183,12 +2342,193 @@ els.loadFile.onchange = async () => {
   }
 };
 
+// ======================================================================
+// v9a (browser): race direction/start, hand-drawn buildings, track library
+// ======================================================================
+const raceLayer = L.layerGroup().addTo(map);
+function isLoopNow() { return els.loop.checked && waypoints.length >= 3; }
+// Start flag and direction arrows, drawn on the race route (the drawn route, reversed/rotated).
+function renderRace() {
+  raceLayer.clearLayers();
+  els.startBtn.disabled = !isLoopNow();
+  els.reverseBtn.disabled = routeLatLngs.length < 2;
+  if (routeLatLngs.length < 2) { els.raceInfo.textContent = ''; return; }
+  const r = orientRoute(routeLatLngs, { ...raceOpts, loop: isLoopNow() });
+  const len = routeLength(r);
+  L.marker(r[0], { interactive: false, icon: L.divIcon({ className: 'race-flag', html: '🏁', iconSize: [20, 20], iconAnchor: [4, 18] }) }).addTo(raceLayer);
+  for (const a of arrowsAlong(r, Math.max(60, len / 14))) {
+    L.marker(a.pos, { interactive: false, icon: L.divIcon({ className: 'race-arrow', html: `<div style="transform:rotate(${a.bearing}deg)">▲</div>`, iconSize: [14, 14] }) }).addTo(raceLayer);
+  }
+  els.raceInfo.textContent = `🏁 Race ${raceOpts.reverse ? 'reversed (against the way you drew it)' : 'runs the way you drew it'}` +
+    (isLoopNow() ? (raceOpts.start ? ', start moved.' : ', starts at point 1.') : '. Not a loop: it starts at one end (use Reverse for the other end).');
+}
+els.reverseBtn.onclick = () => {
+  remember();
+  raceOpts = { ...raceOpts, reverse: !raceOpts.reverse };
+  invalidateScan(); renderRace(); save();
+  setStatus(`Direction ${raceOpts.reverse ? 'reversed' : 'back to the drawing direction'}. Scan again to update the race layout.`, 'ok');
+};
+els.startBtn.onclick = () => {
+  pickingStart = !pickingStart;
+  els.startBtn.classList.toggle('on', pickingStart);
+  els.map.classList.toggle('drawing', pickingStart || mode === 'points' || mode === 'trees' || mode === 'build');
+  if (pickingStart) { if (mode === 'pen') map.dragging.enable(); setStatus('Click on the route where the start line should go.'); }
+  else setMode(mode);
+};
+function setStartAt(ll) {
+  pickingStart = false;
+  els.startBtn.classList.remove('on');
+  setMode(mode);
+  const r = orientRoute(routeLatLngs, { reverse: raceOpts.reverse, loop: true, start: ll });
+  const off = dist(ll, r[0]);
+  if (off > 60) { setStatus(`That's ${Math.round(off)} m from the route. Click on the red line itself.`, 'warn'); return; }
+  remember();
+  raceOpts = { ...raceOpts, start: r[0] };
+  invalidateScan(); renderRace(); save();
+  setStatus('Start moved. Scan again to update the start grid and checkpoints.', 'ok');
+}
+
+// ---- Building mode: draw a building the map is missing ----
+const mbLayer = L.layerGroup().addTo(map);
+const draftLine = L.polyline([], { color: '#ffb703', weight: 2, dashArray: '4 4', interactive: false }).addTo(map);
+const draftDots = L.layerGroup().addTo(map);
+function renderManualBuildings() {
+  mbLayer.clearLayers();
+  manualBuildings.forEach((m, i) => {
+    L.polygon(m.ring, { color: '#fb8500', weight: 2, fillColor: '#ffb703', fillOpacity: 0.6 })
+      .bindTooltip(`${m.name || 'Building you drew'} (${m.height} m). Right-click to delete.`)
+      .on('contextmenu', ev => { L.DomEvent.stop(ev); remember(); manualBuildings.splice(i, 1); renderManualBuildings(); setStatus('Building deleted. Undo brings it back.'); })
+      .addTo(mbLayer);
+  });
+  showStats();
+  save();
+}
+function renderDraft() {
+  draftLine.setLatLngs(draft || []);
+  draftDots.clearLayers();
+  (draft || []).forEach((p, i) => L.circleMarker(p, { radius: i === 0 ? 6 : 4, color: '#fb8500', weight: 2, fillColor: i === 0 ? '#fff' : '#ffb703', fillOpacity: 1, interactive: false }).addTo(draftDots));
+  const n = draft ? draft.length : 0;
+  els.bFinishBtn.disabled = n < 3;
+  els.bCancelBtn.disabled = n === 0;
+  els.bInfo.textContent = n === 0 ? 'Click each corner. Click the first corner again (or double-click) to finish.'
+    : n < 3 ? `${n} corner${n > 1 ? 's' : ''}. Keep clicking corners.` : `${n} corners. Click the first corner (white) to finish.`;
+}
+function addCorner(e) {
+  if (!draft) draft = [];
+  if (draft.length >= 3) {
+    const first = map.latLngToContainerPoint(draft[0]);
+    if (first.distanceTo(e.containerPoint) < 12) { finishDraft(); return; }
+  }
+  draft.push([e.latlng.lat, e.latlng.lng]);
+  renderDraft();
+}
+function finishDraft() {
+  if (!draft || draft.length < 3) return;
+  const height = +els.bHeight.value;
+  if (!(height >= 2 && height <= 300)) { setStatus('Set a height between 2 and 300 m first.', 'warn'); return; }
+  remember();
+  const m = { ring: draft.map(p => [round6(p[0]), round6(p[1])]), height };
+  if (els.bName.value.trim()) m.name = els.bName.value.trim();
+  manualBuildings.push(m);
+  draft = null; renderDraft(); renderManualBuildings();
+  setStatus(`Building added (${height} m). It goes into the file when you export; no re-scan needed.`, 'ok');
+}
+function cancelDraft() { draft = null; renderDraft(); }
+const round6 = n => Math.round(n * 1e6) / 1e6;
+map.on('dblclick', e => { if (mode === 'build' && draft && draft.length >= 3) { L.DomEvent.stop(e); finishDraft(); } });
+els.bFinishBtn.onclick = finishDraft;
+els.bCancelBtn.onclick = cancelDraft;
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && draft) cancelDraft();
+  if (e.key === 'Escape' && pickingStart) els.startBtn.click();
+});
+
+// ---- track library ----
+function readLibrary() { try { const l = JSON.parse(localStorage.getItem('kartmap-library')); return Array.isArray(l) ? l : []; } catch (e) { return []; } }
+function writeLibrary(l) {
+  try { localStorage.setItem('kartmap-library', JSON.stringify(l)); return true; }
+  catch (e) { setStatus("Couldn't save to this browser's storage (full or blocked). Use Back up all to keep a copy.", 'err'); return false; }
+}
+function renderLibrary(selectName) {
+  const l = readLibrary();
+  els.libSelect.innerHTML = l.length ? l.map(t => `<option>${t.name.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))}</option>`).join('') : '<option value="">(no saved tracks)</option>';
+  if (selectName) els.libSelect.value = selectName;
+  els.libLoadBtn.disabled = els.libDeleteBtn.disabled = !l.length;
+  els.libBackupBtn.disabled = !l.length;
+}
+function snapshot(name) {
+  return { name, savedAt: new Date().toISOString(), waypoints, trees, manualBuildings, race: raceOpts,
+    snap: els.snap.checked, loop: els.loop.checked, radius: +els.radius.value, width: +els.width.value };
+}
+els.libSaveBtn.onclick = () => {
+  if (!waypoints.length) { setStatus('Draw a route first.', 'warn'); return; }
+  const name = els.name.value.trim() || 'track ' + new Date().toISOString().slice(0, 16).replace('T', ' ');
+  els.name.value = name;
+  const l = readLibrary(), existed = l.some(t => t.name === name);
+  if (writeLibrary(libraryUpsert(l, snapshot(name)))) {
+    renderLibrary(name);
+    setStatus(`${existed ? 'Updated' : 'Saved'} "${name}" in the track library.`, 'ok');
+  }
+};
+els.libLoadBtn.onclick = async () => {
+  const t = readLibrary().find(x => x.name === els.libSelect.value);
+  if (!t) return;
+  remember();
+  waypoints = t.waypoints; trees = t.trees || []; manualBuildings = t.manualBuildings || [];
+  raceOpts = t.race || { reverse: false, start: null };
+  els.snap.checked = t.snap !== false; els.loop.checked = t.loop !== false;
+  if (t.radius) { els.radius.value = t.radius; els.radiusVal.textContent = t.radius; }
+  if (t.width) els.width.value = t.width;
+  els.name.value = t.name;
+  renderTrees(); renderManualBuildings();
+  await rebuildRoute();
+  if (waypoints.length) map.fitBounds(waypoints, { padding: [40, 40], maxZoom: 17 });
+  setStatus(`Opened "${t.name}". Undo goes back to what you had before.`, 'ok');
+};
+els.libDeleteBtn.onclick = () => {
+  const name = els.libSelect.value;
+  if (!name) return;
+  const l = readLibrary(), t = l.find(x => x.name === name);
+  if (!t) return;
+  if (writeLibrary(libraryRemove(l, name))) {
+    lastDeleted = t;
+    renderLibrary();
+    setStatus(`Deleted "${name}" from the library.`, 'ok');
+    const b = document.createElement('button'); b.textContent = 'Bring it back'; b.style.marginLeft = '8px';
+    b.onclick = () => { if (writeLibrary(libraryUpsert(readLibrary(), lastDeleted))) { renderLibrary(lastDeleted.name); setStatus(`"${lastDeleted.name}" is back.`, 'ok'); } };
+    els.status.appendChild(b);
+  }
+};
+let lastDeleted = null;
+els.libBackupBtn.onclick = () => {
+  const l = readLibrary();
+  if (!l.length) return;
+  const blob = new Blob([JSON.stringify({ format: 'kartmap-library', version: LIBRARY_VERSION, saved: new Date().toISOString(), tracks: l }, null, 1)], { type: 'application/json' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+  a.download = `kartmap-library_${new Date().toISOString().slice(0, 10)}.json`; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  setStatus(`Backed up ${l.length} track${l.length > 1 ? 's' : ''}.`, 'ok');
+};
+els.libRestoreBtn.onclick = () => els.libFile.click();
+els.libFile.onchange = async () => {
+  const f = els.libFile.files[0];
+  els.libFile.value = '';
+  if (!f) return;
+  try {
+    const { tracks } = readLibraryBackup(JSON.parse(await f.text()));
+    if (writeLibrary(libraryMerge(readLibrary(), tracks))) { renderLibrary(tracks[0].name); setStatus(`Restored ${tracks.length} track${tracks.length > 1 ? 's' : ''} (same names were replaced).`, 'ok'); }
+  } catch (e) { setStatus('Could not restore that file: ' + (e instanceof SyntaxError ? 'it is not valid JSON' : e.message), 'err'); }
+};
+renderLibrary();
+renderRace();
+
 // ---- remember the last route between visits (optional; fails silently) ----
 function save() {
   try {
     localStorage.setItem('kartmap-v1', JSON.stringify({
       waypoints, trees, snap: els.snap.checked, loop: els.loop.checked,
-      radius: els.radius.value, width: els.width.value, name: els.name.value, canopy: els.canopy.value
+      radius: els.radius.value, width: els.width.value, name: els.name.value, canopy: els.canopy.value,
+      manualBuildings, race: raceOpts
     }));
   } catch (e) { /* storage blocked: tool still works, it just won't remember */ }
 }
@@ -2202,6 +2542,8 @@ function save() {
   if (s.name) els.name.value = s.name;
   if (s.canopy) { els.canopy.value = s.canopy; els.canopyVal.textContent = s.canopy; }
   if (Array.isArray(s.trees)) { trees = s.trees; renderTrees(); }
+  if (Array.isArray(s.manualBuildings)) { manualBuildings = s.manualBuildings; renderManualBuildings(); }
+  if (s.race) raceOpts = { reverse: !!s.race.reverse, start: Array.isArray(s.race.start) ? s.race.start : null };
   if (Array.isArray(s.waypoints) && s.waypoints.length) {
     waypoints = s.waypoints;
     map.fitBounds(waypoints, { padding: [40, 40], maxZoom: 17 });

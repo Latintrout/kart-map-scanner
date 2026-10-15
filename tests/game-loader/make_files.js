@@ -50,7 +50,7 @@ els.push(N(150, 0, { highway: 'crossing', crossing: 'zebra' }), N(300, 60, { hig
 for (let i = 0; i < 15; i++) els.push(N(15 + i * 18, 190, { natural: 'tree', ...(i % 3 === 0 ? { genus: 'Archontophoenix' } : i % 3 === 1 ? { genus: 'Jacaranda', species: 'Jacaranda mimosifolia', leaf_type: 'broadleaved' } : {}) }));
 els.push(N(150, 3, { natural: 'tree', genus: 'Ficus' }));   // a tree in the road
 const data = { elements: els.map(e => { if (e.tags) for (const k of Object.keys(e.tags)) if (e.tags[k] === undefined) delete e.tags[k]; return e; }) };
-for (const [ver, file] of [['v8.1', '/home/claude/kart-map-scanner-v8.1.html'], ['v8.2', '/home/claude/kart-map-scanner-v8.2.html'], ['v8.3', '/home/claude/kart-map-scanner-v8.3.html']]) {
+for (const [ver, file] of [['v8.1', '/home/claude/kart-map-scanner-v8.1.html'], ['v8.2', '/home/claude/kart-map-scanner-v8.2.html'], ['v8.3', '/home/claude/kart-map-scanner-v8.3.html'], ['v9a', '/home/claude/kart-map-scanner-v9a.html']]) {
   const L = lib(file);
   let input = data, overture;
   if (ver === 'v8.3') {
@@ -63,7 +63,16 @@ for (const [ver, file] of [['v8.1', '/home/claude/kart-map-scanner-v8.1.html'], 
     input = m.data; overture = { release: '2026-09-23.1', ...m.stats };
     console.log('overture stats', JSON.stringify(m.stats));
   }
-  const { out } = L.buildOutput(input, { overture, route, waypoints: route.slice(0, 4), radius: 300, width: 8, loop: true, snapped: true, name: 'harness ' + ver, now: '2026-10-15T00:00:00Z' });
+  let raceRoute = route, raceExtra = {};
+  if (ver === 'v9a') {   // reversed, start moved to the middle of the east side
+    raceRoute = L.orientRoute(route, { loop: true, reverse: true, start: ll(303, 100) });
+    raceExtra = { reverse: true, start: raceRoute[0] };
+  }
+  let { out } = L.buildOutput(input, { overture, ...raceExtra, route: raceRoute, waypoints: route.slice(0, 4), radius: 300, width: 8, loop: true, snapped: true, name: 'harness ' + ver, now: '2026-10-15T00:00:00Z' });
+  if (ver === 'v9a') {
+    out = L.withManualExtras(out, [{ lat: ll(10, 100)[0], lon: ll(10, 100)[1], canopy: 8 }], [{ ring: [ll(-40, 60), ll(-20, 60), ll(-20, 80), ll(-40, 80)], height: 9, name: 'Drawn kiosk' }]);
+    console.log('v9a start line', JSON.stringify(out.race.startLine.pos), 'dir', JSON.stringify(out.race.startLine.dir), 'contract', JSON.stringify(L.loaderContractProblems(out)));
+  }
   if (ver === 'v8.3') {
     // aerial colours from a fake all-terracotta photo covering everything, plus a landmark photo
     const W = 2048, H = 2048, px = new Uint8ClampedArray(W * H * 4); for (let i = 0; i < px.length; i += 4) px.set([176, 58, 46, 255], i);

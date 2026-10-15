@@ -7,7 +7,7 @@ func _initialize() -> void:
 	_run.call_deferred()
 
 func _run() -> void:
-	for dir in ["res://tracks/scan_v8_1", "res://tracks/scan_v8_2", "res://tracks/scan_v8_3"]:
+	for dir in ["res://tracks/scan_v8_1", "res://tracks/scan_v8_2", "res://tracks/scan_v8_3", "res://tracks/scan_v9a"]:
 		var tb := TrackBuilder.new()
 		tb.track_dir = dir
 		root.add_child(tb)
