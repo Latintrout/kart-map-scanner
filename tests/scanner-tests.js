@@ -216,9 +216,12 @@ function runV81(lib, check, same) {
     { type: 'way', id: 31, tags: { highway: 'steps', incline: 'up' }, geometry: [off(100, 0), off(100, -10)] },
     { type: 'way', id: 32, tags: { highway: 'residential', oneway: 'yes', sidewalk: 'both' }, geometry: [off(0, 0), off(200, 0)] },
     { type: 'way', id: 33, tags: { highway: 'footway', footway: 'crossing', crossing: 'marked', 'crossing:markings': 'zebra' }, geometry: [off(50, -4), off(50, 4)] },
-    // shortcut path cutting the south-east corner diagonally: from (40,0) on the south side to (200,160) on
-    // the east side. Track distance 320 m, path 226 m: saves ~94 m.
-    { type: 'way', id: 41, tags: { highway: 'footway' }, geometry: [off(40, 0), off(120, 80), off(200, 160)] },
+    // shortcut path cutting the south-east corner: from (120,0) on the south side to (200,80) on the east
+    // side. Track distance 160 m, path 113 m: saves ~47 m.
+    { type: 'way', id: 41, tags: { highway: 'footway' }, geometry: [off(120, 0), off(160, 40), off(200, 80)] },
+    // a long diagonal that skips 320 m of an ~790 m lap (40%): that's cheating the lap, not a shortcut
+    // (live test 2026-10-15 found paths like this "saving" 900 m at South Bank).
+    { type: 'way', id: 43, tags: { highway: 'footway' }, geometry: [off(30, 0), off(115, 85), off(200, 170)] },
     // a path that just runs along the track (not a shortcut)
     { type: 'way', id: 42, tags: { highway: 'footway' }, geometry: [off(0, 205), off(100, 205), off(200, 205)] },
     // fence crossing the track, fence far away
@@ -309,9 +312,10 @@ function runV81(lib, check, same) {
   check('v8.1 checkpoints: 8 evenly spaced, first at the start', race && race.checkpoints.length === 8 && race.checkpoints[0].at === 0 && Math.abs(race.checkpoints[1].at - cl.length / 8) < 1, race && race.checkpoints.map(c => c.at).join(','));
   check('v8.1 start grid: 8 slots behind the start line, inside the track', race && race.grid.length === 8 && race.grid.every(s => s.trackDist <= 4.01 && s.behind > 0), JSON.stringify(race && race.grid.map(s => [s.behind, s.trackDist])));
   const sc = (race && race.shortcuts) || [];
-  check('v8.1 shortcut finder finds the corner-cutting path (saves ~90 m)', sc.length >= 1 && sc[0].via.includes('w41') && sc[0].saving > 60 && sc[0].saving < 100, JSON.stringify(sc.map(s => [s.via, s.saving])));
+  check('v8.1 shortcut finder finds the corner-cutting path (saves ~45 m)', sc.length >= 1 && sc.some(s => s.via.includes('w41') && s.saving > 30 && s.saving < 60), JSON.stringify(sc.map(s => [s.via, s.saving])));
   check('v8.1 a path that only runs alongside the track is not a shortcut (either direction)', !sc.some(s => s.via.includes('w42')));
-  check('v8.1 shortcuts never skip more than half a lap (that would be driving backwards)', sc.every(s => s.skips <= cl.length / 2 + 1));
+  check('v8.2 shortcuts never skip more than a quarter of the lap (max 400 m, min limit 150 m)', sc.every(s => s.skips <= Math.max(150, Math.min(400, cl.length / 4)) + 1), JSON.stringify(sc.map(s => s.skips)));
+  check('v8.2 a path skipping 40% of the lap is not offered as a shortcut', !sc.some(s => s.via.includes('w43')));
 
   // --- guesses are marked ---
   check('v8.1 every building height says where it came from', out.buildings.every(b => ['osm', 'levels', 'estimated', 'default'].includes(b.heightSource)));
@@ -372,6 +376,12 @@ function runV82(lib, check, same) {
   check('v8.2 cafés, toilets, parking meters, playgrounds are props again (the loader draws them)',
     ['cafe', 'toilets', 'parking_meter', 'playground'].every(k => out.points.some(p => p.kind === k)));
   check('v8.2 a café is still never a landmark', !lm('Some Cafe'));
+  // live test 2026-10-15: a huge venue came through twice (as a building and as an area ~100+ m apart)
+  const dup = lib.buildOutput({ elements: [
+    { type: 'way', id: 901, tags: { building: 'yes', name: 'Big Venue', amenity: 'conference_centre' }, geometry: rect(0, 300, 120, 80) },
+    { type: 'way', id: 902, tags: { amenity: 'conference_centre', name: 'Big Venue' }, geometry: rect(150, 300, 200, 150) }
+  ] }, { route: loop, waypoints: loop.slice(0, 4), radius: 300, width: 8, loop: true, snapped: false, name: 't', now: 'X' }).out;
+  check('v8.2 the same landmark name within 300 m counts once (building version kept)', dup.landmarks.filter(l => l.name === 'Big Venue').length === 1 && dup.landmarks.find(l => l.name === 'Big Venue').ref === 'w901', JSON.stringify(dup.landmarks.map(l => [l.name, l.ref])));
   const part = B('w3');
   check('v8.2 building parts sit in the buildings list with part: true', part && part.part === true && part.parent === 'w2' && B('w2').hasParts === true && !('buildingParts' in out));
   check('v8.2 parts are left out of the quality height percentages', out.meta.quality.heights.measured + out.meta.quality.heights.estimated + out.meta.quality.heights.default > 99.4);

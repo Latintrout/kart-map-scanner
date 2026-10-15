@@ -691,10 +691,13 @@ function raceLayout(cl, closed, width, trackIdx) {
 }
 
 // Shortcut finder: footpaths and side roads that connect two parts of the track and are
-// at least 30 m shorter than driving the track between them. A "shortcut" that skips more
-// than half a lap is really driving backwards, so those are ignored.
+// at least 30 m shorter than driving the track between them. A shortcut may skip at most a
+// quarter of the lap (capped at 400 m, but always allowed up to 150 m). Skipping more is
+// cheating the lap, not a shortcut: the live South Bank test found paths between the two
+// sides of an out-and-back loop "saving" 900 m.
 function findShortcuts(roads, cl, closed, width) {
   const L = cl.length, touch = width / 2 + 4;
+  const maxSkip = Math.max(150, Math.min(400, L / 4));
   const key = p => p[0].toFixed(1) + ',' + p[1].toFixed(1);
   const idx = new Map(), V = [], adj = [];
   const vid = p => { const k = key(p); let i = idx.get(k); if (i === undefined) { i = V.length; idx.set(k, i); V.push(p); adj.push([]); } return i; };
@@ -766,7 +769,7 @@ function findShortcuts(roads, cl, closed, width) {
         let start = m.v; while (prev.get(start).from !== null) start = prev.get(start).from;
         const fromAt = prev.get(m.v).at;
         const skips = closed ? ((m.at - fromAt) % L + L) % L : m.at - fromAt;
-        if (skips <= 0 || skips > L / 2) continue;
+        if (skips <= 0 || skips > maxSkip) continue;
         const length = dist.get(m.v) + m.d, saving = skips - length;
         if (saving >= 30 && (!best || saving > best.saving)) best = { v: m.v, fromAt, toAt: m.at, skips, length, saving };
       }
@@ -1062,11 +1065,12 @@ function buildOutput(data, o) {
     notes
   };
 
-  // Landmarks: one per name and place. If a name appears on both a point and a building/area
-  // within 60 m, keep the building/area version (it has a shape to model from).
+  // Landmarks: one per name and place. If a name appears more than once within 300 m (a point and
+  // a building, or a huge venue mapped as building and area), keep the building, then area version.
+  // (v8.2: was 60 m; the live test found the Convention Centre twice.)
   const landmarks = [];
   for (const { l } of landmarkCands.sort((a, b) => b.priority - a.priority)) {
-    if (landmarks.some(k => k.name === l.name && Math.hypot(k.pos[0] - l.pos[0], k.pos[1] - l.pos[1]) < 60)) continue;
+    if (landmarks.some(k => k.name === l.name && Math.hypot(k.pos[0] - l.pos[0], k.pos[1] - l.pos[1]) < 300)) continue;
     landmarks.push(l);
   }
   landmarks.forEach((l, i) => { l.id = 'L' + (i + 1); if (l.ref == null) delete l.ref; });
