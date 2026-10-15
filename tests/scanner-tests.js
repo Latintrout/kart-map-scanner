@@ -44,7 +44,7 @@ function runScannerTests(lib) {
   check('v1 route length 358.31 m', r1.route.length === 358.31, r1.route.length);
   check('v1 route points in metres', same(r1.route.points, [[0, 0], [0, 111.32], [98.65, 111.32], [0, 0]]), JSON.stringify(r1.route.points));
   check('v1 export is valid JSON', (() => { try { JSON.parse(lib.prettyJSON(r1)); return true; } catch (e) { return false; } })());
-  check('v1 format marker', r1.format === 'kartmap' && r1.version === 1);
+  check('format marker (version 2 since v8.2, matching the published kartmap v2)', r1.format === 'kartmap' && r1.version === 2);
 
   // ---------- v4/v5: query ----------
   const q = lib.buildQuery(route, 100);
@@ -113,6 +113,8 @@ function runScannerTests(lib) {
   else check('v8 functions present', false, 'extractLandmark not found (running against v7?)');
   if (has('smoothLine')) runV81(lib, check, same);
   else check('v8.1 functions present', false, 'smoothLine not found (running against v8?)');
+  if (has('loaderContractProblems')) runV82(lib, check, same);
+  else check('v8.2 functions present', false, 'loaderContractProblems not found (running against v8.1?)');
 
   return results;
 }
@@ -165,7 +167,7 @@ function runV8(lib, check, same) {
   check('v8 public artworks are landmarks', lib.extractLandmark({ name: 'Sisters', tourism: 'artwork' }) === 'artwork');
   check('v8 landmark positions are in metres', lm.every(l => Array.isArray(l.pos) && l.pos.length === 2 && isFinite(l.pos[0])));
   check('v8 new counts present', out.meta.counts.barriers === 2 && out.meta.counts.landmarks === lm.length && out.meta.counts.bridges === 1 && out.meta.counts.tunnels === 1, JSON.stringify(out.meta.counts));
-  check('v8 still format version 1', out.version === 1);
+  check('v8 fields stay optional (format kartmap)', out.format === 'kartmap');
 
   // Long-route reservation scaling
   const r0 = lib.serverBudget(2000, 100), r1 = lib.serverBudget(2100, 300), r2 = lib.serverBudget(10000, 300), r3 = lib.serverBudget(200000, 300);
@@ -240,10 +242,10 @@ function runV81(lib, check, same) {
   const B = id => out.buildings.find(b => b.id === id);
 
   // --- building parts ---
-  const part = (out.buildingParts || []).find(p => p.id === 'w2');
-  check('v8.1 building parts exported (30 levels, starts at level 2)', part && part.height === 90 && part.minHeight === 6, JSON.stringify(part));
+  // Changed in v8.2: parts live in the buildings list with part: true (the layout the game's loader reads).
+  const part = out.buildings.find(p => p.id === 'w2');
+  check('v8.1 building parts exported (30 levels, starts at level 2)', part && part.part === true && part.height === 90 && part.minHeight === 6, JSON.stringify(part));
   check('v8.1 part knows its parent building, parent knows it has parts', part && part.parent === 'w1' && B('w1').hasParts === true);
-  check('v8.1 building parts are not counted as buildings', !out.buildings.some(b => b.id === 'w2'));
 
   // --- smarter heights ---
   check('v8.1 unmeasured house next to measured ones gets their typical height (estimated)', B('w14').heightSource === 'estimated' && B('w14').height === 6, JSON.stringify([B('w14').height, B('w14').heightSource]));
@@ -313,7 +315,7 @@ function runV81(lib, check, same) {
 
   // --- guesses are marked ---
   check('v8.1 every building height says where it came from', out.buildings.every(b => ['osm', 'levels', 'estimated', 'default'].includes(b.heightSource)));
-  check('v8.1 still format version 1, generator v8.1', out.version === 1 && out.meta.generator === 'kart-map-scanner v8.1');
+  check('v8.1+ generator tag present', /^kart-map-scanner v8\.\d+$/.test(out.meta.generator));
 
   // --- speed: a South-Bank-sized scan must stay quick ---
   const big = [];
@@ -324,6 +326,63 @@ function runV81(lib, check, same) {
   lib.buildOutput({ elements: big }, { route: loop, waypoints: loop.slice(0, 4), radius: 300, width: 8, loop: true, snapped: false, name: 'big', now: 'X' });
   const ms = Date.now() - t0;
   check('v8.1 big scan (1,500 buildings, 300 paths, 1,200 props) processes in under 3 s', ms < 3000, ms + ' ms');
+}
+
+// v8.2: the extras from the other session's "kartmap v2", and what the game's Godot loader
+// (brisbane-kart, game/scripts/kartmap_scenery.gd) reads.
+function runV82(lib, check, same) {
+  const la = -27.48, lo = 153.02;
+  const off = (dx, dy) => ({ lat: la + dy / 111320, lon: lo + dx / (111320 * Math.cos(la * Math.PI / 180)) });
+  const llOff = (dx, dy) => { const o = off(dx, dy); return [o.lat, o.lon]; };
+  const rect = (x, y, w, h) => [off(x, y), off(x + w, y), off(x + w, y + h), off(x, y + h), off(x, y)];
+  const node = (id, dx, dy, tags) => ({ type: 'node', id, lat: off(dx, dy).lat, lon: off(dx, dy).lon, tags });
+  const loop = [llOff(0, 0), llOff(200, 0), llOff(200, 200), llOff(0, 200), llOff(0, 0)];
+  const els = [
+    { type: 'way', id: 1, tags: { building: 'yes', 'roof:material': 'metal', 'roof:height': '2.5', 'roof:shape': 'gabled' }, geometry: rect(30, 30, 20, 20) },
+    { type: 'way', id: 2, tags: { building: 'yes' }, geometry: rect(100, 30, 40, 40) },
+    { type: 'way', id: 3, tags: { 'building:part': 'yes', 'building:levels': '20' }, geometry: rect(110, 40, 15, 15) },
+    { type: 'way', id: 4, tags: { highway: 'footway', lit: 'yes' }, geometry: [off(0, 50), off(50, 50)] },
+    { type: 'way', id: 5, tags: { man_made: 'pier', name: 'Jetty' }, geometry: [off(-20, 100), off(-60, 100)] },
+    { type: 'way', id: 6, tags: { barrier: 'wall', colour: 'sandstone', material: 'stone' }, geometry: [off(0, 150), off(30, 150)] },
+    { type: 'way', id: 7, tags: { railway: 'light_rail', lit: 'yes' }, geometry: [off(-50, -20), off(250, -20)] },
+    node(10, 60, 100, { tourism: 'attraction', attraction: 'big_wheel', name: 'The Wheel of Brisbane' }),
+    node(11, 70, 100, { tourism: 'artwork', artwork_type: 'statue', name: 'Mates' }),
+    node(12, 80, 100, { amenity: 'cafe', name: 'Some Cafe', wikidata: 'Q1' }),
+    node(13, 90, 100, { amenity: 'toilets' }),
+    node(14, 95, 100, { amenity: 'parking_meter' }),
+    node(15, 99, 100, { leisure: 'playground' }),
+    node(16, 10, 60, { natural: 'tree', genus: 'Jacaranda', species: 'Jacaranda mimosifolia', leaf_type: 'broadleaved', leaf_cycle: 'deciduous' }),
+    node(17, 12, 60, { natural: 'tree', genus: 'Archontophoenix' })
+  ];
+  const out = lib.buildOutput({ elements: els }, { route: loop, waypoints: loop.slice(0, 4), radius: 300, width: 8, loop: true, snapped: false, name: 't', now: 'X' }).out;
+  const B = id => out.buildings.find(b => b.id === id);
+  check('v8.2 roof material and roof height kept', B('w1').roofMaterial === 'metal' && B('w1').roofHeight === 2.5);
+  check('v8.2 street lighting kept on paths and railways', out.roads.find(r => r.id === 'w4').lit === true && out.railways.find(r => r.id === 'w7').lit === true);
+  const pier = out.roads.find(r => r.id === 'w5');
+  check('v8.2 piers come in as walkable paths (4 m default width)', pier && pier.kind === 'pier' && pier.width === 4 && pier.widthSource === 'default');
+  check('v8.2 fence/wall colour kept', out.barriers.find(b => b.id === 'w6').colour === 'sandstone');
+  const tree = id => out.points.find(p => p.id === id);
+  check('v8.2 tree genus, species, leaf type and leaf cycle kept separately',
+    tree('n16').genus === 'Jacaranda' && tree('n16').species === 'Jacaranda mimosifolia' && tree('n16').leafType === 'broadleaved' && tree('n16').leafCycle === 'deciduous', JSON.stringify(tree('n16')));
+  check('v8.2 genus-only tree still typed (palm)', tree('n17').genus === 'Archontophoenix' && tree('n17').treeType === 'palm' && !tree('n17').species);
+  check('v8.2 artwork props say what kind of artwork', tree('n11').kind === 'artwork' && tree('n11').artworkType === 'statue');
+  const lm = name => out.landmarks.find(l => l.name === name);
+  check('v8.2 Wheel of Brisbane landmark kind is big_wheel (the loader builds a Ferris wheel for it)', lm('The Wheel of Brisbane') && lm('The Wheel of Brisbane').kind === 'big_wheel');
+  check('v8.2 artwork landmark kind is its artwork type (statue)', lm('Mates') && lm('Mates').kind === 'statue');
+  check('v8.2 cafés, toilets, parking meters, playgrounds are props again (the loader draws them)',
+    ['cafe', 'toilets', 'parking_meter', 'playground'].every(k => out.points.some(p => p.kind === k)));
+  check('v8.2 a café is still never a landmark', !lm('Some Cafe'));
+  const part = B('w3');
+  check('v8.2 building parts sit in the buildings list with part: true', part && part.part === true && part.parent === 'w2' && B('w2').hasParts === true && !('buildingParts' in out));
+  check('v8.2 parts are left out of the quality height percentages', out.meta.quality.heights.measured + out.meta.quality.heights.estimated + out.meta.quality.heights.default > 99.4);
+  check('v8.2 file says format version 2', out.version === 2);
+  const problems = lib.loaderContractProblems(out);
+  check('v8.2 file meets everything the game loader reads (contract check)', problems.length === 0, problems.join('; '));
+  // the contract check must actually catch problems
+  const broken = JSON.parse(JSON.stringify(out));
+  broken.buildings.find(b => b.id === 'w2').hasParts = true; broken.buildings = broken.buildings.filter(b => !b.part);
+  broken.landmarks[0].pos = undefined;
+  check('v8.2 contract check catches a building whose parts are missing, and a landmark with no position', lib.loaderContractProblems(broken).length >= 2);
 }
 
 if (typeof module !== 'undefined') module.exports = { runScannerTests };

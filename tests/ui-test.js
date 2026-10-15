@@ -79,10 +79,12 @@ const overpass = { elements: [
   const stats = await page.textContent('#stats');
   check('stats show bridges / tunnels 1 / 1', /Bridges \/ tunnels1 \/ 1/.test(stats), stats);
   check('stats show fences 1', /Fences, walls, hedges1/.test(stats));
-  check('stats show props 1 (picnic table, not the cafe)', /Props \(benches, lamps, signs…\)1/.test(stats), stats);
+  // v8.2: cafés count as props again (the game draws outdoor tables for them), so v8.2+ shows 2.
+  const v82 = /kart-map-scanner v8\.([2-9]|\d\d)/.test(html);
+  check(v82 ? 'stats show props 2 (picnic table + cafe tables)' : 'stats show props 1 (picnic table, not the cafe)', new RegExp('Props \\(benches, lamps, signs…\\)' + (v82 ? 2 : 1)).test(stats), stats);
   check('stats show landmarks 2', /Landmarks2/.test(stats), stats);
   check('landmark list names Streets Beach and GOMA', /Streets Beach/.test(stats) && /Gallery of Modern Art/.test(stats));
-  if (/Quality report/.test(stats) || /v8\.1/.test(html)) {
+  if (/Quality report/.test(stats) || /v8\.[1-9]/.test(html)) {
     check('v8.1 stats show the quality report and race layout rows', /Quality report/.test(stats) && /Corners \/ checkpoints/.test(stats) && /Shortcuts found/.test(stats), stats.slice(0, 400));
     // The map draws in canvas mode (one bitmap), so count white-ish pixels: the smooth line and
     // start grid are the only white things drawn.
@@ -105,11 +107,12 @@ const overpass = { elements: [
   check('export has v8 fields (barriers, landmarks, bridge flag, roof shape)',
     j.barriers.length === 1 && j.landmarks.length === 2 && j.roads.some(r => r.bridge) && j.buildings[0].roofShape === 'flat');
   check('export keeps the pool hole and the manual tree', j.areas.some(a => a.kind === 'swimming_pool' && a.holes) && j.points.some(p => p.source === 'manual'));
-  check('export still version 1, generator v8.x', j.version === 1 && /^kart-map-scanner v8/.test(j.meta.generator));
-  if (/v8\.1/.test(j.meta.generator)) {
+  check('export format version (1 up to v8.1, 2 from v8.2), generator v8.x', j.version === (/v8\.[01]$|v8$/.test(j.meta.generator) ? 1 : 2) && /^kart-map-scanner v8/.test(j.meta.generator), j.version + ' ' + j.meta.generator);
+  if (/v8\.[1-9]/.test(j.meta.generator)) {
     check('v8.1 export has smooth track line, corners and race layout', j.route.centerline && j.route.centerline.points.length > 10 && Array.isArray(j.route.corners) && j.race && j.race.checkpoints.length >= 8 && j.race.grid.length === 8);
     check('v8.1 export has quality report with notes', j.meta.quality && Array.isArray(j.meta.quality.notes));
-    check('v8.1 export has railways/markings/parts arrays', Array.isArray(j.railways) && Array.isArray(j.markings) && Array.isArray(j.buildingParts));
+    // v8.2 moved parts into the buildings list (part: true), so buildingParts only exists in v8.1 files.
+    check('v8.1+ export has railways/markings arrays, and parts in the right place for its version', Array.isArray(j.railways) && Array.isArray(j.markings) && (/v8\.1$/.test(j.meta.generator) ? Array.isArray(j.buildingParts) : !('buildingParts' in j)));
     check('v8.1 every building has a roof shape and says if it is a guess', j.buildings.every(b => b.roofShape && /^(osm|guess)$/.test(b.roofShapeSource)));
   }
   // undo removes the tree

@@ -124,7 +124,7 @@
 // ======================================================================
 // PURE-START  (no browser or Leaflet code in here, so it can be tested on its own)
 // ======================================================================
-const FORMAT_VERSION = 1;
+const FORMAT_VERSION = 2;   // v8.2: matches the published kartmap v2 (all v2 additions are optional; v1 readers still work)
 
 // Fallbacks when OSM doesn't say how wide a road is (metres).
 const DEFAULT_ROAD_WIDTH = {
@@ -194,12 +194,12 @@ function buildingHeight(t) {
 const PROP_TAGS = {
   natural: /^(tree|rock|stone|shrub|tree_stump)$/,
   highway: /^(street_lamp|traffic_signals|stop|give_way|bus_stop|speed_camera|milestone)$/,   // crossings are road markings (v8.1)
-  amenity: /^(bench|waste_basket|recycling|fountain|drinking_water|bicycle_parking|post_box|telephone|vending_machine|clock|shelter|bbq|charging_station|parcel_locker)$/,
-  leisure: /^(picnic_table|fitness_station|firepit|outdoor_seating)$/,
+  amenity: /^(bench|waste_basket|recycling|fountain|drinking_water|bicycle_parking|post_box|telephone|vending_machine|clock|shelter|bbq|charging_station|parcel_locker|toilets|parking_meter|cafe|restaurant|fast_food|ice_cream|bar|pub)$/,   // eateries = outdoor tables (the game draws them)
+  leisure: /^(picnic_table|fitness_station|firepit|outdoor_seating|playground|bandstand)$/,
   playground: /./,
   tourism: /^(artwork|information|viewpoint|picnic_site)$/,
   historic: /./,
-  man_made: /^(flagpole|mast|tower|chimney|street_cabinet|surveillance|obelisk|crane|water_tap|antenna|lamp|water_tower|storage_tank)$/,
+  man_made: /^(flagpole|mast|tower|chimney|street_cabinet|surveillance|obelisk|crane|water_tap|antenna|lamp|water_tower|storage_tank|lighthouse)$/,
   barrier: /^(bollard|gate|lift_gate|block|cycle_barrier|stile|turnstile|planter|swing_gate)$/,
   power: /^(pole|tower)$/,
   emergency: /^(fire_hydrant|phone|defibrillator)$/,
@@ -232,6 +232,9 @@ const LANDMARK_TAGS = {
 // Returns the landmark "kind" if this element is a landmark, else null. Unnamed things never are.
 function extractLandmark(t) {
   if (!t.name) return null;
+  // Most specific first (v8.2): the game builds a Ferris wheel for big_wheel, sculptures for statue/sculpture…
+  if (t.attraction) return t.attraction;
+  if (t.tourism === 'artwork' && t.artwork_type) return t.artwork_type;
   for (const [key, re] of Object.entries(LANDMARK_TAGS)) if (t[key] && re.test(t[key])) return t[key];
   // A Wikipedia/Wikidata link counts, except on shops and eateries: there it's usually the
   // brand's page (live test found "Max Brenner Chocolate Bar" listed as a landmark).
@@ -254,6 +257,8 @@ function buildingLooks(t) {
   if (t['roof:colour']) out.roofColour = t['roof:colour'];
   if (t['building:colour']) out.colour = t['building:colour'];
   if (t['building:material']) out.material = t['building:material'];
+  if (t['roof:material']) out.roofMaterial = t['roof:material'];
+  const rh = parseNum(t['roof:height']); if (rh) out.roofHeight = rh;
   const lv = parseNum(t['building:levels']); if (lv) out.levels = lv;
   const mh = parseNum(t.min_height); if (mh) out.minHeight = mh;   // e.g. a walkway raised off the ground
   const ml = parseNum(t['building:min_level']); if (!mh && ml) out.minHeight = round2(ml * 3);   // starts at this floor
@@ -268,6 +273,7 @@ function roadExtras(t) {
   if (isFinite(layer) && layer !== 0) out.layer = layer;
   if (t.surface) out.surface = t.surface;
   const lanes = parseNum(t.lanes); if (lanes) out.lanes = lanes;
+  if (t.lit === 'yes') out.lit = true;   // v8.2: street lighting
   // v8.1: one-way, footpaths, crossings, slope direction
   if (/^(yes|1|true)$/.test(t.oneway || '')) out.oneway = true;
   else if (/^(-1|reverse)$/.test(t.oneway || '')) out.oneway = 'reverse';   // one-way against the drawing direction
@@ -470,7 +476,10 @@ function treeInfo(t) {
   const out = {};
   const sci = String(t.species || t.genus || t.taxon || '').trim();
   const en = String(t['species:en'] || t['taxon:en'] || '').toLowerCase();
-  if (sci) out.species = sci;
+  if (t.species || (!t.genus && t.taxon)) out.species = String(t.species || t.taxon).trim();
+  if (t.genus) out.genus = String(t.genus).trim();
+  if (t.leaf_type) out.leafType = t.leaf_type;
+  if (t.leaf_cycle) out.leafCycle = t.leaf_cycle;
   for (const [type, re] of TREE_GROUPS) if (re.test(sci)) { out.treeType = type; break; }
   if (!out.treeType) {
     if (/palm/.test(en)) out.treeType = 'palm';
@@ -784,7 +793,7 @@ function findShortcuts(roads, cl, closed, width) {
 function buildOutput(data, o) {
   const origin = o.route[0];
   const P = makeProjector(origin[0], origin[1]);
-  const res = { roads: [], buildings: [], buildingParts: [], areas: [], waterways: [], barriers: [], railways: [], points: [], markings: [] };
+  const res = { roads: [], buildings: [], areas: [], waterways: [], barriers: [], railways: [], points: [], markings: [] };
   const previewOf = new Map();   // id -> preview item, so flags found later (e.g. on the track) can colour it
   const preview = [];
   const landmarkCands = [];
@@ -843,9 +852,10 @@ function buildOutput(data, o) {
   // Building parts (v8.1): pieces of one building with their own heights, e.g. a tower on a podium.
   const addPart = (id, t, name, footprint, holes) => {
     const [height, heightSource] = buildingHeight(t);
-    const part = { id, part: t['building:part'], name, height, heightSource, footprint, ...buildingLooks(t) };
+    // v8.2: parts sit in the buildings list with part: true (the layout the game's loader reads).
+    const part = { id, kind: t['building:part'], part: true, name, height, heightSource, footprint, ...buildingLooks(t) };
     if (holes && holes.length) part.holes = holes;
-    res.buildingParts.push(part);
+    res.buildings.push(part);
     footprint.forEach(grow);
     const pv = { cat: 'part', xy: [footprint, ...(holes || [])] };
     preview.push(pv); previewOf.set(id, pv);
@@ -872,6 +882,7 @@ function buildOutput(data, o) {
         const pt = { id: 'n' + el.id, kind: prop.kind, group: prop.group, source: 'osm', pos };
         if (name) pt.name = name;
         if (prop.kind === 'tree') Object.assign(pt, treeInfo(t));
+        if (t.artwork_type) pt.artworkType = t.artwork_type;
         res.points.push(pt);
         const pv = { cat: 'point', kind: prop.kind, xy: pos };
         preview.push(pv); previewOf.set(pt.id, pv);
@@ -925,7 +936,7 @@ function buildOutput(data, o) {
       const ex = roadExtras(t);
       const rail = { id, kind: t.railway, points: xy };
       if (name) rail.name = name;
-      for (const k of ['bridge', 'tunnel', 'layer']) if (ex[k] !== undefined) rail[k] = ex[k];
+      for (const k of ['bridge', 'tunnel', 'layer', 'lit']) if (ex[k] !== undefined) rail[k] = ex[k];
       if (t.electrified && t.electrified !== 'no') rail.electrified = true;
       res.railways.push(rail);
       xy.forEach(grow);
@@ -937,6 +948,7 @@ function buildOutput(data, o) {
       if (name) bar.name = name;
       const h = parseNum(t.height); if (h) bar.height = h;
       if (t.material) bar.material = t.material;
+      if (t.colour) bar.colour = t.colour;
       res.barriers.push(bar);
       xy.forEach(grow);
       const pv = { cat: 'barrier', xy };
@@ -947,6 +959,12 @@ function buildOutput(data, o) {
       res.roads.push({ id, kind: t.highway, name, width, widthSource, points: xy, ...extras });
       xy.forEach(grow);
       preview.push({ cat: 'road', kind: t.highway, bridge: !!extras.bridge, tunnel: !!extras.tunnel, xy });
+    } else if (t.man_made && !closed && /^(pier|breakwater|groyne)$/.test(t.man_made)) {
+      // v8.2: a pier or breakwater mapped as a line becomes a path the game can draw.
+      const w = parseNum(t.width);
+      res.roads.push({ id, kind: t.man_made, name, width: w || 4, widthSource: w ? 'osm' : 'default', points: xy, ...roadExtras(t) });
+      xy.forEach(grow);
+      preview.push({ cat: 'road', kind: 'footway', xy });
     } else if (t.waterway && !closed) {
       res.waterways.push({ id, kind: t.waterway, name, points: xy });
       xy.forEach(grow);
@@ -963,19 +981,20 @@ function buildOutput(data, o) {
   // Parts: link each to the building it sits in. Parts carry the real shape; the parent's outline
   // is then just its ground footprint.
   const bCent = res.buildings.map(b => centroid(b.footprint));
-  for (const part of res.buildingParts) {
+  const wholes = res.buildings.filter(b => !b.part);
+  for (const part of res.buildings.filter(b => b.part)) {
     const c = centroid(part.footprint);
-    const host = res.buildings.find(b => pointInPoly(c, b.footprint));
+    const host = wholes.find(b => pointInPoly(c, b.footprint));
     if (host) { part.parent = host.id; host.hasParts = true; }
   }
   // Smarter height guesses: an unmeasured building takes the typical (median) height of at least
   // 3 measured buildings of the same type within 150 m. Measured heights are never changed.
   const measured = h => h === 'osm' || h === 'levels' || h === 'lidar';
   res.buildings.forEach((b, i) => {
-    if (b.heightSource !== 'default') return;
+    if (b.part || b.heightSource !== 'default') return;
     const near = [];
     res.buildings.forEach((o2, j) => {
-      if (j === i || o2.kind !== b.kind || !measured(o2.heightSource)) return;
+      if (j === i || o2.part || o2.kind !== b.kind || !measured(o2.heightSource)) return;
       if (Math.hypot(bCent[j][0] - bCent[i][0], bCent[j][1] - bCent[i][1]) <= 150) near.push(o2.height);
     });
     if (near.length >= 3) {
@@ -985,7 +1004,7 @@ function buildOutput(data, o) {
     }
   });
   // Roof shapes: mapped ones are marked 'osm', the rest get a guess marked 'guess'.
-  for (const b of res.buildings.concat(res.buildingParts)) {
+  for (const b of res.buildings) {
     if (b.roofShape) b.roofShapeSource = 'osm';
     else { b.roofShape = b.part ? 'flat' : guessRoof(b.kind, polygonArea(b.footprint), b.height); b.roofShapeSource = 'guess'; }
   }
@@ -998,7 +1017,6 @@ function buildOutput(data, o) {
     if (d <= half) { obj.onTrack = true; const pv = previewOf.get(obj.id); if (pv) pv.onTrack = true; }
   };
   res.buildings.forEach(b => flag(b, b.footprint, true));
-  res.buildingParts.forEach(b => flag(b, b.footprint, true));
   res.barriers.forEach(b => flag(b, b.points, false));
   res.railways.forEach(r => flag(r, r.points, false));
   res.points.forEach(p => flag(p, [p.pos], false));
@@ -1015,10 +1033,10 @@ function buildOutput(data, o) {
     race.shortcuts.forEach(s => preview.push({ cat: 'shortcut', xy: s.points, saving: s.saving }));
   }
   // Quality report: how much is real vs guessed, and what needs fixing by hand.
-  const nb = res.buildings.length;
+  const nb = wholes.length;   // parts are pieces of buildings, so they're left out of the percentages
   const pct = n => nb ? Math.round(1000 * n / nb) / 10 : 0;
-  const hMeasured = res.buildings.filter(b => measured(b.heightSource)).length;
-  const hEstimated = res.buildings.filter(b => b.heightSource === 'estimated').length;
+  const hMeasured = wholes.filter(b => measured(b.heightSource)).length;
+  const hEstimated = wholes.filter(b => b.heightSource === 'estimated').length;
   const onTrackB = res.buildings.filter(b => b.onTrack);
   const trees = res.points.filter(p => p.kind === 'tree');
   const notes = [];
@@ -1037,7 +1055,7 @@ function buildOutput(data, o) {
   }
   const quality = {
     heights: { measured: pct(hMeasured), estimated: pct(hEstimated), default: Math.round((100 - pct(hMeasured) - pct(hEstimated)) * 10) / 10 },
-    roofShapes: { mapped: pct(res.buildings.filter(b => b.roofShapeSource === 'osm').length), guessed: pct(res.buildings.filter(b => b.roofShapeSource === 'guess').length) },
+    roofShapes: { mapped: pct(wholes.filter(b => b.roofShapeSource === 'osm').length), guessed: pct(wholes.filter(b => b.roofShapeSource === 'guess').length) },
     buildingsOnTrack: onTrackB.map(b => b.id),
     barriersOnTrack: barOn, propsOnTrack: propOn,
     treesTyped: trees.length ? Math.round(1000 * trees.filter(t => t.treeType).length / trees.length) / 10 : 0,
@@ -1060,7 +1078,7 @@ function buildOutput(data, o) {
     meta: {
       name: o.name || 'route',
       generated: o.now || new Date().toISOString(),
-      generator: 'kart-map-scanner v8.1',
+      generator: 'kart-map-scanner v8.2',
       origin: { lat: origin[0], lon: origin[1] },
       units: 'metres',
       axes: 'x = east, y = north. In Godot: Vector3(x, 0, -y)',
@@ -1070,13 +1088,13 @@ function buildOutput(data, o) {
       elevation: null,
       attribution: '© OpenStreetMap contributors, ODbL',
       counts: {
-        roads: res.roads.length, buildings: res.buildings.length,
+        roads: res.roads.length, buildings: wholes.length,
         buildingsWithRealHeight: hMeasured,
         areas: res.areas.length, waterways: res.waterways.length, points: res.points.length,
         manualTrees: 0, skippedIncompleteShapes: skipped,
         barriers: res.barriers.length, landmarks: landmarks.length,
         bridges: res.roads.filter(r => r.bridge).length, tunnels: res.roads.filter(r => r.tunnel).length,
-        buildingParts: res.buildingParts.length, railways: res.railways.length, markings: res.markings.length,
+        buildingParts: res.buildings.length - wholes.length, railways: res.railways.length, markings: res.markings.length,
         shortcuts: race ? race.shortcuts.length : 0
       },
       quality
@@ -1098,12 +1116,34 @@ function buildOutput(data, o) {
     barriers: res.barriers,
     points: res.points,
     landmarks,
-    buildingParts: res.buildingParts,
     railways: res.railways,
     markings: res.markings,
     race
   };
   return { out, preview };
+}
+
+// v8.2: what the game's Godot loader (brisbane-kart: kartmap.gd, kartmap_scenery.gd) relies on.
+// Returns a list of problems; empty = the file is safe to hand to the game.
+function loaderContractProblems(out) {
+  const p = [];
+  const isPt = q => Array.isArray(q) && q.length === 2 && isFinite(q[0]) && isFinite(q[1]);
+  if (out.format !== 'kartmap') p.push('format is not "kartmap"');
+  if (!out.route || !Array.isArray(out.route.points) || out.route.points.length < 2 || !out.route.points.every(isPt)) p.push('route.points missing or invalid');
+  if (!(out.route && out.route.width > 0)) p.push('route.width missing');
+  for (const k of ['roads', 'buildings', 'areas', 'waterways', 'points']) if (!Array.isArray(out[k])) p.push(k + ' is not a list');
+  const ids = new Set((out.buildings || []).map(b => b.id));
+  for (const b of out.buildings || []) {
+    if (!Array.isArray(b.footprint) || b.footprint.length < 3 || !b.footprint.every(isPt)) { p.push('building ' + b.id + ' has a bad footprint'); continue; }
+    if (!(b.height > 0) || typeof b.heightSource !== 'string') p.push('building ' + b.id + ' has no height/heightSource');
+    if (b.hasParts && !(out.buildings || []).some(q => q.part && q.parent === b.id)) p.push('building ' + b.id + ' says it has parts but none are in the buildings list (it would vanish in the game)');
+    if (b.part && b.parent && !ids.has(b.parent)) p.push('part ' + b.id + ' points at a missing building');
+  }
+  for (const r of (out.roads || []).concat(out.waterways || [], out.barriers || [], out.railways || [])) if (!Array.isArray(r.points) || r.points.length < 2 || !r.points.every(isPt)) p.push((r.id || '?') + ' has a bad line');
+  for (const a of out.areas || []) if (!Array.isArray(a.polygon) || a.polygon.length < 3) p.push('area ' + a.id + ' has a bad polygon');
+  for (const q of out.points || []) if (!isPt(q.pos) || !q.kind) p.push('point ' + q.id + ' has no position/kind');
+  for (const l of out.landmarks || []) if (!isPt(l.pos) && !Array.isArray(l.footprint)) p.push('landmark ' + (l.name || l.id) + ' has no position');
+  return p;
 }
 
 // Adds your hand-placed trees to a scan result at export time, so placing trees never
@@ -1610,7 +1650,9 @@ async function scan() {
   showStats();
   els.exportBtn.disabled = false;
   const partial = data.remark && /error|timed out|out of memory/i.test(data.remark);
+  const contract = loaderContractProblems(out);   // v8.2: would the game's loader choke on this file?
   if (partial) setStatus('Scan finished but the server warned the data may be incomplete: ' + data.remark, 'warn');
+  else if (contract.length) setStatus(`Scan done, but ${contract.length} thing(s) in this file won't work in the game: ${contract.slice(0, 3).join('; ')}${contract.length > 3 ? '…' : ''}`, 'warn');
   else setStatus('Scan done. Check the preview, then Export JSON.', 'ok');
 }
 els.scanBtn.onclick = scan;
