@@ -20,6 +20,6 @@ function loadScannerLib(html) {
   const start = html.indexOf('// PURE-START'), end = html.indexOf('// PURE-END');
   if (start < 0 || end < 0) throw new Error('PURE-START / PURE-END markers not found');
   const code = html.slice(html.lastIndexOf('\n', start), end);
-  const names = [...code.matchAll(/^function\s+([A-Za-z0-9_]+)/gm)].map(m => m[1]);
+  const names = [...code.matchAll(/^(?:async )?function\s+([A-Za-z0-9_]+)/gm)].map(m => m[1]);
   return new Function(code + '\nreturn {' + names.join(',') + '};')();
 }

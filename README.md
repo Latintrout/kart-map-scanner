@@ -14,8 +14,21 @@ Draw a route on a real map, scan the area along it from free OpenStreetMap data,
   - fences and walls
   - trees and small props (benches, lamps, picnic tables, statues…)
   - a list of named landmarks to model by hand
+  - extra buildings and heights from Overture Maps where OSM has gaps (on by default; heights from Microsoft's machine-learning model are marked as guesses)
+- **Extras after a scan (optional, no login or key):**
+  - *Sample colours*: reads each roof's and area's real colour from Queensland aerial photos.
+  - *Find landmark photos*: links up to 3 Wikimedia Commons reference photos per landmark.
+  - *Export ground image*: a top-down PNG (1 m per pixel) for the game's ground texture.
 - **Place trees by hand** on the satellite view where the map data has none.
-- **Export / Load** the level file. The format is documented in `kartmap-format.md` (kept with the game project).
+- **Draw missing buildings** (Building mode): click the corners, type a height.
+- **Race direction and start**: reverse the lap or click where the start line goes. Arrows and a 🏁 show the way round.
+- **Saved tracks**: keep several tracks in the browser, and back them all up to one file.
+- **Share link**: one link opens your exact track on another device (PC → phone). Also Redo (Ctrl+Y), a 📏 measuring tape on the map, and a short "How it works" card (the ? button).
+- **Works on a phone**: map on top, panel below (the ▲/▼ button gives either more room). Draw with one finger, pinch with two, long-press to delete. "Show problem" jumps to anything sitting on the track.
+- **Ground heights** from Queensland's free LiDAR terrain model: hills along the track and under every building, total climb and steepest slope, and a terrain file for the game.
+- **Minimap and track card**: a HUD minimap PNG (with the numbers to place karts on it), a 1200×630 track card with stats and the height profile, and a hover-able height-along-the-lap chart.
+- **3D preview** after a scan: orbit around the level, "Fly the lap" at kart height, switch on retro pixels, or save a rough `.glb` model.
+- **Export / Load** the level file. The format is documented in `docs/kartmap-format.md`.
 
 ## Tests
 
@@ -27,4 +40,4 @@ Use the local launcher package (`start-kart-scanner.bat`). It serves the page at
 
 ## Credits
 
-Map data © OpenStreetMap contributors (ODbL). Map tiles © Esri / OpenTopoMap / OpenStreetMap. Road snapping by the OSRM demo server. Search by Nominatim.
+Map data © OpenStreetMap contributors (ODbL). Map tiles © Esri / OpenTopoMap / OpenStreetMap. Road snapping by the OSRM demo server. Search by Nominatim. Building gaps from Overture Maps (ODbL). Colours from Queensland aerial imagery: Includes material © State of Queensland (DNRMMRRD); © Planet Labs Netherlands (CC BY-SA). Landmark photos from Wikimedia Commons (each photo's own licence). 3D preview by three.js (MIT). Ground heights: Queensland DEM, © State of Queensland and others (CC BY-SA).

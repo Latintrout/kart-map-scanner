@@ -44,7 +44,7 @@ function runScannerTests(lib) {
   check('v1 route length 358.31 m', r1.route.length === 358.31, r1.route.length);
   check('v1 route points in metres', same(r1.route.points, [[0, 0], [0, 111.32], [98.65, 111.32], [0, 0]]), JSON.stringify(r1.route.points));
   check('v1 export is valid JSON', (() => { try { JSON.parse(lib.prettyJSON(r1)); return true; } catch (e) { return false; } })());
-  check('v1 format marker', r1.format === 'kartmap' && r1.version === 1);
+  check('format marker (version 2 since v8.2, matching the published kartmap v2)', r1.format === 'kartmap' && r1.version === 2);
 
   // ---------- v4/v5: query ----------
   const q = lib.buildQuery(route, 100);
@@ -113,6 +113,22 @@ function runScannerTests(lib) {
   else check('v8 functions present', false, 'extractLandmark not found (running against v7?)');
   if (has('smoothLine')) runV81(lib, check, same);
   else check('v8.1 functions present', false, 'smoothLine not found (running against v8?)');
+  if (has('loaderContractProblems')) runV82(lib, check, same);
+  else check('v8.2 functions present', false, 'loaderContractProblems not found (running against v8.1?)');
+  if (has('mergeOverture', 'rankNearbyPhotos')) runV83(lib, check, same);
+  else check('v8.3 functions present', false, 'mergeOverture not found (running against v8.2?)');
+  if (has('orientRoute')) runV9a(lib, check, same);
+  else check('v9a functions present', false, 'orientRoute not found (running against v8.3?)');
+  if (has('problemSpots')) runV9b(lib, check, same);
+  else check('v9b functions present', false, 'problemSpots not found (running against v9a?)');
+  if (has('scene3dPlan')) runV11(lib, check, same);
+  else check('v11 functions present', false, 'scene3dPlan not found (running against v9b?)');
+  if (has('applyElevation')) runV12a(lib, check, same);
+  else check('v12a functions present', false, 'applyElevation not found (running against v11?)');
+  if (has('trackForLink')) runV12b(lib, check, same);
+  else check('v12b functions present', false, 'trackForLink not found (running against v12a?)');
+  if (has('minimapPlan')) runV12c(lib, check, same);
+  else check('v12c functions present', false, 'minimapPlan not found (running against v12b?)');
 
   return results;
 }
@@ -165,7 +181,7 @@ function runV8(lib, check, same) {
   check('v8 public artworks are landmarks', lib.extractLandmark({ name: 'Sisters', tourism: 'artwork' }) === 'artwork');
   check('v8 landmark positions are in metres', lm.every(l => Array.isArray(l.pos) && l.pos.length === 2 && isFinite(l.pos[0])));
   check('v8 new counts present', out.meta.counts.barriers === 2 && out.meta.counts.landmarks === lm.length && out.meta.counts.bridges === 1 && out.meta.counts.tunnels === 1, JSON.stringify(out.meta.counts));
-  check('v8 still format version 1', out.version === 1);
+  check('v8 fields stay optional (format kartmap)', out.format === 'kartmap');
 
   // Long-route reservation scaling
   const r0 = lib.serverBudget(2000, 100), r1 = lib.serverBudget(2100, 300), r2 = lib.serverBudget(10000, 300), r3 = lib.serverBudget(200000, 300);
@@ -214,9 +230,12 @@ function runV81(lib, check, same) {
     { type: 'way', id: 31, tags: { highway: 'steps', incline: 'up' }, geometry: [off(100, 0), off(100, -10)] },
     { type: 'way', id: 32, tags: { highway: 'residential', oneway: 'yes', sidewalk: 'both' }, geometry: [off(0, 0), off(200, 0)] },
     { type: 'way', id: 33, tags: { highway: 'footway', footway: 'crossing', crossing: 'marked', 'crossing:markings': 'zebra' }, geometry: [off(50, -4), off(50, 4)] },
-    // shortcut path cutting the south-east corner diagonally: from (40,0) on the south side to (200,160) on
-    // the east side. Track distance 320 m, path 226 m: saves ~94 m.
-    { type: 'way', id: 41, tags: { highway: 'footway' }, geometry: [off(40, 0), off(120, 80), off(200, 160)] },
+    // shortcut path cutting the south-east corner: from (120,0) on the south side to (200,80) on the east
+    // side. Track distance 160 m, path 113 m: saves ~47 m.
+    { type: 'way', id: 41, tags: { highway: 'footway' }, geometry: [off(120, 0), off(160, 40), off(200, 80)] },
+    // a long diagonal that skips 320 m of an ~790 m lap (40%): that's cheating the lap, not a shortcut
+    // (live test 2026-10-15 found paths like this "saving" 900 m at South Bank).
+    { type: 'way', id: 43, tags: { highway: 'footway' }, geometry: [off(30, 0), off(115, 85), off(200, 170)] },
     // a path that just runs along the track (not a shortcut)
     { type: 'way', id: 42, tags: { highway: 'footway' }, geometry: [off(0, 205), off(100, 205), off(200, 205)] },
     // fence crossing the track, fence far away
@@ -240,10 +259,10 @@ function runV81(lib, check, same) {
   const B = id => out.buildings.find(b => b.id === id);
 
   // --- building parts ---
-  const part = (out.buildingParts || []).find(p => p.id === 'w2');
-  check('v8.1 building parts exported (30 levels, starts at level 2)', part && part.height === 90 && part.minHeight === 6, JSON.stringify(part));
+  // Changed in v8.2: parts live in the buildings list with part: true (the layout the game's loader reads).
+  const part = out.buildings.find(p => p.id === 'w2');
+  check('v8.1 building parts exported (30 levels, starts at level 2)', part && part.part === true && part.height === 90 && part.minHeight === 6, JSON.stringify(part));
   check('v8.1 part knows its parent building, parent knows it has parts', part && part.parent === 'w1' && B('w1').hasParts === true);
-  check('v8.1 building parts are not counted as buildings', !out.buildings.some(b => b.id === 'w2'));
 
   // --- smarter heights ---
   check('v8.1 unmeasured house next to measured ones gets their typical height (estimated)', B('w14').heightSource === 'estimated' && B('w14').height === 6, JSON.stringify([B('w14').height, B('w14').heightSource]));
@@ -307,13 +326,14 @@ function runV81(lib, check, same) {
   check('v8.1 checkpoints: 8 evenly spaced, first at the start', race && race.checkpoints.length === 8 && race.checkpoints[0].at === 0 && Math.abs(race.checkpoints[1].at - cl.length / 8) < 1, race && race.checkpoints.map(c => c.at).join(','));
   check('v8.1 start grid: 8 slots behind the start line, inside the track', race && race.grid.length === 8 && race.grid.every(s => s.trackDist <= 4.01 && s.behind > 0), JSON.stringify(race && race.grid.map(s => [s.behind, s.trackDist])));
   const sc = (race && race.shortcuts) || [];
-  check('v8.1 shortcut finder finds the corner-cutting path (saves ~90 m)', sc.length >= 1 && sc[0].via.includes('w41') && sc[0].saving > 60 && sc[0].saving < 100, JSON.stringify(sc.map(s => [s.via, s.saving])));
+  check('v8.1 shortcut finder finds the corner-cutting path (saves ~45 m)', sc.length >= 1 && sc.some(s => s.via.includes('w41') && s.saving > 30 && s.saving < 60), JSON.stringify(sc.map(s => [s.via, s.saving])));
   check('v8.1 a path that only runs alongside the track is not a shortcut (either direction)', !sc.some(s => s.via.includes('w42')));
-  check('v8.1 shortcuts never skip more than half a lap (that would be driving backwards)', sc.every(s => s.skips <= cl.length / 2 + 1));
+  check('v8.2 shortcuts never skip more than a quarter of the lap (max 400 m, min limit 150 m)', sc.every(s => s.skips <= Math.max(150, Math.min(400, cl.length / 4)) + 1), JSON.stringify(sc.map(s => s.skips)));
+  check('v8.2 a path skipping 40% of the lap is not offered as a shortcut', !sc.some(s => s.via.includes('w43')));
 
   // --- guesses are marked ---
   check('v8.1 every building height says where it came from', out.buildings.every(b => ['osm', 'levels', 'estimated', 'default'].includes(b.heightSource)));
-  check('v8.1 still format version 1, generator v8.1', out.version === 1 && out.meta.generator === 'kart-map-scanner v8.1');
+  check('v8.1+ generator tag present', /^kart-map-scanner v(8\.\d+|\d+[a-z]?)$/.test(out.meta.generator), out.meta.generator);
 
   // --- speed: a South-Bank-sized scan must stay quick ---
   const big = [];
@@ -326,4 +346,361 @@ function runV81(lib, check, same) {
   check('v8.1 big scan (1,500 buildings, 300 paths, 1,200 props) processes in under 3 s', ms < 3000, ms + ' ms');
 }
 
+// v8.2: the extras from the other session's "kartmap v2", and what the game's Godot loader
+// (brisbane-kart, game/scripts/kartmap_scenery.gd) reads.
+function runV82(lib, check, same) {
+  const la = -27.48, lo = 153.02;
+  const off = (dx, dy) => ({ lat: la + dy / 111320, lon: lo + dx / (111320 * Math.cos(la * Math.PI / 180)) });
+  const llOff = (dx, dy) => { const o = off(dx, dy); return [o.lat, o.lon]; };
+  const rect = (x, y, w, h) => [off(x, y), off(x + w, y), off(x + w, y + h), off(x, y + h), off(x, y)];
+  const node = (id, dx, dy, tags) => ({ type: 'node', id, lat: off(dx, dy).lat, lon: off(dx, dy).lon, tags });
+  const loop = [llOff(0, 0), llOff(200, 0), llOff(200, 200), llOff(0, 200), llOff(0, 0)];
+  const els = [
+    { type: 'way', id: 1, tags: { building: 'yes', 'roof:material': 'metal', 'roof:height': '2.5', 'roof:shape': 'gabled' }, geometry: rect(30, 30, 20, 20) },
+    { type: 'way', id: 2, tags: { building: 'yes' }, geometry: rect(100, 30, 40, 40) },
+    { type: 'way', id: 3, tags: { 'building:part': 'yes', 'building:levels': '20' }, geometry: rect(110, 40, 15, 15) },
+    { type: 'way', id: 4, tags: { highway: 'footway', lit: 'yes' }, geometry: [off(0, 50), off(50, 50)] },
+    { type: 'way', id: 5, tags: { man_made: 'pier', name: 'Jetty' }, geometry: [off(-20, 100), off(-60, 100)] },
+    { type: 'way', id: 6, tags: { barrier: 'wall', colour: 'sandstone', material: 'stone' }, geometry: [off(0, 150), off(30, 150)] },
+    { type: 'way', id: 7, tags: { railway: 'light_rail', lit: 'yes' }, geometry: [off(-50, -20), off(250, -20)] },
+    node(10, 60, 100, { tourism: 'attraction', attraction: 'big_wheel', name: 'The Wheel of Brisbane' }),
+    node(11, 70, 100, { tourism: 'artwork', artwork_type: 'statue', name: 'Mates' }),
+    node(12, 80, 100, { amenity: 'cafe', name: 'Some Cafe', wikidata: 'Q1' }),
+    node(13, 90, 100, { amenity: 'toilets' }),
+    node(14, 95, 100, { amenity: 'parking_meter' }),
+    node(15, 99, 100, { leisure: 'playground' }),
+    node(16, 10, 60, { natural: 'tree', genus: 'Jacaranda', species: 'Jacaranda mimosifolia', leaf_type: 'broadleaved', leaf_cycle: 'deciduous' }),
+    node(17, 12, 60, { natural: 'tree', genus: 'Archontophoenix' })
+  ];
+  const out = lib.buildOutput({ elements: els }, { route: loop, waypoints: loop.slice(0, 4), radius: 300, width: 8, loop: true, snapped: false, name: 't', now: 'X' }).out;
+  const B = id => out.buildings.find(b => b.id === id);
+  check('v8.2 roof material and roof height kept', B('w1').roofMaterial === 'metal' && B('w1').roofHeight === 2.5);
+  check('v8.2 street lighting kept on paths and railways', out.roads.find(r => r.id === 'w4').lit === true && out.railways.find(r => r.id === 'w7').lit === true);
+  const pier = out.roads.find(r => r.id === 'w5');
+  check('v8.2 piers come in as walkable paths (4 m default width)', pier && pier.kind === 'pier' && pier.width === 4 && pier.widthSource === 'default');
+  check('v8.2 fence/wall colour kept', out.barriers.find(b => b.id === 'w6').colour === 'sandstone');
+  const tree = id => out.points.find(p => p.id === id);
+  check('v8.2 tree genus, species, leaf type and leaf cycle kept separately',
+    tree('n16').genus === 'Jacaranda' && tree('n16').species === 'Jacaranda mimosifolia' && tree('n16').leafType === 'broadleaved' && tree('n16').leafCycle === 'deciduous', JSON.stringify(tree('n16')));
+  check('v8.2 genus-only tree still typed (palm)', tree('n17').genus === 'Archontophoenix' && tree('n17').treeType === 'palm' && !tree('n17').species);
+  check('v8.2 artwork props say what kind of artwork', tree('n11').kind === 'artwork' && tree('n11').artworkType === 'statue');
+  const lm = name => out.landmarks.find(l => l.name === name);
+  check('v8.2 Wheel of Brisbane landmark kind is big_wheel (the loader builds a Ferris wheel for it)', lm('The Wheel of Brisbane') && lm('The Wheel of Brisbane').kind === 'big_wheel');
+  check('v8.2 artwork landmark kind is its artwork type (statue)', lm('Mates') && lm('Mates').kind === 'statue');
+  check('v8.2 cafés, toilets, parking meters, playgrounds are props again (the loader draws them)',
+    ['cafe', 'toilets', 'parking_meter', 'playground'].every(k => out.points.some(p => p.kind === k)));
+  check('v8.2 a café is still never a landmark', !lm('Some Cafe'));
+  // live test 2026-10-15: a huge venue came through twice (as a building and as an area ~100+ m apart)
+  const dup = lib.buildOutput({ elements: [
+    { type: 'way', id: 901, tags: { building: 'yes', name: 'Big Venue', amenity: 'conference_centre' }, geometry: rect(0, 300, 120, 80) },
+    { type: 'way', id: 902, tags: { amenity: 'conference_centre', name: 'Big Venue' }, geometry: rect(150, 300, 200, 150) }
+  ] }, { route: loop, waypoints: loop.slice(0, 4), radius: 300, width: 8, loop: true, snapped: false, name: 't', now: 'X' }).out;
+  check('v8.2 the same landmark name within 300 m counts once (building version kept)', dup.landmarks.filter(l => l.name === 'Big Venue').length === 1 && dup.landmarks.find(l => l.name === 'Big Venue').ref === 'w901', JSON.stringify(dup.landmarks.map(l => [l.name, l.ref])));
+  const part = B('w3');
+  check('v8.2 building parts sit in the buildings list with part: true', part && part.part === true && part.parent === 'w2' && B('w2').hasParts === true && !('buildingParts' in out));
+  check('v8.2 parts are left out of the quality height percentages', out.meta.quality.heights.measured + out.meta.quality.heights.estimated + out.meta.quality.heights.default > 99.4);
+  check('v8.2 file says format version 2', out.version === 2);
+  const problems = lib.loaderContractProblems(out);
+  check('v8.2 file meets everything the game loader reads (contract check)', problems.length === 0, problems.join('; '));
+  // the contract check must actually catch problems
+  const broken = JSON.parse(JSON.stringify(out));
+  broken.buildings.find(b => b.id === 'w2').hasParts = true; broken.buildings = broken.buildings.filter(b => !b.part);
+  broken.landmarks[0].pos = undefined;
+  check('v8.2 contract check catches a building whose parts are missing, and a landmark with no position', lib.loaderContractProblems(broken).length >= 2);
+}
+
+// v8.3: Overture fill-in, aerial colours, ground image, landmark photos.
+function runV83(lib, check, same) {
+  const la = -27.61, lo = 153.13;
+  const off = (dx, dy) => ({ lat: la + dy / 111320, lon: lo + dx / (111320 * Math.cos(la * Math.PI / 180)) });
+  const llOff = (dx, dy) => { const o = off(dx, dy); return [o.lat, o.lon]; };
+  const rect = (x, y, w, h) => [off(x, y), off(x + w, y), off(x + w, y + h), off(x, y + h), off(x, y)];
+  const ringLL = (x, y, w, h) => rect(x, y, w, h).map(g => [g.lat, g.lon]);
+  const loop = [llOff(0, 0), llOff(200, 0), llOff(200, 200), llOff(0, 200), llOff(0, 0)];
+  const osm = { elements: [
+    { type: 'way', id: 101, tags: { building: 'house' }, geometry: rect(20, 20, 10, 10) },                       // no height in OSM
+    { type: 'way', id: 102, tags: { building: 'house', 'building:levels': '2' }, geometry: rect(40, 20, 10, 10) }, // has levels
+    { type: 'way', id: 103, tags: { building: 'house' }, geometry: rect(60, 20, 10, 10) }                          // no height, no Overture match
+  ] };
+  const ov = [
+    { id: 'o1', osmId: 'w101', height: 4.4, heightFrom: 'Microsoft ML Buildings', ring: ringLL(20, 20, 10, 10) },   // fills w101
+    { id: 'o2', osmId: 'w102', height: 9.9, heightFrom: 'OpenStreetMap', ring: ringLL(40, 20, 10, 10) },            // must NOT override levels
+    { id: 'o3', osmId: null, height: 3.9, heightFrom: 'Microsoft ML Buildings', cls: 'house', ring: ringLL(100, 100, 12, 9) }, // new building
+    { id: 'o4', osmId: null, height: 5, heightFrom: 'Microsoft ML Buildings', ring: ringLL(61, 21, 8, 8) },         // overlaps w103: skip
+    { id: 'o5', osmId: null, height: 3, heightFrom: 'Microsoft ML Buildings', isUnderground: true, ring: ringLL(150, 150, 10, 10) } // underground: skip
+  ];
+  const m = lib.mergeOverture(osm, ov);
+  check('v8.3 Overture merge reports what it did (1 height filled, 1 building added, 2 skipped)', m.stats.heightsFilled === 1 && m.stats.added === 1 && m.stats.skipped === 2, JSON.stringify(m.stats));
+  check('v8.3 Overture merge never changes the original scan data', !osm.elements[0].tags['overture:height'] && osm.elements.length === 3);
+  const out = lib.buildOutput(m.data, { route: loop, waypoints: loop.slice(0, 4), radius: 300, width: 8, loop: true, snapped: false, name: 't', now: 'X' }).out;
+  const B = id => out.buildings.find(b => b.id === id);
+  check('v8.3 missing OSM height filled from Overture, labelled as a machine estimate', B('w101').height === 4.4 && B('w101').heightSource === 'ml-estimate', JSON.stringify(B('w101')));
+  check('v8.3 mapped floors are never replaced by Overture', B('w102').height === 6 && B('w102').heightSource === 'levels');
+  const added = out.buildings.find(b => b.id === 'ov-o3');
+  check('v8.3 building missing from OSM added from Overture, with its estimated height', added && added.height === 3.9 && added.heightSource === 'ml-estimate' && added.kind === 'house' && added.source === 'overture', JSON.stringify(added));
+  check('v8.3 overlapping and underground Overture buildings are not added', !out.buildings.some(b => b.id === 'ov-o4' || b.id === 'ov-o5'));
+  check('v8.3 Overture heights from OSM are labelled overture, counted as measured',
+    lib.buildOutput(lib.mergeOverture({ elements: [osm.elements[0]] }, [{ id: 'x', osmId: 'w101', height: 7, heightFrom: 'OpenStreetMap', ring: ringLL(20, 20, 10, 10) }]).data,
+      { route: loop, waypoints: [], radius: 300, width: 8, loop: true, snapped: false, name: 't', now: 'X' }).out.buildings[0].heightSource === 'overture');
+  check('v8.3 quality report counts machine estimates as estimated, not measured', out.meta.quality.heights.estimated > 0);
+  check('v8.3 Overture credit added when used', /Overture/.test(lib.attributionFor({ overture: true, imagery: false })) && /OpenStreetMap/.test(lib.attributionFor({})));
+  const f = lib.overtureFeature({ id: 'abc', height: 4.2, '@height_source': 'Microsoft ML Buildings', sources: '[{"dataset":"OpenStreetMap","record_id":"w584365517@2"}]', class: 'house' }, [[[153.1, -27.6], [153.1001, -27.6], [153.1001, -27.6001], [153.1, -27.6]]]);
+  check('v8.3 Overture tile feature read correctly (OSM id from record_id, ring in lat/lon)', f.osmId === 'w584365517' && f.height === 4.2 && f.heightFrom === 'Microsoft ML Buildings' && f.ring[0][0] === -27.6 && f.ring[0][1] === 153.1 && f.cls === 'house', JSON.stringify(f));
+  // Real South Bank tile shape: "@height_source" says OpenStreetMap, but the height entry in sources is Microsoft's ML model.
+  const f2 = lib.overtureFeature({ id: 'd', height: 4.343635559082031, '@height_source': 'OpenStreetMap', '@geometry_source': 'OpenStreetMap',
+    sources: '[{"dataset":"OpenStreetMap","record_id":"w103130220@3","property":""},{"dataset":"Microsoft ML Buildings","property":"/properties/height"}]' }, [[[153.1, -27.6], [153.1001, -27.6], [153.1001, -27.6001], [153.1, -27.6]]]);
+  const f3 = lib.overtureFeature({ id: 'e', height: 60, '@height_source': 'OpenStreetMap', sources: '[{"dataset":"OpenStreetMap","record_id":"w26253751@6","property":""}]' }, [[[153.1, -27.6], [153.1001, -27.6], [153.1001, -27.6001], [153.1, -27.6]]]);
+  check('v8.3 live-test fix: an ML height is labelled ML even when @height_source says OpenStreetMap', f2.heightFrom === 'Microsoft ML Buildings' && f2.osmId === 'w103130220' && f3.heightFrom === 'OpenStreetMap', f2.heightFrom + ' / ' + f3.heightFrom);
+
+  const ranked = lib.rankNearbyPhotos('Streets Beach', [{ title: 'File:Brisbane river.jpg', dist: 10 }, { title: 'File:Map.svg', dist: 5 }, { title: 'File:Streets Beach lagoon.jpg', dist: 80 }, { title: 'File:Ferry.JPG', dist: 40 }]);
+  check('v8.3 live-test fix: nearby photos naming the landmark come first, then nearest; no maps/svg', JSON.stringify(ranked) === JSON.stringify(['File:Streets Beach lagoon.jpg', 'File:Brisbane river.jpg', 'File:Ferry.JPG']), JSON.stringify(ranked));
+
+  // --- aerial colours ---
+  const tiles = lib.planImageTiles({ south: -27.49, west: 153.01, north: -27.47, east: 153.04 }, 1.0, 4096, 2048);
+  const cover = tiles.every(t => t.width <= 4096 && t.height <= 2048) &&
+    Math.min(...tiles.map(t => t.west)) <= 153.01 && Math.max(...tiles.map(t => t.east)) >= 153.04 && Math.min(...tiles.map(t => t.south)) <= -27.49 && Math.max(...tiles.map(t => t.north)) >= -27.47;
+  check('v8.3 aerial image requests stay within the server limit and cover the whole area', cover && tiles.length >= 1 && tiles.length <= 4, JSON.stringify(tiles.map(t => [t.width, t.height])));
+  // Live-test fix: the server keeps pixels square in degrees, so each tile's box must match its size exactly.
+  const sq = tiles.every(t => Math.abs((t.east - t.west) / t.width - (t.north - t.south) / t.height) < 1e-12);
+  check('v8.3 live-test fix: every aerial tile has square pixels in degrees (server would stretch it otherwise)', sq, JSON.stringify(tiles[0]));
+  // a fake 100x100 aerial image: left half red roof colour, right half green; a building on the left half
+  const W = 100, H = 100, data = new Uint8ClampedArray(W * H * 4);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const i = (y * W + x) * 4; if (x < 50) { data[i] = 180 + (x % 3); data[i + 1] = 60; data[i + 2] = 50; } else { data[i] = 70; data[i + 1] = 140; data[i + 2] = 60; } data[i + 3] = 255; }
+  const tile = { south: -27.611, west: 153.129, north: -27.609, east: 153.131 };
+  const midLon = (tile.west + tile.east) / 2;
+  const leftPoly = [[-27.6105, 153.1292], [-27.6105, midLon - 0.0002], [-27.6095, midLon - 0.0002], [-27.6095, 153.1292]];
+  const c = lib.medianColourInPolygon({ width: W, height: H, data }, tile, leftPoly);
+  check('v8.3 roof colour sampled from inside the building outline (median of the pixels)', c && c.hex === '#b53c32' && c.n >= 4, JSON.stringify(c));
+  check('v8.3 no colour when the outline is outside the image', lib.medianColourInPolygon({ width: W, height: H, data }, tile, [[-27.0, 153.0], [-27.0, 153.001], [-27.001, 153.001]]) === null);
+  const outC = JSON.parse(JSON.stringify(out));
+  const n = lib.applyColourSamples(outC, [{ box: tile, image: { width: W, height: H, data } }], (lat0, lon0) => lib.makeUnprojector(lat0, lon0));
+  check('v8.3 sampled colours stored separately from mapped ones (sampledRoofColour), with credit', typeof n.buildings === 'number' && outC.meta.imagery && /State of Queensland/.test(outC.meta.imagery.attribution) && /CC BY-SA/.test(outC.meta.imagery.licence));
+
+  // --- ground image ---
+  const plan = lib.groundImagePlan(out.meta.bbox, 1.0, 4096);
+  check('v8.3 ground image plan: size from the area, capped at 4096 px, south-west corner recorded', plan.width <= 4096 && plan.height <= 4096 && plan.width >= 1 && plan.metresPerPixel >= 1 && plan.minX === out.meta.bbox.minX, JSON.stringify(plan));
+  check('v8.3 ground colours: water blue, grass green, unknown falls back to ground', lib.groundColour('water') !== lib.groundColour('grass') && lib.groundColour('nothing-like-this') === lib.groundColour('ground'));
+  const order = ['residential', 'park', 'grass', 'swimming_pool'].sort((a, b) => lib.groundDrawOrder(a) - lib.groundDrawOrder(b));
+  check('v8.3 ground image draws zoning first, then parks/grass, then water on top', order[0] === 'residential' && order.at(-1) === 'swimming_pool', order.join(','));
+
+  // --- landmark photos ---
+  const ph = lib.parseCommonsImageInfo({ query: { pages: { 1: { title: 'File:Wheel.jpg', imageinfo: [{ thumburl: 'https://upload.wikimedia.org/thumb/w.jpg', descriptionurl: 'https://commons.wikimedia.org/wiki/File:Wheel.jpg', extmetadata: { LicenseShortName: { value: 'CC BY-SA 4.0' }, Artist: { value: '<a href="x">Jane Doe</a>' } } }] } } } });
+  check('v8.3 landmark photo info read with licence and author (HTML stripped)', ph.length === 1 && ph[0].licence === 'CC BY-SA 4.0' && ph[0].author === 'Jane Doe' && /^https:/.test(ph[0].thumb), JSON.stringify(ph));
+  check('v8.3 file stays loader-compatible after all v8.3 additions', lib.loaderContractProblems(outC).length === 0, lib.loaderContractProblems(outC).join('; '));
+}
+
 if (typeof module !== 'undefined') module.exports = { runScannerTests };
+
+function runV9a(lib, check, same) {
+  const la = -27.52, lo = 153.05;
+  const off = (dx, dy) => ({ lat: la + dy / 111320, lon: lo + dx / (111320 * Math.cos(la * Math.PI / 180)) });
+  const llOff = (dx, dy) => { const o = off(dx, dy); return [o.lat, o.lon]; };
+  const rect = (x, y, w, h) => [off(x, y), off(x + w, y), off(x + w, y + h), off(x, y + h), off(x, y)];
+  const loop = [llOff(0, 0), llOff(200, 0), llOff(200, 200), llOff(0, 200), llOff(0, 0)];
+  const near = (a, b, m) => lib.dist(a, b) < m;
+
+  // --- direction and start ---
+  const rev = lib.orientRoute(loop, { reverse: true, loop: true });
+  check('v9a reverse flips the route order', near(rev[1], llOff(0, 200), 0.01) && near(rev[3], llOff(200, 0), 0.01));
+  const L0 = lib.routeLength(loop);
+  const rot = lib.orientRoute(loop, { loop: true, start: llOff(203, 120) });   // 3 m off the east side, 120 m up
+  check('v9a start moves to the nearest point on the loop (snapped onto the line)', near(rot[0], llOff(200, 120), 0.05), JSON.stringify(rot[0]));
+  check('v9a moved-start loop is closed and the same length', near(rot[0], rot.at(-1), 0.01) && Math.abs(lib.routeLength(rot) - L0) < 0.05, lib.routeLength(rot) + ' vs ' + L0);
+  check('v9a moved start keeps the drawing direction (next corner is the NE one)', near(rot[1], llOff(200, 200), 0.01));
+  const both = lib.orientRoute(loop, { loop: true, reverse: true, start: llOff(203, 120) });
+  check('v9a reverse + start: same start, other way round (next corner is the SE one)', near(both[0], llOff(200, 120), 0.05) && near(both[1], llOff(200, 0), 0.01));
+  const line = [llOff(0, 0), llOff(100, 0), llOff(100, 100)];
+  check('v9a not a loop: start is ignored, reverse still works', same(lib.orientRoute(line, { loop: false, start: llOff(100, 50) }), line) && near(lib.orientRoute(line, { reverse: true })[0], llOff(100, 100), 0.01));
+  check('v9a orientRoute leaves its input alone', near(loop[0], llOff(0, 0), 0.001) && loop.length === 5);
+  const arrows = lib.arrowsAlong(loop, 100);
+  check('v9a direction arrows every 100 m with the right heading (east = 90°, north = 0°)', arrows.length === 8 && Math.abs(arrows[0].bearing - 90) <= 1 && Math.abs(arrows[2].bearing - 0) <= 1 && Math.abs(arrows[4].bearing - 270) <= 1, JSON.stringify(arrows.map(a => a.bearing)));
+
+  // the race layout follows the oriented route
+  const data = { elements: [{ type: 'way', id: 1, tags: { highway: 'residential' }, geometry: loop.map(p => ({ lat: p[0], lon: p[1] })) }] };
+  const base = { waypoints: loop.slice(0, 4), radius: 100, width: 8, loop: true, snapped: false, name: 't', now: 'X' };
+  const a = lib.buildOutput(data, { ...base, route: loop }).out;
+  const b = lib.buildOutput(data, { ...base, route: lib.orientRoute(loop, { loop: true, reverse: true, start: llOff(203, 120) }), reverse: true, start: llOff(200, 120) }).out;
+  const P = lib.makeProjector(b.meta.origin.lat, b.meta.origin.lon);
+  check('v9a export records the race settings', b.route.reversed === true && Array.isArray(b.route.startPoint) && a.route.reversed === false && !('startPoint' in JSON.parse(JSON.stringify(a.route))));
+  check('v9a start line sits at the picked start', b.race && Math.hypot(b.race.startLine.pos[0], b.race.startLine.pos[1]) < 3, b.race && JSON.stringify(b.race.startLine.pos));
+  check('v9a reversed race heads the other way (south along the east side)', b.race && b.race.startLine.dir[1] < -0.9, b.race && JSON.stringify(b.race.startLine.dir));
+  check('v9a waypoints stay as drawn (so the route reloads unchanged)', same(b.route.waypoints, loop.slice(0, 4)));
+
+  // --- hand-drawn buildings ---
+  const ring = rect(50, 50, 20, 10).slice(0, 4).map(g => [g.lat, g.lon]);
+  const fin = lib.withManualExtras(a, [], [{ ring, height: 7.5, name: 'Kiosk' }, { ring: ring.slice(0, 2), height: 5 }, { ring, height: 0 }]);
+  const mb = fin.buildings.filter(x => x.source === 'manual');
+  const Pa = lib.makeProjector(a.meta.origin.lat, a.meta.origin.lon);
+  check('v9a drawn building exported (bad ones skipped), labelled manual', mb.length === 1 && mb[0].id === 'mb1' && mb[0].heightSource === 'manual' && mb[0].height === 7.5 && mb[0].name === 'Kiosk' && fin.meta.counts.manualBuildings === 1);
+  check('v9a drawn building footprint in metres, open ring', mb[0].footprint.length === 4 && Math.abs(mb[0].footprint[0][0] - Pa(ring[0][0], ring[0][1])[0]) < 0.01);
+  check('v9a drawn buildings kept for reloading; scan result untouched', fin.manualBuildings.length === 3 && a.buildings.every(x => x.source !== 'manual') && !('manualBuildings' in a));
+  check('v9a file with drawn buildings passes the game-loader check', lib.loaderContractProblems(fin).length === 0, JSON.stringify(lib.loaderContractProblems(fin)));
+  check('v9a manual trees still work alongside', lib.withManualExtras(a, [{ lat: la, lon: lo, canopy: 9 }], []).meta.counts.manualTrees === 1);
+
+  // --- library ---
+  let lib1 = lib.libraryUpsert([], { name: 'a', waypoints: [] });
+  lib1 = lib.libraryUpsert(lib1, { name: 'b', waypoints: [] });
+  lib1 = lib.libraryUpsert(lib1, { name: 'a', waypoints: [[1, 2]] });
+  check('v9a library: same name replaces, newest first', lib1.length === 2 && lib1[0].name === 'a' && lib1[0].waypoints.length === 1);
+  check('v9a library: delete by name', same(lib.libraryRemove(lib1, 'a').map(x => x.name), ['b']));
+  let err = ''; try { lib.readLibraryBackup({ format: 'kartmap' }); } catch (e) { err = e.message; }
+  let err2 = ''; try { lib.readLibraryBackup({ format: 'kartmap-library', version: 99, tracks: [] }); } catch (e) { err2 = e.message; }
+  check('v9a library backup: wrong file and newer version give plain errors', /not a track library/.test(err) && /newer scanner/.test(err2));
+  const merged = lib.libraryMerge([{ name: 'a', waypoints: [] }, { name: 'c', waypoints: [] }], lib.readLibraryBackup({ format: 'kartmap-library', version: 1, tracks: [{ name: 'a', waypoints: [[9, 9]] }, { name: 'x', waypoints: [] }, { bad: 1 }] }).tracks);
+  check('v9a library restore: merges, backup wins on same name, junk skipped', merged.length === 3 && merged.find(x => x.name === 'a').waypoints.length === 1 && merged.some(x => x.name === 'x'));
+}
+
+function runV9b(lib, check, same) {
+  const la = -27.5, lo = 153.0;
+  const off = (dx, dy) => ({ lat: la + dy / 111320, lon: lo + dx / (111320 * Math.cos(la * Math.PI / 180)) });
+  const llOff = (dx, dy) => { const o = off(dx, dy); return [o.lat, o.lon]; };
+  const rect = (x, y, w, h) => [off(x, y), off(x + w, y), off(x + w, y + h), off(x, y + h), off(x, y)];
+  const route = [llOff(0, 0), llOff(300, 0)];
+  const data = { elements: [
+    { type: 'way', id: 1, tags: { building: 'yes' }, geometry: rect(200, -5, 10, 10) },          // across the track, 205 m out
+    { type: 'way', id: 2, tags: { barrier: 'fence' }, geometry: [off(100, -10), off(100, 10)] },   // crosses at 100 m
+    { type: 'node', id: 3, lat: off(50, 1).lat, lon: off(50, 1).lon, tags: { amenity: 'bench' } }, // on the track at 50 m
+    { type: 'way', id: 4, tags: { building: 'yes' }, geometry: rect(150, 40, 10, 10) }            // well clear
+  ] };
+  const { preview } = lib.buildOutput(data, { route, waypoints: route, radius: 100, width: 8, loop: false, snapped: false, name: 't', now: 'X' });
+  const ps = lib.problemSpots(preview);
+  check('v9b problem list: building, fence and bench on the track, nothing else', ps.length === 3, JSON.stringify(ps));
+  check('v9b problems are ordered nearest the start first, with plain labels', ps.length === 3 && /bench on the track/.test(ps[0].label) && /Fence or wall/.test(ps[1].label) && /Building blocking/.test(ps[2].label));
+  check('v9b problem spots sit where the things are', ps.length === 3 && Math.abs(ps[0].xy[0] - 50) < 1 && Math.abs(ps[2].xy[0] - 205) < 1, JSON.stringify(ps.map(p => p.xy)));
+  check('v9b no problems = empty list', lib.problemSpots([]).length === 0 && lib.problemSpots(null).length === 0);
+}
+
+function runV11(lib, check, same) {
+  // ribbon: heading east, left edge is north
+  const r = lib.ribbon([[0, 0], [10, 0], [20, 0]], 8, false);
+  check('v11 track ribbon: left edge 4 m north, right edge 4 m south when heading east', same(r.left, [[0, 4], [10, 4], [20, 4]]) && same(r.right, [[0, -4], [10, -4], [20, -4]]), JSON.stringify(r));
+  const sq = lib.ribbon([[0, 0], [10, 0], [10, 10], [0, 10], [0, 0]], 2, true);
+  check('v11 closed ribbon: the join at the start is mitred like any other corner', Math.abs(sq.left[0][0] - sq.left[4][0]) < 1e-6 && Math.abs(sq.left[0][1] - sq.left[4][1]) < 1e-6);
+  // plan from a real buildOutput
+  const la = -27.47, lo = 153.03;
+  const off = (dx, dy) => ({ lat: la + dy / 111320, lon: lo + dx / (111320 * Math.cos(la * Math.PI / 180)) });
+  const llOff = (dx, dy) => { const o = off(dx, dy); return [o.lat, o.lon]; };
+  const rect = (x, y, w, h) => [off(x, y), off(x + w, y), off(x + w, y + h), off(x, y + h), off(x, y)];
+  const loop = [llOff(0, 0), llOff(200, 0), llOff(200, 200), llOff(0, 200), llOff(0, 0)];
+  const data = { elements: [
+    { type: 'way', id: 1, tags: { highway: 'residential' }, geometry: loop.map(p => ({ lat: p[0], lon: p[1] })) },
+    { type: 'way', id: 2, tags: { building: 'yes', 'building:levels': '3', 'building:colour': 'red' }, geometry: rect(50, 50, 30, 30) },
+    { type: 'way', id: 3, tags: { building: 'house' }, geometry: rect(120, 50, 10, 10) },
+    { type: 'way', id: 4, tags: { building: 'yes', name: 'Tower' }, geometry: rect(50, 120, 30, 30) },
+    { type: 'way', id: 5, tags: { 'building:part': 'yes', 'building:levels': '20', 'building:min_level': '2' }, geometry: rect(55, 125, 10, 10) },
+    { type: 'way', id: 6, tags: { 'building:part': 'yes', 'building:levels': '2' }, geometry: rect(50, 120, 30, 30) },
+    { type: 'node', id: 7, lat: off(30, 30).lat, lon: off(30, 30).lon, tags: { natural: 'tree', genus: 'Archontophoenix' } },
+    { type: 'node', id: 8, lat: off(40, 30).lat, lon: off(40, 30).lon, tags: { amenity: 'bench' } },
+    { type: 'node', id: 9, lat: off(60, 60).lat, lon: off(60, 60).lon, tags: { tourism: 'attraction', name: 'Big Thing' } }
+  ] };
+  const { out } = lib.buildOutput(data, { route: loop, waypoints: loop.slice(0, 4), radius: 150, width: 8, loop: true, snapped: false, name: 't', now: 'X' });
+  const p = lib.scene3dPlan(lib.withManualExtras(out, [], [{ ring: [llOff(150, 150), llOff(160, 150), llOff(160, 160)], height: 4 }]));
+  const tower = out.buildings.find(b => b.name === 'Tower');
+  check('v11 3D plan: parent with parts is skipped, its parts drawn', tower && tower.hasParts && !p.buildings.some(b => b.id === tower.id) && p.buildings.filter(b => out.buildings.find(o => o.id === b.id && o.part)).length === 2);
+  const tall = p.buildings.find(b => b.top === 60);
+  check('v11 3D plan: a 20-floor part starting at floor 2 runs 6 m to 60 m', tall && tall.base === 6, JSON.stringify(p.buildings.map(b => [b.id, b.base, b.top])));
+  const red = p.buildings.find(b => b.wall === 'red'), house = p.buildings.find(b => b.wall === '#d9c8a9');
+  check('v11 3D plan: mapped wall colour kept, unmapped house gets the house colour, guessed heights flagged', red && house && house.guessed === true && red.guessed === false);
+  check('v11 3D plan: hand-drawn building included and marked', p.buildings.some(b => b.manual && b.top === 4));
+  check('v11 3D plan: palm tree, bench prop, landmark', p.trees.length === 1 && p.trees[0].type === 'palm' && p.trees[0].h === 10 && p.props.length === 1 && p.props[0].kind === 'bench' && p.landmarks.some(l => l.name === 'Big Thing'));
+  check('v11 3D plan: track uses the smooth line, both edges, closed loop, start line', p.track.closed && p.track.line.length === out.route.centerline.points.length && p.track.left.length === p.track.line.length && p.start && p.checkpoints.length >= 8);
+  // ground image plan: size and stored metres-per-pixel agree (v11 fix)
+  const g = lib.groundImagePlan({ minX: 0, minY: 0, maxX: 5000, maxY: 1000 }, 1, 4096);
+  check('v11 fix: ground image size matches its metres per pixel (5 km wide area)', g.width * g.metresPerPixel >= 5000 && (g.width - 1) * g.metresPerPixel < 5000 && g.width <= 4096, JSON.stringify(g));
+}
+
+function runV12a(lib, check, same) {
+  // the server's raw answer: 4 floats then a 1-byte mask (bits, first pixel = top bit)
+  const buf = new ArrayBuffer(4 * 4 + 1);
+  new Float32Array(buf, 0, 4).set([10, 11, 12, 13]);
+  new Uint8Array(buf, 16, 1)[0] = 0b10110000;   // pixel 2 (index 1) has no data
+  const g = lib.parseBsqF32(buf, 2, 2);
+  check('v12a raw height tiles: values read, "no data" pixels become gaps', g[0] === 10 && isNaN(g[1]) && g[2] === 12 && g[3] === 13, Array.from(g).join(','));
+  // a synthetic area: ground rises 5 m per 100 m going east; the river (a trench) runs north-south at x = 100..140 m
+  const la = -27.48, lo = 153.02, mLon = 111320 * Math.cos(la * Math.PI / 180);
+  const off = (dx, dy) => ({ lat: la + dy / 111320, lon: lo + dx / mLon });
+  const llOff = (dx, dy) => { const o = off(dx, dy); return [o.lat, o.lon]; };
+  const box = { west: lo - 100 / mLon, east: lo + 400 / mLon, south: la - 100 / 111320, north: la + 300 / 111320 };
+  const W = 250, H = 200, data = new Float32Array(W * H);
+  for (let r = 0; r < H; r++) for (let c = 0; c < W; c++) { const x = -100 + (c + 0.5) * 2; data[r * W + c] = (x >= 100 && x <= 140) ? -3 : 20 + 0.05 * x; }
+  const grids = [{ box, width: W, height: H, data }];
+  const v = lib.sampleGrid(grids, off(50, 50).lat, off(50, 50).lon);
+  check('v12a height lookup between pixels (bilinear)', Math.abs(v - 22.5) < 0.06, v);
+  check('v12a height lookup outside the tiles gives null', lib.sampleGrid(grids, la + 1, lo) === null);
+  check('v12a gaps filled with a straight line', same(lib.fillGaps([1, null, null, 4, null]), [1, 2, 3, 4, 4]) && same(lib.fillGaps([null, 2]), [2, 2]));
+  // a straight route east across the river on a bridge
+  const route = [llOff(0, 0), llOff(300, 0)];
+  const els = [
+    { type: 'way', id: 1, tags: { highway: 'residential' }, geometry: [off(0, 0), off(95, 0)] },
+    { type: 'way', id: 2, tags: { highway: 'residential', bridge: 'yes', layer: '1' }, geometry: [off(95, 0), off(145, 0)] },
+    { type: 'way', id: 3, tags: { highway: 'residential' }, geometry: [off(145, 0), off(300, 0)] },
+    { type: 'way', id: 4, tags: { building: 'yes' }, geometry: [off(200, 20), off(240, 20), off(240, 40), off(200, 40), off(200, 20)] },
+    { type: 'node', id: 5, lat: off(60, 10).lat, lon: off(60, 10).lon, tags: { natural: 'tree' } }
+  ];
+  const { out } = lib.buildOutput({ elements: els }, { route, waypoints: route, radius: 80, width: 8, loop: false, snapped: false, name: 'hill', now: 'X' });
+  const e = lib.applyElevation(out, grids, lib.makeUnprojector, { metresPerSample: 2 });
+  const ce = out.route.centerline.elevation, cp = out.route.centerline.points;
+  const mid = cp.findIndex(p => p[0] >= 120);
+  check('v12a heights for every track point, lowest = 0', ce.length === cp.length && out.route.elevation.length === out.route.points.length && Math.min(...ce) === 0, Math.min(...ce));
+  check('v12a base is metres above sea level at the lowest track point (~20 m)', Math.abs(e.base - 20) < 0.6, e.base);
+  check('v12a on the bridge the track stays level-ish between the ends, not down in the river', ce[mid] > 3.5 && ce[mid] < 8, ce[mid]);
+  check('v12a the rise is right away from the bridge (5 m per 100 m: ~12.5 m at 250 m)', Math.abs(ce[cp.findIndex(p => p[0] >= 250)] - 12.5) < 0.8, ce[cp.findIndex(p => p[0] >= 250)]);
+  check('v12a climb and steepest grade reported (~5%)', Math.abs(e.climb - 15) < 1.5 && Math.abs(Math.abs(e.steepest.grade) - 5) < 2.5 && e.bridgedPoints > 0, JSON.stringify(e));
+  const b = out.buildings[0];
+  check('v12a building sits on the lowest ground under its outline (west side at 200 m: ~10 m)', Math.abs(b.ground - 10) < 0.6, b.ground);
+  check('v12a trees and props get ground heights', out.points.every(p => typeof p.ground === 'number'));
+  check('v12a credits added (Queensland elevation, CC BY-SA)', /Ground heights/.test(out.meta.attribution) && e.licence === 'CC BY-SA' && out.meta.quality.notes.some(n => /^Hills:/.test(n)));
+  check('v12a file still passes the game-loader check', lib.loaderContractProblems(out).length === 0);
+  // terrain file round trip
+  const tf = lib.terrainFile(out, grids, lib.makeUnprojector, 5);
+  const bytes = lib.base64ToBytes(tf.data), dv = new DataView(bytes.buffer);
+  const cell = (cx, cy) => dv.getInt16((cy * tf.width + cx) * 2, true) / 100;
+  const xA = Math.round((50 - tf.minX) / 5), yA = Math.round((tf.maxY - 0) / 5);
+  check('v12a terrain file: size, encoding and a height read back (x 50 m → 2.5 m above base)', bytes.length === tf.width * tf.height * 2 && Math.abs(cell(xA, yA) - (20 + 0.05 * (tf.minX + xA * 5) - tf.base)) < 0.1, cell(xA, yA));
+  check('v12a base64 matches the standard one', typeof Buffer === 'undefined' || lib.bytesToBase64(new Uint8Array([1, 2, 3, 250, 251])) === Buffer.from([1, 2, 3, 250, 251]).toString('base64'));
+  check('v12a no data → no heights (area outside Queensland)', lib.applyElevation(JSON.parse(JSON.stringify(lib.buildOutput({ elements: els }, { route, waypoints: route, radius: 80, width: 8, loop: false, snapped: false, name: 'x', now: 'X' }).out)), [], lib.makeUnprojector) === null);
+  const p3 = lib.scene3dPlan(out);
+  check('v12a 3D plan carries the heights (track, building ground)', p3.hills && p3.track.elev.length === p3.track.line.length && p3.buildings[0].ground === b.ground);
+}
+
+function runV12b(lib, check, same) {
+  const t = { name: 'Grey St loop', waypoints: [[-27.4801234567, 153.0241234567], [-27.481, 153.025], [-27.482, 153.024]], snap: true, loop: true, radius: 150, width: 9,
+    race: { reverse: true, start: [-27.4805, 153.0245] }, trees: [{ lat: -27.4806, lon: 153.0246, canopy: 12 }],
+    manualBuildings: [{ ring: [[-27.48, 153.02], [-27.4801, 153.02], [-27.4801, 153.0201]], height: 7.5, name: 'Kiosk' }] };
+  const o = lib.trackForLink(t), back = lib.trackFromLink(JSON.parse(JSON.stringify(o)));
+  check('v12b share link keeps the route (to ~10 cm), settings, race, trees and drawn buildings', back.name === t.name && back.waypoints.length === 3 && Math.abs(back.waypoints[0][0] - t.waypoints[0][0]) < 1e-6 &&
+    back.snap && back.loop && back.radius === 150 && back.width === 9 && back.race.reverse && same(back.race.start, [-27.4805, 153.0245]) && back.trees[0].canopy === 12 && back.manualBuildings[0].name === 'Kiosk' && back.manualBuildings[0].height === 7.5, JSON.stringify(back));
+  let e1 = '', e2 = '';
+  try { lib.trackFromLink({ v: 2, w: [] }); } catch (e) { e1 = e.message; }
+  try { lib.trackFromLink({ v: 1, w: [[999, 0]] }); } catch (e) { e2 = e.message; }
+  check('v12b share link: wrong or damaged data gives a plain reason', /not a Kart Map Scanner track/.test(e1) && /damaged/.test(e2));
+  const lim = lib.trackFromLink({ v: 1, w: [[1, 2], [3, 4]], r: 9999, k: 0.1 });
+  check('v12b share link: silly settings are clamped to what the scanner allows', lim.radius === 300 && lim.width === 3);
+  const bytes = new Uint8Array([0, 255, 62, 63, 250]);
+  check('v12b base64 round trip', same(Array.from(lib.base64ToBytes(lib.bytesToBase64(bytes))), Array.from(bytes)));
+  check('v12b link packing functions exist (tested end to end in the page test)', typeof lib.packTrack === 'function' && typeof lib.unpackTrack === 'function');
+}
+
+function runV12c(lib, check, same) {
+  const la = -27.49, lo = 153.0;
+  const off = (dx, dy) => ({ lat: la + dy / 111320, lon: lo + dx / (111320 * Math.cos(la * Math.PI / 180)) });
+  const llOff = (dx, dy) => { const o = off(dx, dy); return [o.lat, o.lon]; };
+  const loop = [llOff(0, 0), llOff(400, 0), llOff(400, 200), llOff(0, 200), llOff(0, 0)];   // 400 × 200 m
+  const { out } = lib.buildOutput({ elements: [] }, { route: loop, waypoints: loop.slice(0, 4), radius: 50, width: 8, loop: true, snapped: false, name: 'mm', now: 'X' });
+  const mp = lib.minimapPlan(out, 256, 12);
+  const inside = mp.points.every(p => p[0] >= 11.9 && p[0] <= 244.1 && p[1] >= 11.9 && p[1] <= 244.1);
+  const xs = mp.points.map(p => p[0]), ys = mp.points.map(p => p[1]);
+  const wPx = Math.max(...xs) - Math.min(...xs), hPx = Math.max(...ys) - Math.min(...ys);
+  check('v12c minimap: whole track inside the picture with its margin, shape kept (2:1)', inside && Math.abs(wPx / hPx - 2) < 0.08, JSON.stringify({ wPx, hPx }));
+  check('v12c minimap: metres per pixel and the kart-dot formula agree', Math.abs(mp.mpp - 400 / 232) < 0.01 && same(mp.toPx(out.route.centerline.points[0]), mp.start));
+  check('v12c minimap: north is up (the north edge is at the top)', Math.min(...ys) === mp.toPx([0, Math.max(...out.route.centerline.points.map(p => p[1]))])[1] || Math.abs(Math.min(...ys) - mp.toPx([0, Math.max(...out.route.centerline.points.map(p => p[1]))])[1]) < 0.02);
+  check('v12c profile: none without ground heights', lib.profileGeometry(out, 300, 90, 6) === null);
+  out.meta.elevation = { base: 5 };
+  out.route.centerline.elevation = out.route.centerline.points.map((p, i) => Math.round(i / out.route.centerline.points.length * 60) / 10);   // 0 → ~6 m
+  const g = lib.profileGeometry(out, 300, 90, 6);
+  check('v12c profile: fills the box left to right, highest point at the top line', g && g.top === 6 && g.sx(0) === 6 && Math.abs(g.sx(g.len) - 294) < 1e-6 && Math.abs(g.sy(6) - 6) < 1e-6 && /^M6,84/.test(g.d), g && g.d.slice(0, 30));
+  check('v12c profile: long tracks are thinned to ~400 corners', g.d.split('L').length <= 402);
+  out.route.centerline.elevation = out.route.centerline.points.map(() => 0.3);
+  check('v12c profile: a flat track is drawn at least 2 m tall (no fake drama)', lib.profileGeometry(out, 300, 90, 6).top === 2);
+}
+

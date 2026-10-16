@@ -6,6 +6,8 @@
 <title>Kart Map Scanner</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<!-- v11: three.js for the 3D preview, loaded only when you open it -->
+<script type="importmap">{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js", "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/" } }</script>
 <style>
   :root {
     --bg: #16161d; --panel: #20202a; --line: #33334a; --text: #e8e8f0; --muted: #9a9ab0;
@@ -50,12 +52,54 @@
   .wp.start { background: #2a9d8f; }
   .wp.small { font-size: 0; border-width: 1px; }
   #map.pen { cursor: crosshair; touch-action: none; }
+  select { width: 100%; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--text); font: inherit; }
+  .race-flag { font-size: 20px; line-height: 20px; text-shadow: 0 0 3px #000; }
+  .race-arrow { color: #fff; font-size: 14px; line-height: 14px; text-align: center; text-shadow: 0 0 3px #000, 0 0 2px #000; }
+  /* v9b: phone layout. Map on top, panel below; the ▲/▼ button gives one of them more room. */
+  #sheetBtn, #toast { display: none; }
+  @media (max-width: 760px) {
+    body { flex-direction: column; height: 100dvh; }
+    #map { order: 0; flex: none; height: 58dvh; }
+    #panel { order: 1; width: 100%; flex: 1; height: auto; min-height: 0; border-right: none; border-top: 1px solid var(--line); padding: 10px 12px 24px; }
+    body.sheet-up #map { height: 30dvh; }
+    body.map-big #map { height: 82dvh; }
+    #sheetBtn { display: block; position: fixed; left: 10px; z-index: 1000; top: calc(58dvh - 22px); padding: 6px 12px; border-radius: 16px;
+      background: var(--panel); box-shadow: 0 2px 6px #0008; font-size: 13px; }
+    body.sheet-up #sheetBtn { top: calc(30dvh - 22px); }
+    body.map-big #sheetBtn { top: calc(82dvh - 22px); }
+    #toast.show { display: block; position: fixed; left: 8px; right: 8px; top: 8px; z-index: 1001; padding: 8px 10px; border-radius: 8px;
+      background: #20202aee; box-shadow: 0 2px 8px #000a; font-size: 13px; }
+    #toast.warn { color: var(--warn); } #toast.err { color: var(--err); } #toast.ok { color: var(--ok); }
+    #modeRow { flex-wrap: wrap; }
+    #modeRow button { flex: 1 0 28%; }
+    input[type=text], input[type=number], select { font-size: 16px; }   /* stops phones zooming in on tap */
+    h1 { font-size: 16px; } .sub { display: none; }
+  }
+  @media (pointer: coarse) {
+    button, select { min-height: 40px; }
+    input[type=checkbox] { width: 20px; height: 20px; }
+    .leaflet-control-zoom { display: none; }   /* pinch to zoom instead */
+  }
+  /* v11: 3D preview overlay */
+  #view3d { position: fixed; inset: 0; z-index: 3000; background: #000; display: flex; flex-direction: column; }
+  #v3dBar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 6px 8px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  #v3dBar .grow { flex: 1; min-width: 120px; }
+  #v3dHost { flex: 1; position: relative; overflow: hidden; }
+  #v3dHost canvas { width: 100% !important; height: 100% !important; display: block; touch-action: none; }
+  #v3dHost.retro canvas { image-rendering: pixelated; }
+  #v3dHelp { position: absolute; left: 8px; bottom: 8px; color: #fff; font-size: 12px; text-shadow: 0 0 3px #000; pointer-events: none; }
   .legend span { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin: 0 4px 0 8px; vertical-align: middle; }
+  /* v12c: elevation profile (one series: no legend, the heading names it) */
+  .profile { --series-1: #3987e5; --grid: #33334a; --ink-2: #9a9ab0; margin-top: 8px; position: relative; }
+  #stats .profile, #stats .profile div { display: block; }   /* not the two-column rows the other stats use */
+  .profile svg { width: 100%; height: 90px; display: block; touch-action: pan-y; }
+  .profile .readout { position: absolute; top: 18px; right: 4px; font-size: 11px; color: var(--text); background: #16161dcc; padding: 1px 5px; border-radius: 4px; pointer-events: none; }
+.lm-photos{display:flex;gap:4px;margin:3px 0 4px}.lm-photos img{width:64px;height:48px;object-fit:cover;border-radius:3px;border:1px solid #ccc}
 </style>
 </head>
 <body>
 <aside id="panel">
-  <h1>KART <span>MAP</span> SCANNER</h1>
+  <h1>KART <span>MAP</span> SCANNER <button id="helpBtn" title="How it works" style="float:right;padding:2px 9px;font-size:13px">?</button></h1>
   <div class="sub">Draw a route on free OSM data, export it for Godot.</div>
 
   <section>
@@ -66,12 +110,45 @@
     </div>
   </section>
 
+  <section id="helpCard" hidden>
+    <h2>How it works <button id="helpClose" style="float:right;padding:0 8px" title="Hide">✕</button></h2>
+    <ol class="hint" style="margin:0;padding-left:18px;color:var(--text)">
+      <li><b>Find</b> your area (search, or drag the map in ✋ Pan).</li>
+      <li><b>Draw</b> the route with ✎ Pen (hold and drag along roads). It snaps to roads.</li>
+      <li><b>Scan</b> area: grabs buildings, roads, trees and more around it.</li>
+      <li><b>Check</b> the map: red = blocking the track. Try 🧊 3D preview.</li>
+      <li><b>Export JSON</b> and drop it in the game's tracks folder.</li>
+    </ol>
+    <div class="hint" style="margin-top:4px">Extras (colours, heights, photos) are optional. 📏 (top-left of the map) measures distances. Ctrl+Z / Ctrl+Y undo and redo.</div>
+  </section>
+
+  <section>
+    <h2>Saved tracks</h2>
+    <div class="row">
+      <select id="libSelect" style="flex:2"><option value="">(no saved tracks)</option></select>
+      <button id="libLoadBtn" style="flex:0 0 auto" disabled>Open</button>
+      <button id="libDeleteBtn" style="flex:0 0 auto" disabled>Delete</button>
+    </div>
+    <div class="row" style="margin-top:6px">
+      <button id="libSaveBtn">Save current track</button>
+      <button id="shareBtn" title="A link that opens this track on another device">🔗 Share link</button>
+    </div>
+    <input id="shareOut" type="text" readonly hidden style="margin-top:6px" aria-label="Share link">
+    <div class="row" style="margin-top:6px">
+      <button id="libBackupBtn">Back up all</button>
+      <button id="libRestoreBtn">Restore backup</button>
+    </div>
+    <input id="libFile" type="file" accept=".json,application/json" hidden>
+    <div class="hint" style="margin-top:4px">Saved in this browser only. "Back up all" downloads a file you can restore on another computer or browser.</div>
+  </section>
+
   <section>
     <h2>2. Draw the route</h2>
     <div class="row" id="modeRow">
       <button data-mode="pen" class="on">✎ Pen</button>
       <button data-mode="points">• Points</button>
       <button data-mode="trees">🌳 Trees</button>
+      <button data-mode="build">🏠 Building</button>
       <button data-mode="pan">✋ Pan</button>
     </div>
     <div id="modeHint" class="hint" style="margin-top:4px">Pen: hold the mouse button and drag along the roads. Draw in several strokes if you like; each continues the route.</div>
@@ -80,14 +157,31 @@
         <input id="canopy" type="range" min="3" max="25" step="1" value="10"></label>
       <button id="clearTreesBtn" style="width:100%">Clear all trees</button>
     </div>
+    <div id="buildOpts" hidden style="margin-top:6px">
+      <div class="row">
+        <label>Height (m) <input id="bHeight" type="number" min="2" max="300" step="0.5" value="6"></label>
+        <label>Name (optional) <input id="bName" type="text" placeholder="e.g. Pool kiosk"></label>
+      </div>
+      <div class="row">
+        <button id="bFinishBtn" disabled>Finish building</button>
+        <button id="bCancelBtn" disabled>Cancel</button>
+      </div>
+      <div id="bInfo" class="hint" style="margin-top:4px">Click each corner. Click the first corner again (or double-click) to finish.</div>
+    </div>
     <div class="row" style="margin-top:6px">
       <button id="undoBtn">Undo</button>
+      <button id="redoBtn" disabled>Redo</button>
       <button id="clearBtn">Clear</button>
     </div>
     <label class="inline"><input id="snap" type="checkbox" checked> Snap route to roads</label>
     <label class="inline"><input id="loop" type="checkbox" checked> Close into a loop (lap track)</label>
-    <div class="hint">Drag a numbered point to move it. Right-click a point to delete it.</div>
+    <div class="hint">Drag a numbered point to move it. Right-click (long-press on a phone) a point to delete it.</div>
     <div id="routeInfo" class="hint" style="margin-top:6px">No route yet.</div>
+    <div class="row" style="margin-top:6px">
+      <button id="reverseBtn" title="Race the other way round">⇄ Reverse direction</button>
+      <button id="startBtn" title="Then click the route where the start line should be">⚑ Pick start</button>
+    </div>
+    <div id="raceInfo" class="hint" style="margin-top:4px"></div>
   </section>
 
   <section>
@@ -96,6 +190,7 @@
     <label>Scan radius each side: <b id="radiusVal">100</b> m
       <input id="radius" type="range" min="25" max="300" step="5" value="100"></label>
     <label>Track width (m) <input id="width" type="number" min="3" max="30" step="0.5" value="8"></label>
+    <label class="inline"><input id="useOverture" type="checkbox" checked> Fill building gaps from Overture (recommended)</label>
     <button id="scanBtn" class="primary" style="width:100%;margin-top:6px">Scan area</button>
     <div id="status">Hold and drag on the map to draw a route.</div>
   </section>
@@ -104,13 +199,28 @@
     <h2>4. Result</h2>
     <div id="stats" class="hint">Nothing scanned yet.</div>
     <div class="legend hint" style="margin-top:6px">
-      <span style="background:#6c757d"></span>building<span style="background:#343a40"></span>road<span style="background:#e76f51"></span>bridge<span style="background:#7f4f24"></span>fence<span style="background:#52b788"></span>green<span style="background:#4ea8de"></span>water<span style="background:#9b2226;border-radius:50%"></span>landmark<span style="background:#ff4d4d"></span>blocks track<span style="background:#d63384"></span>shortcut<span style="background:#00b4d8;border-radius:50%"></span>checkpoint
+      <span style="background:#6c757d"></span>building<span style="background:#343a40"></span>road<span style="background:#e76f51"></span>bridge<span style="background:#7f4f24"></span>fence<span style="background:#52b788"></span>green<span style="background:#4ea8de"></span>water<span style="background:#9b2226;border-radius:50%"></span>landmark<span style="background:#ff4d4d"></span>blocks track<span style="background:transparent;border:2px solid #d00000;border-radius:50%"></span>on track<span style="background:#d63384"></span>shortcut<span style="background:#00b4d8;border-radius:50%"></span>checkpoint
     </div>
     <div class="row" style="margin-top:8px">
       <button id="exportBtn" class="primary" disabled>Export JSON</button>
       <button id="loadBtn">Load JSON</button>
     </div>
     <input id="loadFile" type="file" accept=".json,application/json" hidden>
+    <button id="view3dBtn" style="width:100%;margin-top:6px" disabled>🧊 3D preview</button>
+    <div class="row" style="margin-top:6px">
+      <button id="minimapBtn" disabled title="A small picture of the track for the game's HUD">Minimap PNG</button>
+      <button id="cardBtn" disabled title="A picture of the track with its stats, for sharing">Track card PNG</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>5. Extras (optional)</h2>
+    <button id="sampleBtn" style="width:100%" disabled>Sample colours from aerial photo</button>
+    <button id="photosBtn" style="width:100%;margin-top:6px" disabled>Find landmark photos</button>
+    <button id="groundBtn" style="width:100%;margin-top:6px" disabled>Export ground image (PNG)</button>
+    <button id="heightsBtn" style="width:100%;margin-top:6px" disabled>⛰ Get ground heights (QLD LiDAR)</button>
+    <button id="terrainBtn" style="width:100%;margin-top:6px" disabled>Export terrain file (hills for the game)</button>
+    <div class="hint" style="margin-top:4px">Aerial photos and ground heights © State of Queensland (CC BY-SA); photos mostly 2021. Photos from Wikimedia Commons: check each licence. Export JSON again after using these.</div>
   </section>
 
   <section class="hint">
@@ -119,12 +229,14 @@
   </section>
 </aside>
 <div id="map" class="pen"></div>
+<button id="sheetBtn" type="button" title="Give the map or the panel more room">▲ Panel</button>
+<div id="toast" role="status" aria-live="polite"></div>
 
 <script>
 // ======================================================================
 // PURE-START  (no browser or Leaflet code in here, so it can be tested on its own)
 // ======================================================================
-const FORMAT_VERSION = 1;
+const FORMAT_VERSION = 2;   // v8.2: matches the published kartmap v2 (all v2 additions are optional; v1 readers still work)
 
 // Fallbacks when OSM doesn't say how wide a road is (metres).
 const DEFAULT_ROAD_WIDTH = {
@@ -186,6 +298,9 @@ function buildingHeight(t) {
   const h = parseNum(t.height); if (h) return [h, 'osm'];
   const lv = parseNum(t['building:levels']);
   if (lv) return [round2(lv * 3 + (parseNum(t['roof:levels']) || 0) * 2), 'levels'];
+  // v8.3: from Overture, only when OSM has neither height nor floors.
+  const oh = parseNum(t['overture:height']);
+  if (oh) return [round2(oh), t['overture:from'] === 'OpenStreetMap' ? 'overture' : 'ml-estimate'];
   return [DEFAULT_BUILDING_HEIGHT[t.building] ?? 6, 'default'];
 }
 // ---- small objects ("props") ----
@@ -194,12 +309,12 @@ function buildingHeight(t) {
 const PROP_TAGS = {
   natural: /^(tree|rock|stone|shrub|tree_stump)$/,
   highway: /^(street_lamp|traffic_signals|stop|give_way|bus_stop|speed_camera|milestone)$/,   // crossings are road markings (v8.1)
-  amenity: /^(bench|waste_basket|recycling|fountain|drinking_water|bicycle_parking|post_box|telephone|vending_machine|clock|shelter|bbq|charging_station|parcel_locker)$/,
-  leisure: /^(picnic_table|fitness_station|firepit|outdoor_seating)$/,
+  amenity: /^(bench|waste_basket|recycling|fountain|drinking_water|bicycle_parking|post_box|telephone|vending_machine|clock|shelter|bbq|charging_station|parcel_locker|toilets|parking_meter|cafe|restaurant|fast_food|ice_cream|bar|pub)$/,   // eateries = outdoor tables (the game draws them)
+  leisure: /^(picnic_table|fitness_station|firepit|outdoor_seating|playground|bandstand)$/,
   playground: /./,
   tourism: /^(artwork|information|viewpoint|picnic_site)$/,
   historic: /./,
-  man_made: /^(flagpole|mast|tower|chimney|street_cabinet|surveillance|obelisk|crane|water_tap|antenna|lamp|water_tower|storage_tank)$/,
+  man_made: /^(flagpole|mast|tower|chimney|street_cabinet|surveillance|obelisk|crane|water_tap|antenna|lamp|water_tower|storage_tank|lighthouse)$/,
   barrier: /^(bollard|gate|lift_gate|block|cycle_barrier|stile|turnstile|planter|swing_gate)$/,
   power: /^(pole|tower)$/,
   emergency: /^(fire_hydrant|phone|defibrillator)$/,
@@ -232,6 +347,9 @@ const LANDMARK_TAGS = {
 // Returns the landmark "kind" if this element is a landmark, else null. Unnamed things never are.
 function extractLandmark(t) {
   if (!t.name) return null;
+  // Most specific first (v8.2): the game builds a Ferris wheel for big_wheel, sculptures for statue/sculpture…
+  if (t.attraction) return t.attraction;
+  if (t.tourism === 'artwork' && t.artwork_type) return t.artwork_type;
   for (const [key, re] of Object.entries(LANDMARK_TAGS)) if (t[key] && re.test(t[key])) return t[key];
   // A Wikipedia/Wikidata link counts, except on shops and eateries: there it's usually the
   // brand's page (live test found "Max Brenner Chocolate Bar" listed as a landmark).
@@ -254,6 +372,8 @@ function buildingLooks(t) {
   if (t['roof:colour']) out.roofColour = t['roof:colour'];
   if (t['building:colour']) out.colour = t['building:colour'];
   if (t['building:material']) out.material = t['building:material'];
+  if (t['roof:material']) out.roofMaterial = t['roof:material'];
+  const rh = parseNum(t['roof:height']); if (rh) out.roofHeight = rh;
   const lv = parseNum(t['building:levels']); if (lv) out.levels = lv;
   const mh = parseNum(t.min_height); if (mh) out.minHeight = mh;   // e.g. a walkway raised off the ground
   const ml = parseNum(t['building:min_level']); if (!mh && ml) out.minHeight = round2(ml * 3);   // starts at this floor
@@ -268,6 +388,7 @@ function roadExtras(t) {
   if (isFinite(layer) && layer !== 0) out.layer = layer;
   if (t.surface) out.surface = t.surface;
   const lanes = parseNum(t.lanes); if (lanes) out.lanes = lanes;
+  if (t.lit === 'yes') out.lit = true;   // v8.2: street lighting
   // v8.1: one-way, footpaths, crossings, slope direction
   if (/^(yes|1|true)$/.test(t.oneway || '')) out.oneway = true;
   else if (/^(-1|reverse)$/.test(t.oneway || '')) out.oneway = 'reverse';   // one-way against the drawing direction
@@ -470,7 +591,10 @@ function treeInfo(t) {
   const out = {};
   const sci = String(t.species || t.genus || t.taxon || '').trim();
   const en = String(t['species:en'] || t['taxon:en'] || '').toLowerCase();
-  if (sci) out.species = sci;
+  if (t.species || (!t.genus && t.taxon)) out.species = String(t.species || t.taxon).trim();
+  if (t.genus) out.genus = String(t.genus).trim();
+  if (t.leaf_type) out.leafType = t.leaf_type;
+  if (t.leaf_cycle) out.leafCycle = t.leaf_cycle;
   for (const [type, re] of TREE_GROUPS) if (re.test(sci)) { out.treeType = type; break; }
   if (!out.treeType) {
     if (/palm/.test(en)) out.treeType = 'palm';
@@ -682,10 +806,13 @@ function raceLayout(cl, closed, width, trackIdx) {
 }
 
 // Shortcut finder: footpaths and side roads that connect two parts of the track and are
-// at least 30 m shorter than driving the track between them. A "shortcut" that skips more
-// than half a lap is really driving backwards, so those are ignored.
+// at least 30 m shorter than driving the track between them. A shortcut may skip at most a
+// quarter of the lap (capped at 400 m, but always allowed up to 150 m). Skipping more is
+// cheating the lap, not a shortcut: the live South Bank test found paths between the two
+// sides of an out-and-back loop "saving" 900 m.
 function findShortcuts(roads, cl, closed, width) {
   const L = cl.length, touch = width / 2 + 4;
+  const maxSkip = Math.max(150, Math.min(400, L / 4));
   const key = p => p[0].toFixed(1) + ',' + p[1].toFixed(1);
   const idx = new Map(), V = [], adj = [];
   const vid = p => { const k = key(p); let i = idx.get(k); if (i === undefined) { i = V.length; idx.set(k, i); V.push(p); adj.push([]); } return i; };
@@ -757,7 +884,7 @@ function findShortcuts(roads, cl, closed, width) {
         let start = m.v; while (prev.get(start).from !== null) start = prev.get(start).from;
         const fromAt = prev.get(m.v).at;
         const skips = closed ? ((m.at - fromAt) % L + L) % L : m.at - fromAt;
-        if (skips <= 0 || skips > L / 2) continue;
+        if (skips <= 0 || skips > maxSkip) continue;
         const length = dist.get(m.v) + m.d, saving = skips - length;
         if (saving >= 30 && (!best || saving > best.saving)) best = { v: m.v, fromAt, toAt: m.at, skips, length, saving };
       }
@@ -779,12 +906,208 @@ function findShortcuts(roads, cl, closed, width) {
   return kept;
 }
 
+// ======================================================================
+// v8.3: Overture fill-in, aerial colours, ground image, landmark photos
+// ======================================================================
+
+// Centre of a shape WITHOUT rounding. (centroid() rounds to 2 decimals: fine for metres, but in
+// lat/lon that's ~1 km, so lat/lon code must use this one.)
+function exactCentroid(pts) { let x = 0, y = 0; for (const p of pts) { x += p[0]; y += p[1]; } return [x / pts.length, y / pts.length]; }
+
+// Credits for everything a file was built from.
+function attributionFor(used) {
+  const parts = ['© OpenStreetMap contributors, ODbL'];
+  if (used && used.overture) parts.push('Overture Maps Foundation (ODbL), including Microsoft ML Buildings');
+  if (used && used.imagery) parts.push('Includes material © State of Queensland (DNRMMRRD), CC BY-SA; © Planet Labs Netherlands');
+  if (used && used.elevation) parts.push('Ground heights: Includes material © State of Queensland (DNRMMRRD); © Commonwealth of Australia (Geoscience Australia, The Australian Hydrographic Office); © www.deepreef.org 2025, CC BY-SA');
+  return parts.join('; ');
+}
+
+// One Overture building, from a vector-tile feature (properties + GeoJSON coordinates in lon/lat).
+// The OSM id comes from the feature's sources ("record_id": "w584365517@2").
+function overtureFeature(props, coords) {
+  let ring = coords;
+  while (Array.isArray(ring) && Array.isArray(ring[0]) && Array.isArray(ring[0][0])) ring = ring[0];   // outer ring of (multi)polygon
+  let osmId = null, heightDataset = null;
+  try {
+    const src = typeof props.sources === 'string' ? JSON.parse(props.sources) : (props.sources || []);
+    for (const s of src) if (!osmId && /openstreetmap/i.test(s.dataset || '') && s.record_id) osmId = String(s.record_id).split('@')[0];
+    // The height's real origin is the source entry for "/properties/height". The tile's own
+    // "@height_source" field says "OpenStreetMap" even when that entry says Microsoft's ML model
+    // (found in the live South Bank test: 1388 of 1565 heights), so the entry wins.
+    const hs = src.find(s => /^\/properties\/height$/.test(s.property || ''));
+    if (hs) heightDataset = hs.dataset || 'unknown';
+  } catch (e) { /* unreadable sources: treat as non-OSM */ }
+  let height = parseNum(props.height), from = heightDataset || props['@height_source'] || null;
+  if (!height && parseNum(props.num_floors)) { height = round2(parseNum(props.num_floors) * 3); }
+  return {
+    id: String(props.id || ''), osmId, height: height ? round2(height) : null, heightFrom: from,
+    cls: props.class || props.subtype || null, isUnderground: props.is_underground === true || props.is_underground === 'true',
+    ring: (ring || []).map(p => [p[1], p[0]])
+  };
+}
+
+// Adds Overture to the raw scan data, returning a NEW copy (the original is untouched):
+// - an OSM building with no height or floors gets Overture's height (tagged, so it's labelled
+//   'overture' if that came from OSM, else 'ml-estimate')
+// - a building missing from OSM is added (unless underground or overlapping an OSM building)
+function mergeOverture(data, features) {
+  const els = (data.elements || []).map(e => (e.type === 'way' && e.tags && e.tags.building) ? { ...e, tags: { ...e.tags } } : e);
+  const byId = new Map(), rings = [];
+  for (const e of els) {
+    if (e.type !== 'way' || !e.tags || !e.tags.building || !e.geometry) continue;
+    byId.set('w' + e.id, e);
+    const r = e.geometry.filter(Boolean).map(g => [g.lat, g.lon]);
+    if (r.length >= 3) rings.push({ ring: r, c: exactCentroid(r) });
+  }
+  const stats = { heightsFilled: 0, added: 0, skipped: 0 };
+  for (const f of features || []) {
+    if (f.osmId) {
+      const e = byId.get(f.osmId);
+      if (e && f.height && !parseNum(e.tags.height) && !parseNum(e.tags['building:levels'])) {
+        e.tags['overture:height'] = String(f.height); e.tags['overture:from'] = f.heightFrom || 'Overture'; stats.heightsFilled++;
+      }
+      continue;   // OSM-based Overture buildings are already in the scan
+    }
+    if (f.isUnderground || !f.ring || f.ring.length < 3) { stats.skipped++; continue; }
+    const c = exactCentroid(f.ring);
+    if (rings.some(o => pointInPoly(c, o.ring) || pointInPoly(o.c, f.ring))) { stats.skipped++; continue; }
+    const ring = f.ring.slice();
+    if (ring[0][0] !== ring.at(-1)[0] || ring[0][1] !== ring.at(-1)[1]) ring.push(ring[0]);
+    const tags = { building: f.cls || 'yes', 'overture:added': 'yes', 'overture:id': f.id };
+    if (f.height) { tags['overture:height'] = String(f.height); tags['overture:from'] = f.heightFrom || 'Overture'; }
+    els.push({ type: 'way', id: f.id, ovId: f.id, tags, geometry: ring.map(p => ({ lat: p[0], lon: p[1] })) });
+    rings.push({ ring: f.ring, c });
+    stats.added++;
+  }
+  return { data: { ...data, elements: els }, stats };
+}
+
+// ---- aerial colours ----
+// Splits an area into image requests the imagery server accepts (max width x height pixels),
+// at `metresPerPixel`. Boxes are in degrees (the server returns plain lat/lon images).
+function planImageTiles(box, metresPerPixel, maxW, maxH) {
+  // Square pixels in degrees. The imagery server keeps pixels square in degrees: if the box and
+  // size don't match, it quietly stretches the box (live test: 0.0181° of latitude came back as
+  // 0.0204°, so colours were read up to ~125 m off). So every tile here is exactly
+  // width × d by height × d degrees, and the last row/column may reach a little past the area.
+  const midLat = (box.south + box.north) / 2;
+  const d = metresPerPixel / (111320 * Math.cos(midLat * Math.PI / 180));   // ≈ metresPerPixel east-west, a bit finer north-south
+  const W = Math.max(1, Math.ceil((box.east - box.west) / d)), H = Math.max(1, Math.ceil((box.north - box.south) / d));
+  const nx = Math.ceil(W / maxW), ny = Math.ceil(H / maxH);
+  const tw = Math.ceil(W / nx), th = Math.ceil(H / ny);
+  const tiles = [];
+  for (let i = 0; i < nx; i++) for (let j = 0; j < ny; j++) {
+    const west = box.west + i * tw * d, north = box.north - j * th * d;
+    tiles.push({ west, east: west + tw * d, north, south: north - th * d, width: tw, height: th });
+  }
+  return tiles;
+}
+// Typical (median) colour of the image pixels inside an outline. image = {width, height, data RGBA};
+// box = the image's lat/lon bounds; poly = [[lat, lon], ...]. Null if fewer than 4 pixels fall inside.
+function medianColourInPolygon(image, box, poly) {
+  const lats = poly.map(p => p[0]), lons = poly.map(p => p[1]);
+  const W = image.width, H = image.height;
+  const px = lon => (lon - box.west) / (box.east - box.west) * W, py = lat => (box.north - lat) / (box.north - box.south) * H;
+  const x0 = Math.max(0, Math.floor(px(Math.min(...lons)))), x1 = Math.min(W - 1, Math.ceil(px(Math.max(...lons))));
+  const y0 = Math.max(0, Math.floor(py(Math.max(...lats)))), y1 = Math.min(H - 1, Math.ceil(py(Math.min(...lats))));
+  if (x0 > x1 || y0 > y1) return null;
+  const step = Math.max(1, Math.ceil(Math.sqrt((x1 - x0 + 1) * (y1 - y0 + 1) / 400)));   // at most ~400 samples
+  const R = [], G = [], B = [];
+  for (let y = y0; y <= y1; y += step) for (let x = x0; x <= x1; x += step) {
+    const lon = box.west + (x + 0.5) / W * (box.east - box.west), lat = box.north - (y + 0.5) / H * (box.north - box.south);
+    if (!pointInPoly([lat, lon], poly)) continue;
+    const i = (y * W + x) * 4;
+    R.push(image.data[i]); G.push(image.data[i + 1]); B.push(image.data[i + 2]);
+  }
+  if (R.length < 4) return null;
+  const med = a => { a.sort((p, q) => p - q); return a[Math.floor(a.length / 2)]; };
+  const hex = v => v.toString(16).padStart(2, '0');
+  return { hex: '#' + hex(med(R)) + hex(med(G)) + hex(med(B)), n: R.length };
+}
+const ZONING_KINDS = /^(residential|commercial|retail|industrial|railway|construction|brownfield|education|religious|military)$/;
+// Puts sampled colours into a scan result: buildings get sampledRoofColour, areas sampledColour.
+// Mapped colours (roofColour, colour) are never touched. Returns how many were sampled.
+function applyColourSamples(out, tiles, unprojFactory, info) {
+  const U = unprojFactory(out.meta.origin.lat, out.meta.origin.lon);
+  const pick = poly => { const c = exactCentroid(poly); return tiles.find(t => c[0] >= t.box.south && c[0] <= t.box.north && c[1] >= t.box.west && c[1] <= t.box.east); };
+  const counts = { buildings: 0, areas: 0 };
+  for (const b of out.buildings) {
+    const poly = b.footprint.map(U), t = pick(poly); if (!t) continue;
+    const c = medianColourInPolygon(t.image, t.box, poly); if (c) { b.sampledRoofColour = c.hex; counts.buildings++; }
+  }
+  for (const a of out.areas) {
+    if (ZONING_KINDS.test(a.kind)) continue;   // whole districts: their "colour" is just a mix of everything
+    const poly = a.polygon.map(U), t = pick(poly); if (!t) continue;
+    const c = medianColourInPolygon(t.image, t.box, poly); if (c) { a.sampledColour = c.hex; counts.areas++; }
+  }
+  out.meta.imagery = {
+    source: 'Queensland imagery: Latest state program (all users)',
+    service: 'https://spatial-img.information.qld.gov.au/arcgis/rest/services/Basemaps/LatestStateProgram_AllUsers/ImageServer',
+    licence: 'CC BY-SA', attribution: 'Includes material © State of Queensland (DNRMMRRD); © Planet Labs Netherlands',
+    vintage: '2022 or older (urban areas mostly 2021)', noWarranty: 'The State of Queensland makes no warranty about this data.',
+    metresPerPixel: (info && info.metresPerPixel) || null, sampled: counts
+  };
+  out.meta.attribution = attributionFor({ overture: !!out.meta.overture, imagery: true, elevation: !!out.meta.elevation });
+  return counts;
+}
+
+// ---- ground image ----
+// A top-down picture of the whole area in flat colours, for the game's ground texture.
+const GROUND_COLOURS = {
+  ground: '#7c8a52', grass: '#5e9a3e', park: '#5e9a3e', garden: '#66a347', recreation_ground: '#5e9a3e', pitch: '#4f9a4a', village_green: '#5e9a3e',
+  meadow: '#7aa04a', common: '#5e9a3e', playground: '#b58a5a', wood: '#3e6b2e', forest: '#3e6b2e', scrub: '#557a36', wetland: '#5a7f6a', flowerbed: '#8f6a9a',
+  water: '#3a78c8', river: '#3a78c8', swimming_pool: '#41b4e0', water_park: '#41b4e0', beach: '#e2c579', sand: '#e2c579', bare_rock: '#9a958c',
+  parking: '#8f8f8f', pedestrian: '#b9ad98', platform: '#a29d93', residential: '#857f69', commercial: '#86798a', retail: '#86798a', industrial: '#7b7b7b',
+  railway: '#6b6359', cemetery: '#6f8f5a', construction: '#a08060',
+  road: '#4b4b4b', path: '#b49a78', rail: '#3a3530', building: '#6d6a66'
+};
+function groundColour(kind) { return GROUND_COLOURS[kind] || GROUND_COLOURS.ground; }
+// Lower draws first: zoning tints, then land, then paving, then water and sand on top.
+function groundDrawOrder(kind) {
+  if (ZONING_KINDS.test(kind)) return 0;
+  if (/^(parking|pedestrian|platform|bare_rock)$/.test(kind)) return 2;
+  if (/^(water|river|swimming_pool|water_park|beach|sand)$/.test(kind)) return 3;
+  return 1;
+}
+// Pixel size of the ground image: `metresPerPixel`, made coarser if needed to stay within maxPx.
+function groundImagePlan(bbox, metresPerPixel, maxPx) {
+  const wM = bbox.maxX - bbox.minX, hM = bbox.maxY - bbox.minY;
+  // v11: rounded UP to whole centimetres before sizing, so the size and the stored metresPerPixel agree
+  // (before, a 5 km area gave 1.2207 m/px for the size but 1.22 in the file: ~3 px off at the far edge).
+  const mpp = Math.ceil(Math.max(metresPerPixel, wM / maxPx, hM / maxPx) * 100 - 1e-9) / 100;
+  return { minX: bbox.minX, minY: bbox.minY, maxX: bbox.maxX, maxY: bbox.maxY,
+    width: Math.max(1, Math.ceil(wM / mpp)), height: Math.max(1, Math.ceil(hM / mpp)), metresPerPixel: round2(mpp) };
+}
+
+// ---- landmark photos ----
+// Reads a Wikimedia Commons imageinfo answer into [{file, thumb, page, licence, author}].
+// Orders Commons geosearch hits ({title, dist}) for a landmark: files whose name shares a word
+// with the landmark's name first, then nearest first. Returns file titles.
+function rankNearbyPhotos(name, hits) {
+  const words = String(name || '').toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length > 2 && !/^(the|and|of)$/.test(w));
+  const score = h => words.filter(w => h.title.toLowerCase().includes(w)).length;
+  return hits.filter(h => /\.(jpe?g|png|webp|tiff?)$/i.test(h.title))
+    .sort((a, b) => score(b) - score(a) || a.dist - b.dist).map(h => h.title);
+}
+function parseCommonsImageInfo(json) {
+  const strip = s => String(s || '').replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+  const out = [];
+  for (const p of Object.values((json && json.query && json.query.pages) || {})) {
+    const ii = p.imageinfo && p.imageinfo[0]; if (!ii) continue;
+    const md = ii.extmetadata || {};
+    out.push({ file: p.title, thumb: ii.thumburl || ii.url, page: ii.descriptionurl,
+      licence: strip(md.LicenseShortName && md.LicenseShortName.value) || 'see page', author: strip(md.Artist && md.Artist.value) || 'unknown' });
+  }
+  return out;
+}
+
 // Turns the raw Overpass response into the kartmap format.
 // Returns { out: <the JSON we export>, preview: <shapes for drawing on the map> }
 function buildOutput(data, o) {
   const origin = o.route[0];
   const P = makeProjector(origin[0], origin[1]);
-  const res = { roads: [], buildings: [], buildingParts: [], areas: [], waterways: [], barriers: [], railways: [], points: [], markings: [] };
+  const res = { roads: [], buildings: [], areas: [], waterways: [], barriers: [], railways: [], points: [], markings: [] };
   const previewOf = new Map();   // id -> preview item, so flags found later (e.g. on the track) can colour it
   const preview = [];
   const landmarkCands = [];
@@ -827,27 +1150,29 @@ function buildOutput(data, o) {
     if (t.surface) a.surface = t.surface;
     res.areas.push(a);
     polygon.forEach(grow);
-    preview.push({ cat: 'area', kind, xy: [polygon, ...h] });
+    preview.push({ cat: 'area', id, kind, xy: [polygon, ...h] });
     noteLandmark(t, id, centroid(polygon), 1);
   };
   const addBuilding = (id, t, name, footprint, holes) => {
     const [height, heightSource] = buildingHeight(t);
     const b = { id, kind: t.building, name, height, heightSource, footprint, ...buildingLooks(t) };
+    if (t['overture:added']) b.source = 'overture';   // v8.3: not in OSM, added from Overture
     if (holes && holes.length) b.holes = holes;
     res.buildings.push(b);
     footprint.forEach(grow);
-    const pv = { cat: 'building', xy: [footprint, ...(holes || [])] };
+    const pv = { cat: 'building', id, xy: [footprint, ...(holes || [])] };
     preview.push(pv); previewOf.set(id, pv);
     noteLandmark(t, id, centroid(footprint), 2);
   };
   // Building parts (v8.1): pieces of one building with their own heights, e.g. a tower on a podium.
   const addPart = (id, t, name, footprint, holes) => {
     const [height, heightSource] = buildingHeight(t);
-    const part = { id, part: t['building:part'], name, height, heightSource, footprint, ...buildingLooks(t) };
+    // v8.2: parts sit in the buildings list with part: true (the layout the game's loader reads).
+    const part = { id, kind: t['building:part'], part: true, name, height, heightSource, footprint, ...buildingLooks(t) };
     if (holes && holes.length) part.holes = holes;
-    res.buildingParts.push(part);
+    res.buildings.push(part);
     footprint.forEach(grow);
-    const pv = { cat: 'part', xy: [footprint, ...(holes || [])] };
+    const pv = { cat: 'part', id, xy: [footprint, ...(holes || [])] };
     preview.push(pv); previewOf.set(id, pv);
   };
   const addTrees = (xy, source, idBase, t) => {
@@ -872,6 +1197,7 @@ function buildOutput(data, o) {
         const pt = { id: 'n' + el.id, kind: prop.kind, group: prop.group, source: 'osm', pos };
         if (name) pt.name = name;
         if (prop.kind === 'tree') Object.assign(pt, treeInfo(t));
+        if (t.artwork_type) pt.artworkType = t.artwork_type;
         res.points.push(pt);
         const pv = { cat: 'point', kind: prop.kind, xy: pos };
         preview.push(pv); previewOf.set(pt.id, pv);
@@ -913,7 +1239,7 @@ function buildOutput(data, o) {
     const closed = ll.length > 3 && first[0] === last[0] && first[1] === last[1];
     const xy = ll.map(p => P(p[0], p[1]));
     const ring = closed ? xy.slice(0, -1) : xy;   // polygons: drop the repeated closing point
-    const id = 'w' + el.id;
+    const id = el.ovId ? 'ov-' + el.ovId : 'w' + el.id;   // v8.3: Overture-only buildings get 'ov-' ids
 
     if (t.building) {
       if (!closed) continue;
@@ -925,7 +1251,7 @@ function buildOutput(data, o) {
       const ex = roadExtras(t);
       const rail = { id, kind: t.railway, points: xy };
       if (name) rail.name = name;
-      for (const k of ['bridge', 'tunnel', 'layer']) if (ex[k] !== undefined) rail[k] = ex[k];
+      for (const k of ['bridge', 'tunnel', 'layer', 'lit']) if (ex[k] !== undefined) rail[k] = ex[k];
       if (t.electrified && t.electrified !== 'no') rail.electrified = true;
       res.railways.push(rail);
       xy.forEach(grow);
@@ -937,6 +1263,7 @@ function buildOutput(data, o) {
       if (name) bar.name = name;
       const h = parseNum(t.height); if (h) bar.height = h;
       if (t.material) bar.material = t.material;
+      if (t.colour) bar.colour = t.colour;
       res.barriers.push(bar);
       xy.forEach(grow);
       const pv = { cat: 'barrier', xy };
@@ -947,6 +1274,12 @@ function buildOutput(data, o) {
       res.roads.push({ id, kind: t.highway, name, width, widthSource, points: xy, ...extras });
       xy.forEach(grow);
       preview.push({ cat: 'road', kind: t.highway, bridge: !!extras.bridge, tunnel: !!extras.tunnel, xy });
+    } else if (t.man_made && !closed && /^(pier|breakwater|groyne)$/.test(t.man_made)) {
+      // v8.2: a pier or breakwater mapped as a line becomes a path the game can draw.
+      const w = parseNum(t.width);
+      res.roads.push({ id, kind: t.man_made, name, width: w || 4, widthSource: w ? 'osm' : 'default', points: xy, ...roadExtras(t) });
+      xy.forEach(grow);
+      preview.push({ cat: 'road', kind: 'footway', xy });
     } else if (t.waterway && !closed) {
       res.waterways.push({ id, kind: t.waterway, name, points: xy });
       xy.forEach(grow);
@@ -963,19 +1296,20 @@ function buildOutput(data, o) {
   // Parts: link each to the building it sits in. Parts carry the real shape; the parent's outline
   // is then just its ground footprint.
   const bCent = res.buildings.map(b => centroid(b.footprint));
-  for (const part of res.buildingParts) {
+  const wholes = res.buildings.filter(b => !b.part);
+  for (const part of res.buildings.filter(b => b.part)) {
     const c = centroid(part.footprint);
-    const host = res.buildings.find(b => pointInPoly(c, b.footprint));
+    const host = wholes.find(b => pointInPoly(c, b.footprint));
     if (host) { part.parent = host.id; host.hasParts = true; }
   }
   // Smarter height guesses: an unmeasured building takes the typical (median) height of at least
   // 3 measured buildings of the same type within 150 m. Measured heights are never changed.
-  const measured = h => h === 'osm' || h === 'levels' || h === 'lidar';
+  const measured = h => h === 'osm' || h === 'levels' || h === 'lidar' || h === 'overture';
   res.buildings.forEach((b, i) => {
-    if (b.heightSource !== 'default') return;
+    if (b.part || b.heightSource !== 'default') return;
     const near = [];
     res.buildings.forEach((o2, j) => {
-      if (j === i || o2.kind !== b.kind || !measured(o2.heightSource)) return;
+      if (j === i || o2.part || o2.kind !== b.kind || !measured(o2.heightSource)) return;
       if (Math.hypot(bCent[j][0] - bCent[i][0], bCent[j][1] - bCent[i][1]) <= 150) near.push(o2.height);
     });
     if (near.length >= 3) {
@@ -985,7 +1319,7 @@ function buildOutput(data, o) {
     }
   });
   // Roof shapes: mapped ones are marked 'osm', the rest get a guess marked 'guess'.
-  for (const b of res.buildings.concat(res.buildingParts)) {
+  for (const b of res.buildings) {
     if (b.roofShape) b.roofShapeSource = 'osm';
     else { b.roofShape = b.part ? 'flat' : guessRoof(b.kind, polygonArea(b.footprint), b.height); b.roofShapeSource = 'guess'; }
   }
@@ -998,7 +1332,6 @@ function buildOutput(data, o) {
     if (d <= half) { obj.onTrack = true; const pv = previewOf.get(obj.id); if (pv) pv.onTrack = true; }
   };
   res.buildings.forEach(b => flag(b, b.footprint, true));
-  res.buildingParts.forEach(b => flag(b, b.footprint, true));
   res.barriers.forEach(b => flag(b, b.points, false));
   res.railways.forEach(r => flag(r, r.points, false));
   res.points.forEach(p => flag(p, [p.pos], false));
@@ -1015,10 +1348,10 @@ function buildOutput(data, o) {
     race.shortcuts.forEach(s => preview.push({ cat: 'shortcut', xy: s.points, saving: s.saving }));
   }
   // Quality report: how much is real vs guessed, and what needs fixing by hand.
-  const nb = res.buildings.length;
+  const nb = wholes.length;   // parts are pieces of buildings, so they're left out of the percentages
   const pct = n => nb ? Math.round(1000 * n / nb) / 10 : 0;
-  const hMeasured = res.buildings.filter(b => measured(b.heightSource)).length;
-  const hEstimated = res.buildings.filter(b => b.heightSource === 'estimated').length;
+  const hMeasured = wholes.filter(b => measured(b.heightSource)).length;
+  const hEstimated = wholes.filter(b => b.heightSource === 'estimated' || b.heightSource === 'ml-estimate').length;
   const onTrackB = res.buildings.filter(b => b.onTrack);
   const trees = res.points.filter(p => p.kind === 'tree');
   const notes = [];
@@ -1037,18 +1370,19 @@ function buildOutput(data, o) {
   }
   const quality = {
     heights: { measured: pct(hMeasured), estimated: pct(hEstimated), default: Math.round((100 - pct(hMeasured) - pct(hEstimated)) * 10) / 10 },
-    roofShapes: { mapped: pct(res.buildings.filter(b => b.roofShapeSource === 'osm').length), guessed: pct(res.buildings.filter(b => b.roofShapeSource === 'guess').length) },
+    roofShapes: { mapped: pct(wholes.filter(b => b.roofShapeSource === 'osm').length), guessed: pct(wholes.filter(b => b.roofShapeSource === 'guess').length) },
     buildingsOnTrack: onTrackB.map(b => b.id),
     barriersOnTrack: barOn, propsOnTrack: propOn,
     treesTyped: trees.length ? Math.round(1000 * trees.filter(t => t.treeType).length / trees.length) / 10 : 0,
     notes
   };
 
-  // Landmarks: one per name and place. If a name appears on both a point and a building/area
-  // within 60 m, keep the building/area version (it has a shape to model from).
+  // Landmarks: one per name and place. If a name appears more than once within 300 m (a point and
+  // a building, or a huge venue mapped as building and area), keep the building, then area version.
+  // (v8.2: was 60 m; the live test found the Convention Centre twice.)
   const landmarks = [];
   for (const { l } of landmarkCands.sort((a, b) => b.priority - a.priority)) {
-    if (landmarks.some(k => k.name === l.name && Math.hypot(k.pos[0] - l.pos[0], k.pos[1] - l.pos[1]) < 60)) continue;
+    if (landmarks.some(k => k.name === l.name && Math.hypot(k.pos[0] - l.pos[0], k.pos[1] - l.pos[1]) < 300)) continue;
     landmarks.push(l);
   }
   landmarks.forEach((l, i) => { l.id = 'L' + (i + 1); if (l.ref == null) delete l.ref; });
@@ -1060,7 +1394,7 @@ function buildOutput(data, o) {
     meta: {
       name: o.name || 'route',
       generated: o.now || new Date().toISOString(),
-      generator: 'kart-map-scanner v8.1',
+      generator: 'kart-map-scanner v12c',
       origin: { lat: origin[0], lon: origin[1] },
       units: 'metres',
       axes: 'x = east, y = north. In Godot: Vector3(x, 0, -y)',
@@ -1068,15 +1402,16 @@ function buildOutput(data, o) {
       bbox: { minX: round2(bb.minX), minY: round2(bb.minY), maxX: round2(bb.maxX), maxY: round2(bb.maxY) },
       areasTrimmedTo: { minX: round2(clipBox.minX), minY: round2(clipBox.minY), maxX: round2(clipBox.maxX), maxY: round2(clipBox.maxY) },
       elevation: null,
-      attribution: '© OpenStreetMap contributors, ODbL',
+      attribution: attributionFor({ overture: !!o.overture }),
+      overture: o.overture || undefined,   // v8.3: { release, heightsFilled, added }
       counts: {
-        roads: res.roads.length, buildings: res.buildings.length,
+        roads: res.roads.length, buildings: wholes.length,
         buildingsWithRealHeight: hMeasured,
         areas: res.areas.length, waterways: res.waterways.length, points: res.points.length,
         manualTrees: 0, skippedIncompleteShapes: skipped,
         barriers: res.barriers.length, landmarks: landmarks.length,
         bridges: res.roads.filter(r => r.bridge).length, tunnels: res.roads.filter(r => r.tunnel).length,
-        buildingParts: res.buildingParts.length, railways: res.railways.length, markings: res.markings.length,
+        buildingParts: res.buildings.length - wholes.length, railways: res.railways.length, markings: res.markings.length,
         shortcuts: race ? race.shortcuts.length : 0
       },
       quality
@@ -1088,6 +1423,8 @@ function buildOutput(data, o) {
       closed: !!o.loop,
       snappedToRoads: !!o.snapped,
       waypoints: o.waypoints,  // lat/lon clicks, so the tool can reload and edit this route
+      reversed: !!o.reverse,   // v9a: race runs against the drawing direction
+      startPoint: o.start || undefined,   // v9a: [lat, lon] you picked as the start (loops only)
       centerline,              // v8.1: smoothed, evenly spaced version of points
       corners                  // v8.1: turns of more than 35°
     },
@@ -1098,12 +1435,34 @@ function buildOutput(data, o) {
     barriers: res.barriers,
     points: res.points,
     landmarks,
-    buildingParts: res.buildingParts,
     railways: res.railways,
     markings: res.markings,
     race
   };
   return { out, preview };
+}
+
+// v8.2: what the game's Godot loader (brisbane-kart: kartmap.gd, kartmap_scenery.gd) relies on.
+// Returns a list of problems; empty = the file is safe to hand to the game.
+function loaderContractProblems(out) {
+  const p = [];
+  const isPt = q => Array.isArray(q) && q.length === 2 && isFinite(q[0]) && isFinite(q[1]);
+  if (out.format !== 'kartmap') p.push('format is not "kartmap"');
+  if (!out.route || !Array.isArray(out.route.points) || out.route.points.length < 2 || !out.route.points.every(isPt)) p.push('route.points missing or invalid');
+  if (!(out.route && out.route.width > 0)) p.push('route.width missing');
+  for (const k of ['roads', 'buildings', 'areas', 'waterways', 'points']) if (!Array.isArray(out[k])) p.push(k + ' is not a list');
+  const ids = new Set((out.buildings || []).map(b => b.id));
+  for (const b of out.buildings || []) {
+    if (!Array.isArray(b.footprint) || b.footprint.length < 3 || !b.footprint.every(isPt)) { p.push('building ' + b.id + ' has a bad footprint'); continue; }
+    if (!(b.height > 0) || typeof b.heightSource !== 'string') p.push('building ' + b.id + ' has no height/heightSource');
+    if (b.hasParts && !(out.buildings || []).some(q => q.part && q.parent === b.id)) p.push('building ' + b.id + ' says it has parts but none are in the buildings list (it would vanish in the game)');
+    if (b.part && b.parent && !ids.has(b.parent)) p.push('part ' + b.id + ' points at a missing building');
+  }
+  for (const r of (out.roads || []).concat(out.waterways || [], out.barriers || [], out.railways || [])) if (!Array.isArray(r.points) || r.points.length < 2 || !r.points.every(isPt)) p.push((r.id || '?') + ' has a bad line');
+  for (const a of out.areas || []) if (!Array.isArray(a.polygon) || a.polygon.length < 3) p.push('area ' + a.id + ' has a bad polygon');
+  for (const q of out.points || []) if (!isPt(q.pos) || !q.kind) p.push('point ' + q.id + ' has no position/kind');
+  for (const l of out.landmarks || []) if (!isPt(l.pos) && !Array.isArray(l.footprint)) p.push('landmark ' + (l.name || l.id) + ' has no position');
+  return p;
 }
 
 // Adds your hand-placed trees to a scan result at export time, so placing trees never
@@ -1117,6 +1476,390 @@ function withManualTrees(out, trees) {
     points: out.points.concat(manual),
     manualTrees: trees.map(t => ({ lat: t.lat, lon: t.lon, canopy: t.canopy }))   // so Load JSON can bring them back
   };
+}
+
+// ======================================================================
+// v9a: race direction and start, hand-drawn buildings, track library
+// ======================================================================
+// Turns the drawn route into the race route: optionally reversed, and (on a loop) starting at
+// the point nearest `start` ([lat, lon]). Works on the final, already-snapped line, so it never
+// re-snaps (re-snapping a reversed route can detour around one-way streets).
+function orientRoute(latlngs, opts) {
+  let pts = latlngs.map(p => p.slice());
+  if (!opts || pts.length < 2) return pts;
+  if (opts.reverse) pts.reverse();
+  if (!opts.loop || !opts.start || pts.length < 3) return pts;
+  if (dist(pts[0], pts[pts.length - 1]) < 1) pts.pop();     // work on the open ring, close it again at the end
+  const k = Math.PI / 180, c = Math.cos(opts.start[0] * k);
+  const XY = q => [(q[1] - opts.start[1]) * c, q[0] - opts.start[0]];   // flat, start at [0, 0] (degrees, east scaled)
+  let best = { d: Infinity, i: 0, t: 0 };
+  for (let i = 0; i < pts.length; i++) {
+    const a = XY(pts[i]), b = XY(pts[(i + 1) % pts.length]);
+    const dx = b[0] - a[0], dy = b[1] - a[1], L = dx * dx + dy * dy;
+    const t = L ? Math.max(0, Math.min(1, -(a[0] * dx + a[1] * dy) / L)) : 0;
+    const d = Math.hypot(a[0] + t * dx, a[1] + t * dy);
+    if (d < best.d) best = { d, i, t };
+  }
+  const a = pts[best.i], b = pts[(best.i + 1) % pts.length];
+  const q = [a[0] + (b[0] - a[0]) * best.t, a[1] + (b[1] - a[1]) * best.t];
+  const ring = [q];
+  for (let n = 1; n <= pts.length; n++) {
+    const r = pts[(best.i + n) % pts.length];
+    if (dist(r, ring[ring.length - 1]) > 0.01) ring.push(r);
+  }
+  if (dist(ring[ring.length - 1], q) > 0.01) ring.push(q.slice()); else ring[ring.length - 1] = q.slice();
+  return ring;
+}
+// Points every `step` metres along a line with the travel direction there (degrees, 0 = north,
+// clockwise), for the direction arrows on the map. Skips the very start (the start flag sits there).
+function arrowsAlong(latlngs, step) {
+  const out = [];
+  let next = step / 2, run = 0;
+  for (let i = 1; i < latlngs.length; i++) {
+    const a = latlngs[i - 1], b = latlngs[i], d = dist(a, b);
+    if (!d) continue;
+    const k = Math.PI / 180;
+    const bearing = (Math.atan2((b[1] - a[1]) * Math.cos(a[0] * k), b[0] - a[0]) / k + 360) % 360;
+    while (next <= run + d) {
+      const t = (next - run) / d;
+      out.push({ pos: [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t], bearing: Math.round(bearing) });
+      next += step;
+    }
+    run += d;
+  }
+  return out;
+}
+// Hand-drawn buildings for export. Each { ring: [[lat, lon]…] (open, 3+ corners), height, name? }.
+function manualBuildingsFor(out, list) {
+  const P = makeProjector(out.meta.origin.lat, out.meta.origin.lon);
+  return (list || []).filter(m => Array.isArray(m.ring) && m.ring.length >= 3 && m.height > 0).map((m, i) => {
+    const b = { id: 'mb' + (i + 1), kind: 'yes', height: round2(m.height), heightSource: 'manual', source: 'manual',
+      footprint: m.ring.map(q => P(q[0], q[1])), roofShape: 'flat', roofShapeSource: 'guess' };
+    if (m.name) b.name = m.name;
+    return b;
+  });
+}
+// Adds your hand-placed trees (v7) and hand-drawn buildings (v9a) to a scan result at export
+// time, so neither needs a re-scan. Returns a new object; the scan result is left untouched.
+function withManualExtras(out, trees, buildings) {
+  const t = withManualTrees(out, trees);
+  const mb = manualBuildingsFor(out, buildings);
+  return {
+    ...t,
+    meta: { ...t.meta, counts: { ...t.meta.counts, manualBuildings: mb.length } },
+    buildings: t.buildings.concat(mb),
+    manualBuildings: (buildings || []).map(m => ({ ring: m.ring, height: m.height, ...(m.name ? { name: m.name } : {}) }))   // so Load JSON can bring them back
+  };
+}
+// ---- track library (saved in the browser) ----
+const LIBRARY_VERSION = 1;
+// Adds or replaces (same name) a track. Returns a new list, newest first.
+function libraryUpsert(list, entry) {
+  const rest = (list || []).filter(e => e.name !== entry.name);
+  return [entry, ...rest];
+}
+function libraryRemove(list, name) { return (list || []).filter(e => e.name !== name); }
+// Checks a library backup file. Returns { tracks } or throws a plain-English error.
+function readLibraryBackup(j) {
+  if (!j || j.format !== 'kartmap-library') throw new Error('not a track library backup');
+  if (j.version > LIBRARY_VERSION) throw new Error('made by a newer scanner (library version ' + j.version + ')');
+  const tracks = (Array.isArray(j.tracks) ? j.tracks : []).filter(t => t && typeof t.name === 'string' && Array.isArray(t.waypoints));
+  if (!tracks.length) throw new Error('the backup has no tracks in it');
+  return { tracks };
+}
+// Merges a backup into the library; tracks in the backup replace ones with the same name.
+function libraryMerge(list, tracks) { return tracks.slice().reverse().reduce((l, t) => libraryUpsert(l, t), list || []); }
+
+// v9b: where the things on the track are (buildings, fences, props), for "Show next problem".
+// Takes the preview list from buildOutput; returns [{ cat, xy: [x, y] metres, label }], nearest the start first.
+function problemSpots(preview) {
+  const mid = f => {
+    if (f.cat === 'building' || f.cat === 'part') return centroid(f.xy[0]);
+    if (f.cat === 'barrier') return f.xy[Math.floor(f.xy.length / 2)];
+    return f.xy;
+  };
+  const label = f => f.cat === 'barrier' ? 'Fence or wall across the track' : f.cat === 'point' ? `${String(f.kind).replace(/_/g, ' ')} on the track` : 'Building blocking the track';
+  return (preview || []).filter(f => f.onTrack).map(f => ({ cat: f.cat, xy: mid(f), label: label(f) }))
+    .sort((a, b) => Math.hypot(a.xy[0], a.xy[1]) - Math.hypot(b.xy[0], b.xy[1]));
+}
+
+// ======================================================================
+// v11: 3D preview plan. Turns a kartmap file into simple shapes (pure, testable); the browser
+// part draws them with three.js. Coordinates stay kartmap metres (x east, y north); the viewer
+// maps them to 3D as (x, height, -y), the same way the Godot game does.
+// ======================================================================
+const WALL_COLOURS = {
+  house: '#d9c8a9', residential: '#d9c8a9', detached: '#d9c8a9', semidetached_house: '#d9c8a9', terrace: '#d4bfa1', bungalow: '#d9c8a9',
+  apartments: '#cfc4b4', commercial: '#b9bccb', retail: '#c7b9cb', office: '#b9c4cb', hotel: '#c9bfb0', industrial: '#a9a9a9',
+  warehouse: '#a9a9a9', shed: '#a58f73', garage: '#a59a8c', garages: '#a59a8c', roof: '#8d99ae', carport: '#8d99ae',
+  school: '#d4b49c', university: '#d4b49c', church: '#d6cfc3', hospital: '#e0e0e0', train_station: '#c2b8a3', stadium: '#bfbfbf'
+};
+// The two edges of a ribbon `width` wide along a line (left = left of the direction of travel).
+function ribbon(points, width, closed) {
+  const n = points.length, left = [], right = [], h = width / 2;
+  for (let i = 0; i < n; i++) {
+    const prev = points[i > 0 ? i - 1 : (closed ? n - 2 : 0)], next = points[i < n - 1 ? i + 1 : (closed ? 1 : n - 1)];
+    let dx = next[0] - prev[0], dy = next[1] - prev[1];
+    const L = Math.hypot(dx, dy) || 1; dx /= L; dy /= L;
+    left.push([round2(points[i][0] - dy * h), round2(points[i][1] + dx * h)]);
+    right.push([round2(points[i][0] + dy * h), round2(points[i][1] - dx * h)]);
+  }
+  return { left, right };
+}
+function scene3dPlan(out) {
+  const bb = out.meta.bbox;
+  const buildings = [];
+  for (const b of out.buildings || []) {
+    if (b.hasParts || !Array.isArray(b.footprint) || b.footprint.length < 3) continue;   // parts are drawn instead
+    const base = Math.max(0, b.minHeight || 0);
+    buildings.push({ id: b.id, outline: b.footprint, holes: b.holes || [], base, top: Math.max(base + 0.5, b.height || 3), ground: b.ground || 0,
+      wall: b.colour || WALL_COLOURS[b.kind] || '#c9c9c9', roof: b.roofColour || b.sampledRoofColour || null,
+      guessed: /^(default|estimated|ml-estimate|guess)$/.test(b.heightSource || ''), manual: b.source === 'manual', blocks: !!b.onTrack });
+  }
+  const trees = [], props = [];
+  for (const p of out.points || []) {
+    if (!Array.isArray(p.pos)) continue;
+    if (p.kind === 'tree') trees.push({ x: p.pos[0], y: p.pos[1], g: p.ground || 0, type: p.treeType || null,
+      h: p.height || (p.treeType === 'palm' ? 10 : p.treeType === 'conifer' ? 9 : 7), r: (p.canopy || (p.treeType === 'palm' ? 5 : 7)) / 2 });
+    else props.push({ x: p.pos[0], y: p.pos[1], g: p.ground || 0, kind: p.kind });
+  }
+  const useCl = !!(out.route.centerline && out.route.centerline.points && out.route.centerline.points.length > 1);
+  const line = useCl ? out.route.centerline.points : out.route.points;
+  const closed = !!out.route.closed;
+  // v12a: heights along the track (zeros when there are none)
+  const elev = (useCl ? out.route.centerline.elevation : out.route.elevation) || line.map(() => 0);
+  const sp = useCl ? (out.route.centerline.spacing || 2) : 0;
+  const elevAt = at => sp ? elev[Math.max(0, Math.min(elev.length - 1, Math.round(at / sp)))] : 0;
+  return {
+    centre: [round2((bb.minX + bb.maxX) / 2), round2((bb.minY + bb.maxY) / 2)],
+    size: [round2(bb.maxX - bb.minX), round2(bb.maxY - bb.minY)],
+    buildings, trees, props,
+    track: { line, closed, elev, width: out.route.width || 8, ...ribbon(line, out.route.width || 8, closed) },
+    start: out.race ? { ...out.race.startLine, g: elevAt(out.race.startLine.at || 0) } : null,
+    checkpoints: out.race ? out.race.checkpoints.map(c => ({ ...c, g: elevAt(c.at || 0) })) : [],
+    landmarks: (out.landmarks || []).filter(l => Array.isArray(l.pos)).map(l => ({ x: l.pos[0], y: l.pos[1], g: l.ground || 0, name: l.name, kind: l.kind })),
+    hills: !!out.meta.elevation
+  };
+}
+
+// ======================================================================
+// v12a: ground heights from Queensland's LiDAR terrain model (pure part)
+// ======================================================================
+// The service is "Queensland DEM": bare ground (no buildings or trees), 1 m LiDAR in towns,
+// 30 m SRTM elsewhere, river and sea depths included. Licence CC BY-SA.
+const DEM_SOURCE = {
+  service: 'https://spatial-img.information.qld.gov.au/arcgis/rest/services/Elevation/QldDem/ImageServer',
+  name: 'Queensland DEM (LiDAR, 1 m in most towns)', licence: 'CC BY-SA',
+  attribution: 'Includes material © State of Queensland (DNRMMRRD); © Commonwealth of Australia (Geoscience Australia, The Australian Hydrographic Office); © www.deepreef.org 2025'
+};
+// The server's raw "bsq" answer for one float band: width × height float32 values (row by row,
+// north row first), then one bit per pixel saying whether it has data (found in a live test).
+function parseBsqF32(buf, w, h) {
+  const n = w * h, out = new Float32Array(n);
+  out.set(new Float32Array(buf.slice(0, n * 4)));
+  if (buf.byteLength >= n * 4 + Math.ceil(n / 8)) {
+    const mask = new Uint8Array(buf, n * 4, Math.ceil(n / 8));
+    for (let i = 0; i < n; i++) if (!(mask[i >> 3] & (0x80 >> (i & 7)))) out[i] = NaN;
+  }
+  for (let i = 0; i < n; i++) if (!(out[i] > -1000 && out[i] < 10000)) out[i] = NaN;   // junk / no-data values
+  return out;
+}
+// Height at a lat/lon from a list of grids { box: {west, east, north, south}, width, height, data }.
+// Pixel centres, bilinear between the 4 nearest. null where there's no data.
+function sampleGrid(grids, lat, lon) {
+  for (const g of grids) {
+    const b = g.box;
+    if (lat < b.south || lat > b.north || lon < b.west || lon > b.east) continue;
+    const fx = Math.max(0, Math.min(g.width - 1, (lon - b.west) / (b.east - b.west) * g.width - 0.5));
+    const fy = Math.max(0, Math.min(g.height - 1, (b.north - lat) / (b.north - b.south) * g.height - 0.5));
+    const x0 = Math.floor(fx), y0 = Math.floor(fy), x1 = Math.min(g.width - 1, x0 + 1), y1 = Math.min(g.height - 1, y0 + 1);
+    const tx = fx - x0, ty = fy - y0, d = g.data, W = g.width;
+    const v = [d[y0 * W + x0], d[y0 * W + x1], d[y1 * W + x0], d[y1 * W + x1]], wt = [(1 - tx) * (1 - ty), tx * (1 - ty), (1 - tx) * ty, tx * ty];
+    let s = 0, ws = 0;
+    for (let k = 0; k < 4; k++) if (!isNaN(v[k])) { s += v[k] * wt[k]; ws += wt[k]; }
+    if (ws > 0.01) return s / ws;
+  }
+  return null;
+}
+// Fills gaps (null) along a line by straight-line interpolation between the nearest known values.
+function fillGaps(vals) {
+  const out = vals.slice(), n = out.length;
+  let last = -1;
+  for (let i = 0; i <= n; i++) {
+    if (i < n && out[i] == null) continue;
+    if (last >= 0 && i < n && i - last > 1) for (let k = last + 1; k < i; k++) out[k] = out[last] + (out[i] - out[last]) * (k - last) / (i - last);
+    else if (last < 0 && i < n) for (let k = 0; k < i; k++) out[k] = out[i];
+    else if (i === n && last >= 0) for (let k = last + 1; k < n; k++) out[k] = out[last];
+    if (i < n) last = i;
+  }
+  return out;
+}
+// Ground heights for a scan. grids: DEM tiles; U: lat/lon from metres (makeUnprojector).
+// The terrain model is bare ground, so on bridges it gives the river or road below: track points
+// on a bridge (or in a tunnel) are bridged with a straight line between the two ends instead.
+function applyElevation(out, grids, unprojFactory, info) {
+  const U = unprojFactory(out.meta.origin.lat, out.meta.origin.lon);
+  const at = xy => { const [la, lo] = U(xy); return sampleGrid(grids, la, lo); };
+  const cl = out.route.centerline && out.route.centerline.points && out.route.centerline.points.length > 1 ? out.route.centerline : null;
+  const line = cl ? cl.points : out.route.points;
+  const span = (out.route.width || 8) / 2 + 2;
+  const decks = (out.roads || []).filter(r => r.bridge || r.tunnel);
+  const onDeck = p => decks.some(r => { for (let i = 1; i < r.points.length; i++) if (distPointSeg(p, r.points[i - 1], r.points[i]) <= Math.max(4, Math.min(span, (r.width || 4) / 2 + 2))) return true; return false; });
+  const deck = line.map(onDeck);
+  const raw = line.map((p, i) => deck[i] ? null : at(p));
+  if (raw.every(v => v == null)) return null;   // area not covered
+  // bridged values, then smoothed over ±8 m so the kart doesn't feel every bump in the scan
+  const filled = fillGaps(raw);
+  const step = cl ? (cl.spacing || 2) : 0, K = cl ? Math.max(1, Math.round(8 / step)) : 0;
+  const smooth = filled.map((v, i) => { if (!K) return v; let s = 0, c = 0; for (let k = -K; k <= K; k++) { const j = out.route.closed ? (i + k + filled.length) % filled.length : i + k; if (j >= 0 && j < filled.length) { s += filled[j]; c++; } } return s / c; });
+  const base = Math.min(...smooth);
+  const rel = v => round2(v - base);
+  const grounds = { buildings: 0, points: 0 };
+  for (const b of out.buildings) {
+    const hs = b.footprint.map(at).filter(v => v != null);
+    if (hs.length) { b.ground = rel(Math.min(...hs)); grounds.buildings++; }   // lowest ground under the outline, so nothing floats
+  }
+  for (const p of out.points) { const v = at(p.pos); if (v != null) { p.ground = rel(v); grounds.points++; } }
+  for (const l of out.landmarks || []) { const v = Array.isArray(l.pos) ? at(l.pos) : null; if (v != null) l.ground = rel(v); }
+  // route.points (the raw line the game reads) get heights from the nearest smoothed centerline point
+  const nearestH = p => { let best = 0, bd = Infinity; for (let i = 0; i < line.length; i++) { const d = Math.hypot(line[i][0] - p[0], line[i][1] - p[1]); if (d < bd) { bd = d; best = i; } } return smooth[best]; };
+  out.route.elevation = cl ? out.route.points.map(p => rel(nearestH(p))) : smooth.map(rel);
+  if (cl) cl.elevation = smooth.map(rel);
+  // climb, descent and the steepest 20 m
+  let climb = 0, descent = 0, steep = { grade: 0, at: 0 };
+  const sp = cl ? (cl.spacing || 2) : null;
+  for (let i = 1; i < smooth.length; i++) { const d = smooth[i] - smooth[i - 1]; if (d > 0) climb += d; else descent -= d; }
+  if (sp) { const w = Math.max(1, Math.round(20 / sp)); for (let i = 0; i + w < smooth.length; i++) { const g = (smooth[i + w] - smooth[i]) / (w * sp) * 100; if (Math.abs(g) > Math.abs(steep.grade)) steep = { grade: Math.round(g * 10) / 10, at: Math.round(i * sp) }; } }
+  const bridged = deck.filter(Boolean).length;
+  out.meta.elevation = { source: DEM_SOURCE.name, service: DEM_SOURCE.service, licence: DEM_SOURCE.licence, attribution: DEM_SOURCE.attribution,
+    base: round2(base), units: 'metres above meta.elevation.base (base is metres above sea level, AHD)', groundOnly: 'bare ground: no buildings or trees',
+    metresPerSample: (info && info.metresPerSample) || null, trackLowest: 0, trackHighest: rel(Math.max(...smooth)),
+    climb: Math.round(climb * 10) / 10, descent: Math.round(descent * 10) / 10, steepest: steep,
+    bridgedPoints: bridged, bridgedNote: bridged ? 'Track points on bridges/in tunnels use a straight line between the two ends (the terrain model has no bridges).' : undefined,
+    counts: grounds };
+  out.meta.attribution = attributionFor({ overture: !!out.meta.overture, imagery: !!out.meta.imagery, elevation: true });
+  const q = out.meta.quality;
+  if (q && Array.isArray(q.notes)) {
+    q.notes = q.notes.filter(n => !/^Hills:/.test(n));
+    q.notes.push(`Hills: the track climbs ${Math.round(climb)} m in total and rises ${out.meta.elevation.trackHighest} m above its lowest point; steepest ${Math.abs(steep.grade)}% ${steep.grade >= 0 ? 'uphill' : 'downhill'} at ${steep.at} m.`);
+  }
+  return out.meta.elevation;
+}
+// base64 that works in browsers and Node.
+function bytesToBase64(bytes) {
+  const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 3) {
+    const a = bytes[i], b = bytes[i + 1], c = bytes[i + 2];
+    s += A[a >> 2] + A[((a & 3) << 4) | ((b || 0) >> 4)] + (i + 1 < bytes.length ? A[((b & 15) << 2) | ((c || 0) >> 6)] : '=') + (i + 2 < bytes.length ? A[c & 63] : '=');
+  }
+  return s;
+}
+function base64ToBytes(s) {
+  const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/', out = [];
+  for (let i = 0; i < s.length; i += 4) {
+    const n = [0, 1, 2, 3].map(k => A.indexOf(s[i + k]));
+    out.push((n[0] << 2) | (n[1] >> 4));
+    if (n[2] >= 0) out.push(((n[1] & 15) << 4) | (n[2] >> 2));
+    if (n[3] >= 0) out.push(((n[2] & 3) << 6) | n[3]);
+  }
+  return new Uint8Array(out);
+}
+// A height grid for the game: every `spacing` metres over the scan's bbox, heights in centimetres
+// above meta.elevation.base as little-endian 16-bit numbers (-32768 = no data), base64.
+function terrainFile(out, grids, unprojFactory, spacing) {
+  if (!out.meta.elevation) return null;
+  const U = unprojFactory(out.meta.origin.lat, out.meta.origin.lon), bb = out.meta.bbox, base = out.meta.elevation.base;
+  const w = Math.max(2, Math.ceil((bb.maxX - bb.minX) / spacing) + 1), h = Math.max(2, Math.ceil((bb.maxY - bb.minY) / spacing) + 1);
+  const bytes = new Uint8Array(w * h * 2), view = new DataView(bytes.buffer);
+  let missing = 0;
+  for (let r = 0; r < h; r++) for (let c = 0; c < w; c++) {
+    const [la, lo] = U([bb.minX + c * spacing, bb.maxY - r * spacing]);
+    const v = sampleGrid(grids, la, lo);
+    let cm = v == null ? -32768 : Math.round((v - base) * 100);
+    if (v != null) cm = Math.max(-32767, Math.min(32767, cm)); else missing++;
+    view.setInt16((r * w + c) * 2, cm, true);
+  }
+  return { format: 'kartmap-terrain', version: 1, name: out.meta.name, origin: out.meta.origin,
+    minX: bb.minX, maxY: bb.maxY, spacing, width: w, height: h, base,
+    encoding: 'int16 little-endian, centimetres above base, row by row from the north-west corner (minX, maxY) going east then south; -32768 = no data',
+    source: DEM_SOURCE.name, licence: DEM_SOURCE.licence, attribution: DEM_SOURCE.attribution, missing, data: bytesToBase64(bytes) };
+}
+
+// ======================================================================
+// v12b: share links (a whole track packed into the web address)
+// ======================================================================
+// Only what's needed to rebuild the track; coordinates rounded to ~10 cm.
+function trackForLink(t) {
+  const r6 = n => Math.round(n * 1e6) / 1e6, pts = a => (a || []).map(p => [r6(p[0]), r6(p[1])]);
+  const o = { v: 1, n: t.name || '', w: pts(t.waypoints), s: t.snap !== false ? 1 : 0, l: t.loop !== false ? 1 : 0, r: +t.radius || 100, k: +t.width || 8 };
+  if (t.race && (t.race.reverse || t.race.start)) o.rc = { rv: t.race.reverse ? 1 : 0, st: t.race.start ? pts([t.race.start])[0] : null };
+  if (t.trees && t.trees.length) o.tr = t.trees.map(x => [r6(x.lat), r6(x.lon), x.canopy]);
+  if (t.manualBuildings && t.manualBuildings.length) o.mb = t.manualBuildings.map(m => ({ g: pts(m.ring), h: m.height, ...(m.name ? { n: m.name } : {}) }));
+  return o;
+}
+function trackFromLink(o) {
+  if (!o || o.v !== 1 || !Array.isArray(o.w)) throw new Error('this link is not a Kart Map Scanner track');
+  const ok = p => Array.isArray(p) && p.length === 2 && Math.abs(p[0]) <= 90 && Math.abs(p[1]) <= 180;
+  if (!o.w.every(ok)) throw new Error('the track in this link is damaged');
+  return { name: String(o.n || ''), waypoints: o.w, snap: o.s !== 0, loop: o.l !== 0, radius: Math.min(300, Math.max(25, +o.r || 100)), width: Math.min(30, Math.max(3, +o.k || 8)),
+    race: o.rc ? { reverse: !!o.rc.rv, start: ok(o.rc.st) ? o.rc.st : null } : { reverse: false, start: null },
+    trees: (o.tr || []).filter(x => Array.isArray(x) && ok([x[0], x[1]])).map(x => ({ lat: x[0], lon: x[1], canopy: +x[2] || 10 })),
+    manualBuildings: (o.mb || []).filter(m => Array.isArray(m.g) && m.g.length >= 3 && m.g.every(ok) && m.h > 0).map(m => ({ ring: m.g, height: m.h, ...(m.n ? { name: String(m.n) } : {}) })) };
+}
+const b64url = bytes => bytesToBase64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const fromB64url = s => base64ToBytes(s.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((s.length + 3) % 4));
+// Packs a track into text for a link: squeezed with "deflate" when the browser can ("z" + data),
+// plain otherwise ("j" + data).
+async function packTrack(t) {
+  const json = new TextEncoder().encode(JSON.stringify(trackForLink(t)));
+  if (typeof CompressionStream === 'function') {
+    const zipped = new Uint8Array(await new Response(new Blob([json]).stream().pipeThrough(new CompressionStream('deflate-raw'))).arrayBuffer());
+    return 'z' + b64url(zipped);
+  }
+  return 'j' + b64url(json);
+}
+async function unpackTrack(s) {
+  let bytes;
+  try { bytes = fromB64url(String(s).slice(1)); } catch (e) { throw new Error('the link is incomplete'); }
+  if (s[0] === 'z') {
+    if (typeof DecompressionStream !== 'function') throw new Error('this browser is too old to open packed links');
+    try { bytes = new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).arrayBuffer()); }
+    catch (e) { throw new Error('the link is incomplete (was it cut off when copied?)'); }
+  } else if (s[0] !== 'j') throw new Error('this link is not a Kart Map Scanner track');
+  let o; try { o = JSON.parse(new TextDecoder().decode(bytes)); } catch (e) { throw new Error('the link is incomplete (was it cut off when copied?)'); }
+  return trackFromLink(o);
+}
+
+// ======================================================================
+// v12c: elevation profile, minimap and track card (pure geometry)
+// ======================================================================
+// The height-along-the-lap line, fitted into a w × h box with `pad` pixels round it.
+function profileGeometry(out, w, h, pad) {
+  const cl = out.route.centerline;
+  if (!out.meta.elevation || !cl || !Array.isArray(cl.elevation) || cl.elevation.length < 2) return null;
+  const es = cl.elevation, sp = cl.spacing || 2, len = (es.length - 1) * sp;
+  const top = Math.max(2, Math.ceil(Math.max(...es)));   // at least 2 m tall so flat tracks don't look wild
+  const sx = d => pad + (w - 2 * pad) * d / len, sy = e => h - pad - (h - 2 * pad) * e / top;
+  const step = Math.max(1, Math.ceil(es.length / 400));   // at most ~400 corners in the drawing
+  const pts = [];
+  for (let i = 0; i < es.length; i += step) pts.push([round2(sx(i * sp)), round2(sy(es[i]))]);
+  if ((es.length - 1) % step) pts.push([round2(sx(len)), round2(sy(es[es.length - 1]))]);
+  const d = 'M' + pts.map(p => p.join(',')).join('L');
+  return { d, area: d + `L${round2(sx(len))},${round2(sy(0))}L${round2(sx(0))},${round2(sy(0))}Z`, top, len, spacing: sp, es, sx, sy };
+}
+// Fits the track into a size × size picture (north up), `pad` pixels from the edges.
+// Pixel (px, py) = ((x - minX) / mpp, (maxY - y) / mpp): the game can put kart dots on it with that.
+function minimapPlan(out, size, pad) {
+  const cl = out.route.centerline && out.route.centerline.points && out.route.centerline.points.length > 1 ? out.route.centerline.points : out.route.points;
+  const xs = cl.map(p => p[0]), ys = cl.map(p => p[1]);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  const mpp = Math.max(x1 - x0, y1 - y0, 1) / (size - 2 * pad);
+  const minX = round2((x0 + x1) / 2 - mpp * size / 2), maxY = round2((y0 + y1) / 2 + mpp * size / 2);
+  const P = p => [round2((p[0] - minX) / mpp), round2((maxY - p[1]) / mpp)];
+  const points = cl.map(P);
+  const a = points[0], b = points[Math.min(points.length - 1, 3)], L = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+  return { size, mpp: Math.round(mpp * 1000) / 1000, minX, maxY, points, start: a, dir: [round2((b[0] - a[0]) / L), round2((b[1] - a[1]) / L)], closed: !!out.route.closed, toPx: P };
 }
 
 // lat/lon from [east, north] metres (the reverse of makeProjector), for drawing the preview.
@@ -1219,7 +1962,18 @@ const CONFIG = {
   osrm: 'https://router.project-osrm.org',   // /route = plan a drive through points, /match = fit a rough trace to roads
   matchChunk: 10,     // the free OSRM server accepts at most 10 points per match request (tested 2026-10-14: 10 ok, 11 "TooBig")
   matchTotalMax: 91,  // thin very long strokes to this many points first: 10 pieces, roughly 5-10 s of snapping
-  nominatim: 'https://nominatim.openstreetmap.org/search'
+  nominatim: 'https://nominatim.openstreetmap.org/search',
+  // v8.3 extras. Overture publishes a new release about monthly and removes old ones after a while:
+  // if "Fill building gaps" starts failing with "not found", update `release` (see docs.overturemaps.org).
+  overture: {
+    base: 'https://overturemaps-extras-us-west-2.s3.us-west-2.amazonaws.com/tiles/',
+    release: '2026-09-23.1',
+    libs: ['https://esm.sh/pmtiles@3.2.1', 'https://esm.sh/@mapbox/vector-tile@2.0.3', 'https://esm.sh/pbf@4.0.1']
+  },
+  imagery: {
+    service: 'https://spatial-img.information.qld.gov.au/arcgis/rest/services/Basemaps/LatestStateProgram_AllUsers/ImageServer',
+    metresPerPixel: 1, maxWidth: 4096, maxHeight: 2048   // the server's own limits (checked 2026-10-15)
+  }
 };
 const $ = id => document.getElementById(id);
 const els = {
@@ -1228,7 +1982,12 @@ const els = {
   routeInfo: $('routeInfo'), name: $('name'), radius: $('radius'), radiusVal: $('radiusVal'),
   width: $('width'), scanBtn: $('scanBtn'), status: $('status'), stats: $('stats'),
   exportBtn: $('exportBtn'), loadBtn: $('loadBtn'), loadFile: $('loadFile'),
-  treeOpts: $('treeOpts'), canopy: $('canopy'), canopyVal: $('canopyVal'), clearTreesBtn: $('clearTreesBtn')
+  useOverture: $('useOverture'), sampleBtn: $('sampleBtn'), photosBtn: $('photosBtn'), groundBtn: $('groundBtn'),
+  treeOpts: $('treeOpts'), canopy: $('canopy'), canopyVal: $('canopyVal'), clearTreesBtn: $('clearTreesBtn'),
+  buildOpts: $('buildOpts'), bHeight: $('bHeight'), bName: $('bName'), bFinishBtn: $('bFinishBtn'), bCancelBtn: $('bCancelBtn'), bInfo: $('bInfo'),
+  reverseBtn: $('reverseBtn'), startBtn: $('startBtn'), raceInfo: $('raceInfo'),
+  libSelect: $('libSelect'), libLoadBtn: $('libLoadBtn'), libDeleteBtn: $('libDeleteBtn'), libSaveBtn: $('libSaveBtn'),
+  libBackupBtn: $('libBackupBtn'), libRestoreBtn: $('libRestoreBtn'), libFile: $('libFile')
 };
 
 // ---- state ----
@@ -1238,18 +1997,28 @@ let routeSnapped = false;
 let scanResult = null;     // export-ready data from the last scan (OSM only; your trees are added at export)
 let scanPreview = [];      // shapes from the last scan, for redrawing
 let trees = [];            // trees you placed: { lat, lon, canopy (metres across) }
-let mode = 'pen';          // 'pen' | 'points' | 'trees' | 'pan'
+let mode = 'pen';          // 'pen' | 'points' | 'trees' | 'build' | 'pan'
+let manualBuildings = [];  // v9a: buildings you drew: { ring: [[lat, lon]…], height, name? }
+let draft = null;          // v9a: corners of the building being drawn
+let raceOpts = { reverse: false, start: null };   // v9a: race direction and start point ([lat, lon], loops only)
+let pickingStart = false;  // v9a: next map click sets the start
 let routeReq = 0;          // ignores old routing replies if you click faster than the server answers
 let history = [];          // earlier copies of { waypoints, trees }, so Undo can step back a whole action
 
 // Call BEFORE changing waypoints or trees, so Undo can restore what was there.
 function remember() {
-  history.push({ waypoints: waypoints.map(p => p.slice()), trees: trees.map(t => ({ ...t })) });
+  history.push({ waypoints: waypoints.map(p => p.slice()), trees: trees.map(t => ({ ...t })),
+    manualBuildings: JSON.parse(JSON.stringify(manualBuildings)), raceOpts: { ...raceOpts } });
   if (history.length > 50) history.shift();
+  future = [];   // v12b: a new change ends the redo trail
+  if (typeof updateUndoButtons === 'function') updateUndoButtons();
 }
+let future = [];   // v12b: states that Undo stepped back from, for Redo
+function stateNow() { return { waypoints: waypoints.map(p => p.slice()), trees: trees.map(t => ({ ...t })), manualBuildings: JSON.parse(JSON.stringify(manualBuildings)), raceOpts: { ...raceOpts } }; }
 
 // ---- map ----
-const map = L.map('map', { preferCanvas: true }).setView([-27.47, 153.02], 15);
+const map = L.map('map', { preferCanvas: true, tapHold: true })   // v9b: tapHold = long-press acts as right-click on phones
+  .setView([-27.47, 153.02], 15);
 const baseLayers = {};
 for (const [label, b] of Object.entries(CONFIG.baseMaps)) baseLayers[label] = L.tileLayer(b.url, b.opts);
 let savedBase = null;
@@ -1265,6 +2034,13 @@ const wpLayer = L.layerGroup().addTo(map);
 function setStatus(msg, kind) {
   els.status.textContent = msg;
   els.status.className = kind || '';
+  // v9b: on a phone the status box is often scrolled out of sight, so show it over the map too.
+  const t = document.getElementById('toast');
+  if (t) {
+    t.textContent = msg; t.className = 'show ' + (kind || '');
+    clearTimeout(setStatus.timer);
+    if (kind !== 'err') setStatus.timer = setTimeout(() => { t.className = ''; }, /…$/.test(msg) ? 15000 : 5000);
+  }
 }
 
 // The scan radius drawn as a fat see-through line. Its pixel width is recalculated
@@ -1291,16 +2067,32 @@ function renderWaypoints() {
     });
     m.on('dragstart', remember);
     m.on('dragend', e => { const ll = e.target.getLatLng(); waypoints[i] = [ll.lat, ll.lng]; rebuildRoute(); });
-    m.on('contextmenu', () => { remember(); waypoints.splice(i, 1); rebuildRoute(); });
+    m.on('contextmenu', e => afterFingerLifts(e, () => { remember(); waypoints.splice(i, 1); rebuildRoute(); }));
     m.addTo(wpLayer);
   });
 }
 
+// v9b: a long-press on a phone fires "contextmenu" while the finger is still down. Deleting the
+// thing right away removes it from under the finger, so the finger-up never reaches the page and
+// Leaflet's long-press clean-up doesn't run: the next tap anywhere is swallowed (found in the
+// phone test). So on a long-press, wait for the finger to lift, then delete.
+function afterFingerLifts(e, fn) {
+  const oe = e && (e.originalEvent || e);
+  if (!oe || !oe._simulated) { fn(); return; }
+  const done = () => { document.removeEventListener('touchend', done, true); document.removeEventListener('touchcancel', done, true); setTimeout(fn, 0); };
+  document.addEventListener('touchend', done, true);
+  document.addEventListener('touchcancel', done, true);
+}
 function invalidateScan() {
   if (!scanResult) return;
   scanResult = null;
   featureLayer.clearLayers();
   els.exportBtn.disabled = true;
+  els.sampleBtn.disabled = els.photosBtn.disabled = els.groundBtn.disabled = true;
+  $('view3dBtn').disabled = true;
+  $('minimapBtn').disabled = $('cardBtn').disabled = true;
+  $('heightsBtn').disabled = $('terrainBtn').disabled = true;
+  demGrids = null;
   els.stats.textContent = 'Route or settings changed. Scan again to export.';
   els.stats.className = 'hint';
 }
@@ -1313,6 +2105,7 @@ function setRoute(latlngs, snapped) {
   els.routeInfo.textContent = latlngs.length >= 2
     ? `${waypoints.length} points · ${(routeLength(latlngs) / 1000).toFixed(2)} km · ${snapped ? 'follows roads' : 'straight lines'}`
     : (waypoints.length ? '1 point. Add more to make a route.' : 'No route yet.');
+  renderRace();
   save();
 }
 
@@ -1402,6 +2195,9 @@ async function snapMatch(pts, isCurrent) {
 
 // ---- Points mode: each click adds a point ----
 map.on('click', e => {
+  if (measuring) return;   // v12b: the measuring tape takes the click
+  if (pickingStart) { setStartAt([e.latlng.lat, e.latlng.lng]); return; }
+  if (mode === 'build') { addCorner(e); return; }
   if (mode === 'points') {
     remember();
     waypoints.push([e.latlng.lat, e.latlng.lng]);
@@ -1424,7 +2220,7 @@ function renderTrees() {
     const c = L.circle([t.lat, t.lon], {
       radius: t.canopy / 2, color: '#1b4332', weight: 2, fillColor: '#40916c', fillOpacity: 0.55
     }).bindTooltip(`Tree ${i + 1}: ${t.canopy} m canopy. Right-click to remove.`);
-    c.on('contextmenu', ev => { L.DomEvent.stop(ev); remember(); trees.splice(i, 1); renderTrees(); });
+    c.on('contextmenu', ev => { L.DomEvent.stop(ev); afterFingerLifts(ev, () => { remember(); trees.splice(i, 1); renderTrees(); }); });
     c.addTo(treeLayer);
   });
   showStats();
@@ -1445,7 +2241,8 @@ const penLine = L.polyline([], { color: '#1d3557', weight: 3, dashArray: '6 6', 
 let stroke = null;   // container pixel points of the stroke in progress
 
 els.map.addEventListener('pointerdown', e => {
-  if (mode !== 'pen' || e.button !== 0) return;
+  if (mode !== 'pen' || e.button !== 0 || measuring) return;
+  if (e.pointerType === 'touch' && fingers.size > 1) return;   // v9b: second finger = pinch, not a new stroke
   if (e.target.closest('.leaflet-control, .leaflet-marker-icon')) return;   // let buttons and markers work normally
   stroke = [];
   els.map.setPointerCapture(e.pointerId);
@@ -1487,7 +2284,8 @@ function finishStroke() {
 const MODE_HINTS = {
   pen: 'Pen: hold the mouse button and drag along the roads. Draw in several strokes if you like; each continues the route.',
   points: 'Points: click to add a point. Good for a few corners; snapping fills in the roads between them.',
-  trees: 'Trees: click to place a tree. Switch to Satellite (top-right) to see the real ones. Right-click a tree to remove it.',
+  trees: 'Trees: click to place a tree. Switch to Satellite (top-right) to see the real ones. Right-click or long-press a tree to remove it.',
+  build: 'Building: click the corners of a building the map is missing (use Satellite, top-right). Set its height, then click the first corner again to finish. Right-click or long-press a drawn building to delete it.',
   pan: 'Pan: drag to move the map. Nothing gets drawn.'
 };
 function setMode(m) {
@@ -1495,22 +2293,47 @@ function setMode(m) {
   for (const b of els.modeRow.querySelectorAll('button')) b.classList.toggle('on', b.dataset.mode === m);
   els.modeHint.textContent = MODE_HINTS[m];
   els.treeOpts.hidden = m !== 'trees';
+  els.buildOpts.hidden = m !== 'build';
+  if (m !== 'build' && draft) cancelDraft();
+  if (m === 'build') map.doubleClickZoom.disable(); else map.doubleClickZoom.enable();
   els.map.classList.toggle('pen', m === 'pen');
-  els.map.classList.toggle('drawing', m === 'points' || m === 'trees');
+  els.map.classList.toggle('drawing', m === 'points' || m === 'trees' || m === 'build');
   if (m === 'pen') map.dragging.disable(); else map.dragging.enable();   // in Pen mode, dragging draws instead of panning
 }
 els.modeRow.addEventListener('click', e => { const b = e.target.closest('button'); if (b) setMode(b.dataset.mode); });
 setMode('pen');
 
-els.undoBtn.onclick = () => {
-  if (!history.length) { setStatus('Nothing to undo.'); return; }
-  const prev = history.pop();
+function restoreState(prev) {
   const routeChanged = JSON.stringify(prev.waypoints) !== JSON.stringify(waypoints);
+  const raceChanged = JSON.stringify(prev.raceOpts || {}) !== JSON.stringify(raceOpts);
   waypoints = prev.waypoints;
   trees = prev.trees;
+  if (prev.manualBuildings) manualBuildings = prev.manualBuildings;
+  if (prev.raceOpts) raceOpts = prev.raceOpts;
   renderTrees();
+  renderManualBuildings();
   if (routeChanged) rebuildRoute();   // only a route change needs re-snapping (and a re-scan)
+  else if (raceChanged) { invalidateScan(); renderRace(); save(); }
+  updateUndoButtons();
+}
+function updateUndoButtons() { if (els.redoBtn) els.redoBtn.disabled = !future.length; }
+els.redoBtn = $('redoBtn');
+els.undoBtn.onclick = () => {
+  if (!history.length) { setStatus('Nothing to undo.'); return; }
+  future.push(stateNow());
+  restoreState(history.pop());
 };
+els.redoBtn.onclick = () => {
+  if (!future.length) { setStatus('Nothing to redo.'); return; }
+  history.push(stateNow());
+  restoreState(future.pop());
+};
+document.addEventListener('keydown', e => {
+  if (!(e.ctrlKey || e.metaKey) || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
+  const k = e.key.toLowerCase();
+  if (k === 'z' && !e.shiftKey) { e.preventDefault(); els.undoBtn.click(); }
+  else if (k === 'y' || (k === 'z' && e.shiftKey)) { e.preventDefault(); els.redoBtn.click(); }
+});
 els.clearBtn.onclick = () => {
   if (!waypoints.length) return;
   remember();
@@ -1597,23 +2420,198 @@ async function scan() {
       clearTimeout(limit);
     }
   }
-  els.scanBtn.disabled = false;
-  if (!data) { setStatus('Scan failed. ' + explainScanFailure(problems), 'err'); return; }
+  if (!data) { els.scanBtn.disabled = false; setStatus('Scan failed. ' + explainScanFailure(problems), 'err'); return; }
 
+  // v8.3: fill gaps from Overture. If it fails, carry on with the OSM data alone.
+  let overture = null, overtureNote = '';
+  if (els.useOverture.checked) {
+    setStatus('Adding Overture buildings…');
+    try {
+      const feats = await Promise.race([fetchOvertureBuildings(scanBox(routeLatLngs, radius)),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('no answer after 45 s')), 45000))]);
+      const m = mergeOverture(data, feats);
+      data = m.data;
+      overture = { release: CONFIG.overture.release, heightsFilled: m.stats.heightsFilled, added: m.stats.added };
+    } catch (e) {
+      overtureNote = ` (Overture skipped: ${e instanceof TypeError ? "couldn't reach it" : e.message})`;
+    }
+  }
+  els.scanBtn.disabled = false;
+
+  const isLoop = els.loop.checked && waypoints.length >= 3;
   const { out, preview } = buildOutput(data, {
-    route: routeLatLngs, waypoints, radius, width: +els.width.value || 8,
-    loop: els.loop.checked && waypoints.length >= 3, snapped: routeSnapped, name: els.name.value.trim()
+    route: orientRoute(routeLatLngs, { ...raceOpts, loop: isLoop }), waypoints, radius, width: +els.width.value || 8,
+    loop: isLoop, snapped: routeSnapped, name: els.name.value.trim(), overture,
+    reverse: raceOpts.reverse, start: isLoop && raceOpts.start ? raceOpts.start : null
   });
   scanResult = out;
   scanPreview = preview;
   drawPreview(preview);
   showStats();
   els.exportBtn.disabled = false;
+  els.sampleBtn.disabled = els.groundBtn.disabled = false;
+  els.photosBtn.disabled = !out.landmarks.length;
+  $('view3dBtn').disabled = false;
+  $('minimapBtn').disabled = $('cardBtn').disabled = false;
+  demGrids = null; $('heightsBtn').disabled = false; $('terrainBtn').disabled = true;
   const partial = data.remark && /error|timed out|out of memory/i.test(data.remark);
+  const contract = loaderContractProblems(out);   // v8.2: would the game's loader choke on this file?
   if (partial) setStatus('Scan finished but the server warned the data may be incomplete: ' + data.remark, 'warn');
-  else setStatus('Scan done. Check the preview, then Export JSON.', 'ok');
+  else if (contract.length) setStatus(`Scan done, but ${contract.length} thing(s) in this file won't work in the game: ${contract.slice(0, 3).join('; ')}${contract.length > 3 ? '…' : ''}`, 'warn');
+  else setStatus('Scan done. Check the preview, then Export JSON.' + (overture ? ` Overture added ${overture.added} buildings and ${overture.heightsFilled} heights.` : '') + overtureNote, overtureNote ? 'warn' : 'ok');
 }
 els.scanBtn.onclick = scan;
+// ======================================================================
+// v8.3 extras (browser): Overture fill-in, aerial colours, ground image, landmark photos
+// ======================================================================
+// Overture buildings come as "PMTiles" (map tiles in one big file). Small libraries read them;
+// they're only loaded when needed. Tests replace the whole fetch with window.__overtureFetch.
+async function fetchOvertureBuildings(box) {
+  if (window.__overtureFetch) return window.__overtureFetch(box);
+  const [{ PMTiles }, { VectorTile }, pbfMod] = await Promise.all(CONFIG.overture.libs.map(u => import(u)));
+  const Pbf = pbfMod.default || pbfMod;
+  const pm = new PMTiles(CONFIG.overture.base + CONFIG.overture.release + '/buildings.pmtiles');
+  const z = 14;
+  const tx = lon => Math.floor((lon + 180) / 360 * 2 ** z);
+  const ty = lat => { const r = lat * Math.PI / 180; return Math.floor((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * 2 ** z); };
+  const seen = new Map();
+  const jobs = [];
+  for (let x = tx(box.west); x <= tx(box.east); x++) for (let y = ty(box.north); y <= ty(box.south); y++) jobs.push([x, y]);
+  if (jobs.length > 64) throw new Error(`area too big for Overture (${jobs.length} tiles)`);
+  for (const [x, y] of jobs) {
+    const t = await pm.getZxy(z, x, y);
+    if (!t) continue;
+    const layer = new VectorTile(new Pbf(new Uint8Array(t.data))).layers.building;
+    if (!layer) continue;
+    for (let i = 0; i < layer.length; i++) {
+      const f = layer.feature(i), g = f.toGeoJSON(x, y, z);
+      const feat = overtureFeature(f.properties, g.geometry.coordinates);
+      if (!feat.ring.length) continue;
+      const c = exactCentroid(feat.ring);
+      if (c[0] < box.south || c[0] > box.north || c[1] < box.west || c[1] > box.east) continue;
+      seen.set(feat.id || (x + '/' + y + '/' + i), feat);   // a building cut by a tile edge appears in both tiles
+    }
+  }
+  return [...seen.values()];
+}
+// The lat/lon box around a route plus the scan radius.
+function scanBox(latlngs, radius) {
+  const lats = latlngs.map(p => p[0]), lons = latlngs.map(p => p[1]);
+  const mid = (Math.min(...lats) + Math.max(...lats)) / 2;
+  const dLat = radius / 111320, dLon = radius / (111320 * Math.cos(mid * Math.PI / 180));
+  return { south: Math.min(...lats) - dLat, north: Math.max(...lats) + dLat, west: Math.min(...lons) - dLon, east: Math.max(...lons) + dLon };
+}
+
+// ---- aerial colours ----
+async function sampleColours() {
+  if (!scanResult) return;
+  const U = makeUnprojector(scanResult.meta.origin.lat, scanResult.meta.origin.lon);
+  const bb = scanResult.meta.bbox;
+  const sw = U([bb.minX, bb.minY]), ne = U([bb.maxX, bb.maxY]);
+  const plan = planImageTiles({ south: sw[0], west: sw[1], north: ne[0], east: ne[1] }, CONFIG.imagery.metresPerPixel, CONFIG.imagery.maxWidth, CONFIG.imagery.maxHeight);
+  els.sampleBtn.disabled = true;
+  const tiles = [];
+  try {
+    for (let i = 0; i < plan.length; i++) {
+      const t = plan[i];
+      setStatus(`Downloading aerial photo ${i + 1} of ${plan.length}…`);
+      const url = `${CONFIG.imagery.service}/exportImage?bbox=${t.west},${t.south},${t.east},${t.north}&bboxSR=4326&imageSR=4326&size=${t.width},${t.height}&format=jpgpng&f=image`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`the imagery server replied ${res.status}`);
+      const bmp = await createImageBitmap(await res.blob());
+      const cv = new OffscreenCanvas(bmp.width, bmp.height), g = cv.getContext('2d');
+      g.drawImage(bmp, 0, 0);
+      tiles.push({ box: t, image: g.getImageData(0, 0, bmp.width, bmp.height) });
+    }
+    setStatus('Reading colours…');
+    const n = applyColourSamples(scanResult, tiles, makeUnprojector, { metresPerPixel: CONFIG.imagery.metresPerPixel });
+    drawPreview(scanPreview); showStats();
+    setStatus(`Colours sampled from the aerial photo: ${n.buildings} roofs and ${n.areas} areas. Export JSON to save them.`, 'ok');
+  } catch (e) {
+    const why = e instanceof TypeError ? "couldn't reach the Queensland imagery server (offline or blocked)" : e.message;
+    setStatus('Colour sampling failed: ' + why + '. Your scan is unchanged.', 'err');
+  } finally { els.sampleBtn.disabled = false; }
+}
+
+// ---- ground image ----
+function drawGroundImage(out, plan, useSampled) {
+  const cv = document.createElement('canvas'); cv.width = plan.width; cv.height = plan.height;
+  const g = cv.getContext('2d');
+  const X = x => (x - plan.minX) / plan.metresPerPixel, Y = y => (plan.maxY - y) / plan.metresPerPixel;
+  const path = rings => { g.beginPath(); for (const r of rings) { r.forEach((p, i) => i ? g.lineTo(X(p[0]), Y(p[1])) : g.moveTo(X(p[0]), Y(p[1]))); g.closePath(); } };
+  g.fillStyle = groundColour('ground'); g.fillRect(0, 0, cv.width, cv.height);
+  for (const a of out.areas.slice().sort((p, q) => groundDrawOrder(p.kind) - groundDrawOrder(q.kind))) {
+    g.fillStyle = (useSampled && a.sampledColour) || groundColour(a.kind);
+    g.globalAlpha = ZONING_KINDS.test(a.kind) ? 0.35 : 1;
+    path([a.polygon, ...(a.holes || [])]); g.fill('evenodd');
+  }
+  g.globalAlpha = 1; g.lineCap = 'round'; g.lineJoin = 'round';
+  const lines = (list, colour, width) => { for (const l of list) { g.strokeStyle = colour(l); g.lineWidth = Math.max(1, width(l) / plan.metresPerPixel); g.beginPath(); l.points.forEach((p, i) => i ? g.lineTo(X(p[0]), Y(p[1])) : g.moveTo(X(p[0]), Y(p[1]))); g.stroke(); } };
+  lines(out.waterways, () => groundColour('water'), () => 3);
+  lines(out.roads.filter(r => !r.tunnel), r => /footway|path|cycleway|steps|pedestrian|pier/.test(r.kind) ? groundColour('path') : groundColour('road'), r => r.width);
+  lines(out.railways || [], () => groundColour('rail'), () => 3);
+  for (const b of out.buildings) {
+    g.fillStyle = (useSampled && b.sampledRoofColour) || groundColour('building');
+    path([b.footprint, ...(b.holes || [])]); g.fill('evenodd');
+  }
+  return cv;
+}
+function exportGroundImage() {
+  if (!scanResult) return;
+  const plan = groundImagePlan(scanResult.meta.bbox, 1, 4096);
+  const useSampled = !!scanResult.meta.imagery;
+  const cv = drawGroundImage(scanResult, plan, useSampled);
+  const safe = (scanResult.meta.name || 'route').replace(/[^a-z0-9_-]+/gi, '-').toLowerCase();
+  const file = `kartmap_${safe}_ground.png`;
+  scanResult.meta.groundImage = { file, ...plan, colours: useSampled ? 'aerial (sampled)' : 'flat palette',
+    note: 'Top-left pixel = (minX, maxY). One pixel = metresPerPixel metres. North is up.' };
+  cv.toBlob(blob => {
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = file; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    setStatus(`Ground image saved (${plan.width}×${plan.height} px, ${plan.metresPerPixel} m per pixel, ${useSampled ? 'aerial colours' : 'flat colours'}). Export JSON again so the file knows where the image goes.`, 'ok');
+  }, 'image/png');
+}
+
+// ---- landmark photos ----
+async function findLandmarkPhotos() {
+  if (!scanResult || !scanResult.landmarks.length) return;
+  els.photosBtn.disabled = true;
+  const list = scanResult.landmarks.slice(0, 60);
+  let done = 0, found = 0;
+  const api = (base, params) => fetch(base + '?' + new URLSearchParams({ format: 'json', origin: '*', ...params })).then(r => { if (!r.ok) throw new Error('replied ' + r.status); return r.json(); });
+  const U = makeUnprojector(scanResult.meta.origin.lat, scanResult.meta.origin.lon);
+  const one = async l => {
+    let titles = [], from = 'nearby';
+    if (l.wikidata) {
+      const j = await api('https://www.wikidata.org/w/api.php', { action: 'wbgetclaims', entity: l.wikidata, property: 'P18' });
+      titles = ((j.claims && j.claims.P18) || []).map(c => 'File:' + c.mainsnak.datavalue.value).slice(0, 3);
+      if (titles.length) from = 'wikidata';
+    }
+    if (!titles.length) {
+      // Photos geotagged within 100 m, ones naming the landmark first. (v8.3 live test: a plain name
+      // search gave "The Edge" in Brasília and an English "St Clement", so search by place, not name.)
+      const [lat, lon] = U(l.pos);
+      const j = await api('https://commons.wikimedia.org/w/api.php', { action: 'query', list: 'geosearch', gsnamespace: '6', gsradius: '100', gslimit: '20', gscoord: lat + '|' + lon });
+      titles = rankNearbyPhotos(l.name, (j.query && j.query.geosearch) || []).slice(0, 3);
+    }
+    if (!titles.length) return;
+    const info = await api('https://commons.wikimedia.org/w/api.php', { action: 'query', prop: 'imageinfo', iiprop: 'url|extmetadata', iiurlwidth: '640', titles: titles.join('|') });
+    l.photos = parseCommonsImageInfo(info).slice(0, 3);
+    l.photosFrom = from;   // 'wikidata' = the landmark's own photo; 'nearby' = taken within 100 m, may show a neighbour
+    if (l.photos.length) found++;
+  };
+  try {
+    const queue = list.slice();
+    const worker = async () => { while (queue.length) { const l = queue.shift(); try { await one(l); } catch (e) { /* skip this one */ } done++; setStatus(`Finding landmark photos… ${done} of ${list.length}`); } };
+    await Promise.all([worker(), worker(), worker(), worker()]);
+    showStats();
+    setStatus(`Found reference photos for ${found} of ${list.length} landmarks (open the landmark list). Export JSON to save the links.`, found ? 'ok' : 'warn');
+  } finally { els.photosBtn.disabled = false; }
+}
+
+els.sampleBtn.onclick = sampleColours;
+els.photosBtn.onclick = findLandmarkPhotos;
+els.groundBtn.onclick = exportGroundImage;
 
 // Preview colours by area type. Anything not listed is drawn as generic green.
 const AREA_COLOURS = {
@@ -1628,6 +2626,12 @@ function drawPreview(preview) {
   if (!scanResult) return;
   const U = makeUnprojector(scanResult.meta.origin.lat, scanResult.meta.origin.lon);
   const LL = rings => rings.map(r => r.map(U));
+  // v8.3: after "Sample colours", buildings and areas show the colour read from the aerial photo.
+  const sampled = new Map();
+  if (scanResult.meta.imagery) {
+    for (const b of scanResult.buildings) if (b.sampledRoofColour) sampled.set(b.id, b.sampledRoofColour);
+    for (const a of scanResult.areas) if (a.sampledColour) sampled.set(a.id, a.sampledColour);
+  }
   // Faint zoning first, then areas, then everything else on top.
   // Race layout on top of everything (v8.1).
   const order = f => f.cat === 'area' ? (FAINT.has(f.kind) ? 0 : 1) : /^(centerline|checkpoint|gridslot|shortcut)$/.test(f.cat) ? 3 : 2;
@@ -1635,9 +2639,9 @@ function drawPreview(preview) {
     if (f.cat === 'building') {
       // Buildings blocking the track are red (v8.1).
       if (f.onTrack) L.polygon(LL(f.xy), { color: '#d00000', weight: 2, fillColor: '#ff4d4d', fillOpacity: 0.85 }).bindTooltip('Blocks the track').addTo(featureLayer);
-      else L.polygon(LL(f.xy), { color: '#495057', weight: 1, fillColor: '#6c757d', fillOpacity: 0.7 }).addTo(featureLayer);
+      else L.polygon(LL(f.xy), { color: '#495057', weight: 1, fillColor: sampled.get(f.id) || '#6c757d', fillOpacity: sampled.has(f.id) ? 0.9 : 0.7 }).addTo(featureLayer);
     }
-    else if (f.cat === 'part') L.polygon(LL(f.xy), { color: '#212529', weight: 1, fillColor: '#495057', fillOpacity: 0.8 }).bindTooltip('building part').addTo(featureLayer);
+    else if (f.cat === 'part') L.polygon(LL(f.xy), { color: '#212529', weight: 1, fillColor: sampled.get(f.id) || '#495057', fillOpacity: 0.8 }).bindTooltip('building part').addTo(featureLayer);
     else if (f.cat === 'railway') L.polyline(f.xy.map(U), { color: '#212529', weight: 3, opacity: 0.9, dashArray: '8 4' }).bindTooltip('railway').addTo(featureLayer);
     else if (f.cat === 'marking') L.circleMarker(U(f.xy), { radius: 3, color: '#212529', weight: 1, fillColor: '#ffffff', fillOpacity: 1 }).bindTooltip(f.kind.replace('_', ' ')).addTo(featureLayer);
     else if (f.cat === 'centerline') L.polyline(f.xy.map(U), { color: '#ffffff', weight: 1.5, opacity: 0.9, dashArray: '3 5', interactive: false }).addTo(featureLayer);
@@ -1645,8 +2649,8 @@ function drawPreview(preview) {
     else if (f.cat === 'gridslot') L.circleMarker(U(f.xy), { radius: 2.5, weight: 0, fillColor: '#ffffff', fillOpacity: 1 }).bindTooltip('Start grid ' + f.slot).addTo(featureLayer);
     else if (f.cat === 'shortcut') L.polyline(f.xy.map(U), { color: '#d63384', weight: 4, opacity: 0.85 }).bindTooltip(`Shortcut: saves ${Math.round(f.saving)} m`).addTo(featureLayer);
     else if (f.cat === 'area') {
-      const c = AREA_COLOURS[f.kind] || '#52b788';
-      L.polygon(LL(f.xy), { color: c, weight: 1, fillColor: c, fillOpacity: FAINT.has(f.kind) ? 0.12 : 0.45 })
+      const c = AREA_COLOURS[f.kind] || '#52b788', s = !FAINT.has(f.kind) && sampled.get(f.id);
+      L.polygon(LL(f.xy), { color: c, weight: 1, fillColor: s || c, fillOpacity: FAINT.has(f.kind) ? 0.12 : s ? 0.8 : 0.45 })
         .bindTooltip(f.kind).addTo(featureLayer);
     }
     else if (f.cat === 'road') {
@@ -1654,15 +2658,21 @@ function drawPreview(preview) {
       else if (f.tunnel) L.polyline(f.xy.map(U), { color: '#6c757d', weight: 3, opacity: 0.8, dashArray: '4 6' }).bindTooltip('tunnel').addTo(featureLayer);
       else L.polyline(f.xy.map(U), { color: /footway|path|cycleway|steps/.test(f.kind) ? '#bc6c25' : '#343a40', weight: 2, opacity: 0.8 }).addTo(featureLayer);
     }
-    else if (f.cat === 'barrier') L.polyline(f.xy.map(U), { color: '#7f4f24', weight: 1.5, opacity: 0.9 }).addTo(featureLayer);
+    else if (f.cat === 'barrier') {
+      if (f.onTrack) L.polyline(f.xy.map(U), { color: '#d00000', weight: 4, opacity: 0.95 }).bindTooltip('Fence or wall crosses the track').addTo(featureLayer);
+      else L.polyline(f.xy.map(U), { color: '#7f4f24', weight: 1.5, opacity: 0.9 }).addTo(featureLayer);
+    }
     else if (f.cat === 'waterway') L.polyline(f.xy.map(U), { color: '#4ea8de', weight: 2 }).addTo(featureLayer);
-    else if (f.cat === 'point') L.circleMarker(U(f.xy), { radius: f.kind === 'tree' ? 3 : 2, weight: 0, fillOpacity: 0.9, fillColor: f.kind === 'tree' ? '#2d6a4f' : '#ffb703' }).bindTooltip(f.kind).addTo(featureLayer);
+    else if (f.cat === 'point') {
+      L.circleMarker(U(f.xy), { radius: f.kind === 'tree' ? 3 : 2, weight: 0, fillOpacity: 0.9, fillColor: f.kind === 'tree' ? '#2d6a4f' : '#ffb703' }).bindTooltip(f.kind).addTo(featureLayer);
+      if (f.onTrack) L.circleMarker(U(f.xy), { radius: 6, color: '#d00000', weight: 2, fill: false }).bindTooltip(f.kind.replace(/_/g, ' ') + ' on the track').addTo(featureLayer);
+    }
     else if (f.cat === 'landmark') L.circleMarker(U(f.xy), { radius: 7, color: '#fff', weight: 2, fillColor: '#9b2226', fillOpacity: 1 }).bindTooltip(`★ ${f.name} (${f.kind})`).addTo(featureLayer);
   }
 }
 function showStats() {
   if (!scanResult) return;
-  const out = withManualTrees(scanResult, trees);
+  const out = withManualExtras(scanResult, trees, manualBuildings);
   const c = out.meta.counts;
   const size = new Blob([prettyJSON(out)]).size;
   const osmTrees = out.points.filter(p => p.kind === 'tree' && p.source !== 'manual').length;
@@ -1677,6 +2687,7 @@ function showStats() {
     ['Creeks / drains', c.waterways],
     ['Trees (OSM)', osmTrees],
     ['Trees you placed', c.manualTrees],
+    ['Buildings you drew', c.manualBuildings || 0],
     ['Props (benches, lamps, signs…)', props],
     ['Landmarks', c.landmarks || 0],
     ['Building parts (towers)', c.buildingParts || 0],
@@ -1684,6 +2695,7 @@ function showStats() {
     ['Road markings', c.markings || 0],
     ['Corners / checkpoints', `${(out.route.corners || []).length} / ${out.race ? out.race.checkpoints.length : 0}`],
     ['Shortcuts found', c.shortcuts || 0],
+    ...(out.meta.elevation ? [['Hills (climb / highest)', `${Math.round(out.meta.elevation.climb)} m / ${out.meta.elevation.trackHighest} m`]] : []),
     ['File size', (size / 1024).toFixed(0) + ' KB']
   ];
   if (c.skippedIncompleteShapes) rows.push(['Shapes skipped (incomplete in OSM)', c.skippedIncompleteShapes]);
@@ -1694,15 +2706,23 @@ function showStats() {
   const qHtml = q ? `<details open style="margin-top:6px"><summary>Quality report</summary>` +
     `<div class="hint" style="margin-top:4px">Heights: ${q.heights.measured}% measured, ${q.heights.estimated}% estimated, ${q.heights.default}% default guess. Roofs: ${q.roofShapes.mapped}% mapped.</div>` +
     (q.notes.length ? `<ul style="margin:4px 0 0;padding-left:18px">${q.notes.map(n => `<li>${esc(n)}</li>`).join('')}</ul>` : '') + `</details>` : '';
-  els.stats.innerHTML = rows.map(([k, v]) => `<div><span>${k}</span><b>${v}</b></div>`).join('') + qHtml +
+  const probs = problemSpots(scanPreview);
+  const probHtml = probs.length ? `<button id="nextProblemBtn" style="width:100%;margin-top:6px">Show problem on the map (${probs.length})</button>` : '';
+  els.stats.innerHTML = rows.map(([k, v]) => `<div><span>${k}</span><b>${v}</b></div>`).join('') + profileHtml(out) + qHtml + probHtml +
     (lm.length ? `<details style="margin-top:6px"><summary>Landmarks to model by hand (${lm.length})</summary>` +
-      `<ul style="margin:4px 0 0;padding-left:18px">${lm.map(l => `<li>${esc(l.name)} <span class="hint">(${esc(l.kind)})</span></li>`).join('')}</ul></details>` : '');
+      `<ul style="margin:4px 0 0;padding-left:18px">${lm.map(l => `<li>${esc(l.name)} <span class="hint">(${esc(l.kind)})</span>${photoHtml(l, esc)}</li>`).join('')}</ul></details>` : '');
+}
+// v8.3: small reference photos under a landmark, each linking to its Commons page (author + licence there).
+function photoHtml(l, esc) {
+  if (!l.photos || !l.photos.length) return '';
+  const warn = l.photosFrom === 'nearby' ? '<div class="hint">Photos taken nearby: check they show this landmark.</div>' : '';
+  return `<div class="lm-photos">${l.photos.map(p => `<a href="${esc(p.page)}" target="_blank" rel="noopener" title="${esc((p.author || '') + ' · ' + (p.licence || ''))}"><img src="${esc(p.thumb)}" alt="${esc(l.name)}" loading="lazy"></a>`).join('')}</div>${warn}`;
 }
 
 // ---- export / load ----
 els.exportBtn.onclick = () => {
   if (!scanResult) return;
-  const final = withManualTrees(scanResult, trees);
+  const final = withManualExtras(scanResult, trees, manualBuildings);
   const safe = (final.meta.name || 'route').replace(/[^a-z0-9_-]+/gi, '-').toLowerCase();
   const blob = new Blob([prettyJSON(final)], { type: 'application/json' });
   const a = document.createElement('a');
@@ -1722,7 +2742,10 @@ els.loadFile.onchange = async () => {
     remember();
     waypoints = j.route.waypoints;
     trees = Array.isArray(j.manualTrees) ? j.manualTrees.map(t => ({ lat: t.lat, lon: t.lon, canopy: t.canopy || 10 })) : [];
+    manualBuildings = Array.isArray(j.manualBuildings) ? j.manualBuildings.filter(m => Array.isArray(m.ring) && m.height > 0) : [];
+    raceOpts = { reverse: !!j.route.reversed, start: Array.isArray(j.route.startPoint) ? j.route.startPoint : null };
     renderTrees();
+    renderManualBuildings();
     els.loop.checked = !!j.route.closed;
     els.snap.checked = !!j.route.snappedToRoads;
     if (j.route.width) els.width.value = j.route.width;
@@ -1736,16 +2759,683 @@ els.loadFile.onchange = async () => {
   }
 };
 
+// ======================================================================
+// v9a (browser): race direction/start, hand-drawn buildings, track library
+// ======================================================================
+const raceLayer = L.layerGroup().addTo(map);
+function isLoopNow() { return els.loop.checked && waypoints.length >= 3; }
+// Start flag and direction arrows, drawn on the race route (the drawn route, reversed/rotated).
+function renderRace() {
+  raceLayer.clearLayers();
+  els.startBtn.disabled = !isLoopNow();
+  els.reverseBtn.disabled = routeLatLngs.length < 2;
+  if (routeLatLngs.length < 2) { els.raceInfo.textContent = ''; return; }
+  const r = orientRoute(routeLatLngs, { ...raceOpts, loop: isLoopNow() });
+  const len = routeLength(r);
+  L.marker(r[0], { interactive: false, icon: L.divIcon({ className: 'race-flag', html: '🏁', iconSize: [20, 20], iconAnchor: [4, 18] }) }).addTo(raceLayer);
+  for (const a of arrowsAlong(r, Math.max(60, len / 14))) {
+    L.marker(a.pos, { interactive: false, icon: L.divIcon({ className: 'race-arrow', html: `<div style="transform:rotate(${a.bearing}deg)">▲</div>`, iconSize: [14, 14] }) }).addTo(raceLayer);
+  }
+  els.raceInfo.textContent = `🏁 Race ${raceOpts.reverse ? 'reversed (against the way you drew it)' : 'runs the way you drew it'}` +
+    (isLoopNow() ? (raceOpts.start ? ', start moved.' : ', starts at point 1.') : '. Not a loop: it starts at one end (use Reverse for the other end).');
+}
+els.reverseBtn.onclick = () => {
+  remember();
+  raceOpts = { ...raceOpts, reverse: !raceOpts.reverse };
+  invalidateScan(); renderRace(); save();
+  setStatus(`Direction ${raceOpts.reverse ? 'reversed' : 'back to the drawing direction'}. Scan again to update the race layout.`, 'ok');
+};
+els.startBtn.onclick = () => {
+  pickingStart = !pickingStart;
+  els.startBtn.classList.toggle('on', pickingStart);
+  els.map.classList.toggle('drawing', pickingStart || mode === 'points' || mode === 'trees' || mode === 'build');
+  if (pickingStart) { if (mode === 'pen') map.dragging.enable(); setStatus('Click on the route where the start line should go.'); }
+  else setMode(mode);
+};
+function setStartAt(ll) {
+  pickingStart = false;
+  els.startBtn.classList.remove('on');
+  setMode(mode);
+  const r = orientRoute(routeLatLngs, { reverse: raceOpts.reverse, loop: true, start: ll });
+  const off = dist(ll, r[0]);
+  if (off > 60) { setStatus(`That's ${Math.round(off)} m from the route. Click on the red line itself.`, 'warn'); return; }
+  remember();
+  raceOpts = { ...raceOpts, start: r[0] };
+  invalidateScan(); renderRace(); save();
+  setStatus('Start moved. Scan again to update the start grid and checkpoints.', 'ok');
+}
+
+// ---- Building mode: draw a building the map is missing ----
+const mbLayer = L.layerGroup().addTo(map);
+const draftLine = L.polyline([], { color: '#ffb703', weight: 2, dashArray: '4 4', interactive: false }).addTo(map);
+const draftDots = L.layerGroup().addTo(map);
+function renderManualBuildings() {
+  mbLayer.clearLayers();
+  manualBuildings.forEach((m, i) => {
+    L.polygon(m.ring, { color: '#fb8500', weight: 2, fillColor: '#ffb703', fillOpacity: 0.6 })
+      .bindTooltip(`${m.name || 'Building you drew'} (${m.height} m). Right-click to delete.`)
+      .on('contextmenu', ev => { L.DomEvent.stop(ev); afterFingerLifts(ev, () => { remember(); manualBuildings.splice(i, 1); renderManualBuildings(); setStatus('Building deleted. Undo brings it back.'); }); })
+      .addTo(mbLayer);
+  });
+  showStats();
+  save();
+}
+function renderDraft() {
+  draftLine.setLatLngs(draft || []);
+  draftDots.clearLayers();
+  (draft || []).forEach((p, i) => L.circleMarker(p, { radius: i === 0 ? 6 : 4, color: '#fb8500', weight: 2, fillColor: i === 0 ? '#fff' : '#ffb703', fillOpacity: 1, interactive: false }).addTo(draftDots));
+  const n = draft ? draft.length : 0;
+  els.bFinishBtn.disabled = n < 3;
+  els.bCancelBtn.disabled = n === 0;
+  els.bInfo.textContent = n === 0 ? 'Click each corner. Click the first corner again (or double-click) to finish.'
+    : n < 3 ? `${n} corner${n > 1 ? 's' : ''}. Keep clicking corners.` : `${n} corners. Click the first corner (white) to finish.`;
+}
+function addCorner(e) {
+  if (!draft) draft = [];
+  if (draft.length >= 3) {
+    const first = map.latLngToContainerPoint(draft[0]);
+    if (first.distanceTo(e.containerPoint) < 12) { finishDraft(); return; }
+  }
+  draft.push([e.latlng.lat, e.latlng.lng]);
+  renderDraft();
+}
+function finishDraft() {
+  if (!draft || draft.length < 3) return;
+  const height = +els.bHeight.value;
+  if (!(height >= 2 && height <= 300)) { setStatus('Set a height between 2 and 300 m first.', 'warn'); return; }
+  remember();
+  const m = { ring: draft.map(p => [round6(p[0]), round6(p[1])]), height };
+  if (els.bName.value.trim()) m.name = els.bName.value.trim();
+  manualBuildings.push(m);
+  draft = null; renderDraft(); renderManualBuildings();
+  setStatus(`Building added (${height} m). It goes into the file when you export; no re-scan needed.`, 'ok');
+}
+function cancelDraft() { draft = null; renderDraft(); }
+const round6 = n => Math.round(n * 1e6) / 1e6;
+map.on('dblclick', e => { if (mode === 'build' && draft && draft.length >= 3) { L.DomEvent.stop(e); finishDraft(); } });
+els.bFinishBtn.onclick = finishDraft;
+els.bCancelBtn.onclick = cancelDraft;
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && draft) cancelDraft();
+  if (e.key === 'Escape' && pickingStart) els.startBtn.click();
+});
+
+// ---- track library ----
+function readLibrary() { try { const l = JSON.parse(localStorage.getItem('kartmap-library')); return Array.isArray(l) ? l : []; } catch (e) { return []; } }
+function writeLibrary(l) {
+  try { localStorage.setItem('kartmap-library', JSON.stringify(l)); return true; }
+  catch (e) { setStatus("Couldn't save to this browser's storage (full or blocked). Use Back up all to keep a copy.", 'err'); return false; }
+}
+function renderLibrary(selectName) {
+  const l = readLibrary();
+  els.libSelect.innerHTML = l.length ? l.map(t => `<option>${t.name.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))}</option>`).join('') : '<option value="">(no saved tracks)</option>';
+  if (selectName) els.libSelect.value = selectName;
+  els.libLoadBtn.disabled = els.libDeleteBtn.disabled = !l.length;
+  els.libBackupBtn.disabled = !l.length;
+}
+function snapshot(name) {
+  return { name, savedAt: new Date().toISOString(), waypoints, trees, manualBuildings, race: raceOpts,
+    snap: els.snap.checked, loop: els.loop.checked, radius: +els.radius.value, width: +els.width.value };
+}
+els.libSaveBtn.onclick = () => {
+  if (!waypoints.length) { setStatus('Draw a route first.', 'warn'); return; }
+  const name = els.name.value.trim() || 'track ' + new Date().toISOString().slice(0, 16).replace('T', ' ');
+  els.name.value = name;
+  const l = readLibrary(), existed = l.some(t => t.name === name);
+  if (writeLibrary(libraryUpsert(l, snapshot(name)))) {
+    renderLibrary(name);
+    setStatus(`${existed ? 'Updated' : 'Saved'} "${name}" in the track library.`, 'ok');
+  }
+};
+els.libLoadBtn.onclick = async () => {
+  const t = readLibrary().find(x => x.name === els.libSelect.value);
+  if (!t) return;
+  await applyTrack(t);
+  setStatus(`Opened "${t.name}". Undo goes back to what you had before.`, 'ok');
+};
+// Puts a saved or shared track on the map (Undo goes back).
+async function applyTrack(t) {
+  remember();
+  waypoints = t.waypoints; trees = t.trees || []; manualBuildings = t.manualBuildings || [];
+  raceOpts = t.race || { reverse: false, start: null };
+  els.snap.checked = t.snap !== false; els.loop.checked = t.loop !== false;
+  if (t.radius) { els.radius.value = t.radius; els.radiusVal.textContent = t.radius; }
+  if (t.width) els.width.value = t.width;
+  els.name.value = t.name || '';
+  renderTrees(); renderManualBuildings();
+  await rebuildRoute();
+  if (waypoints.length) map.fitBounds(waypoints, { padding: [40, 40], maxZoom: 17 });
+}
+els.libDeleteBtn.onclick = () => {
+  const name = els.libSelect.value;
+  if (!name) return;
+  const l = readLibrary(), t = l.find(x => x.name === name);
+  if (!t) return;
+  if (writeLibrary(libraryRemove(l, name))) {
+    lastDeleted = t;
+    renderLibrary();
+    setStatus(`Deleted "${name}" from the library.`, 'ok');
+    const b = document.createElement('button'); b.textContent = 'Bring it back'; b.style.marginLeft = '8px';
+    b.onclick = () => { if (writeLibrary(libraryUpsert(readLibrary(), lastDeleted))) { renderLibrary(lastDeleted.name); setStatus(`"${lastDeleted.name}" is back.`, 'ok'); } };
+    els.status.appendChild(b);
+  }
+};
+let lastDeleted = null;
+els.libBackupBtn.onclick = () => {
+  const l = readLibrary();
+  if (!l.length) return;
+  const blob = new Blob([JSON.stringify({ format: 'kartmap-library', version: LIBRARY_VERSION, saved: new Date().toISOString(), tracks: l }, null, 1)], { type: 'application/json' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+  a.download = `kartmap-library_${new Date().toISOString().slice(0, 10)}.json`; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  setStatus(`Backed up ${l.length} track${l.length > 1 ? 's' : ''}.`, 'ok');
+};
+els.libRestoreBtn.onclick = () => els.libFile.click();
+els.libFile.onchange = async () => {
+  const f = els.libFile.files[0];
+  els.libFile.value = '';
+  if (!f) return;
+  try {
+    const { tracks } = readLibraryBackup(JSON.parse(await f.text()));
+    if (writeLibrary(libraryMerge(readLibrary(), tracks))) { renderLibrary(tracks[0].name); setStatus(`Restored ${tracks.length} track${tracks.length > 1 ? 's' : ''} (same names were replaced).`, 'ok'); }
+  } catch (e) { setStatus('Could not restore that file: ' + (e instanceof SyntaxError ? 'it is not valid JSON' : e.message), 'err'); }
+};
+renderLibrary();
+renderRace();
+
+// ---- v9b: step through things on the track ----
+let problemIdx = -1;
+const problemMarker = L.circleMarker([0, 0], { radius: 18, color: '#ffbe0b', weight: 3, fill: false, interactive: false });
+els.stats.addEventListener('click', e => {
+  if (!e.target.closest('#nextProblemBtn') || !scanResult) return;
+  const probs = problemSpots(scanPreview);
+  if (!probs.length) return;
+  problemIdx = (problemIdx + 1) % probs.length;
+  const pr = probs[problemIdx];
+  const ll = makeUnprojector(scanResult.meta.origin.lat, scanResult.meta.origin.lon)(pr.xy);
+  map.setView(ll, Math.max(map.getZoom(), 18));
+  problemMarker.setLatLng(ll).addTo(map);
+  setStatus(`Problem ${problemIdx + 1} of ${probs.length}: ${pr.label}. Nudge the route, or leave it for the game to remove.`, 'warn');
+  e.target.textContent = `Next problem (${problemIdx + 1} of ${probs.length})`;
+});
+
+// ---- v9b: phone layout ----
+// Map/panel split button (only shown on narrow screens) cycles: normal → panel up → map big.
+const SHEET_LABELS = { '': '▲ Panel', 'sheet-up': '▼ Map', 'map-big': '▲ Panel' };
+let sheet = '';
+$('sheetBtn').onclick = () => {
+  if (sheet === '') sheet = 'sheet-up'; else if (sheet === 'sheet-up') sheet = 'map-big'; else sheet = '';
+  document.body.classList.remove('sheet-up', 'map-big');
+  if (sheet) document.body.classList.add(sheet);
+  $('sheetBtn').textContent = SHEET_LABELS[sheet];
+  setTimeout(() => map.invalidateSize(), 50);   // Leaflet must re-measure after the map changes size
+};
+window.addEventListener('resize', () => map.invalidateSize());
+$('toast').onclick = () => { $('toast').className = ''; };
+// Pen mode with two fingers = pinch-zoom, not drawing: if a second finger lands, drop the stroke.
+const fingers = new Set();
+els.map.addEventListener('pointerdown', e => {
+  if (e.pointerType !== 'touch') return;
+  fingers.add(e.pointerId);
+  if (fingers.size > 1 && stroke) { stroke = null; penLine.setLatLngs([]); }
+}, true);
+const fingerUp = e => fingers.delete(e.pointerId);
+els.map.addEventListener('pointerup', fingerUp, true);
+els.map.addEventListener('pointercancel', fingerUp, true);
+
+// ======================================================================
+// v11 (browser): 3D preview with three.js, "fly the lap", retro pixels, .glb download
+// ======================================================================
+let v3d = null;   // { renderer, scene, camera, controls, raf, fly, ... } while the preview is open
+async function open3D() {
+  if (!scanResult || v3d) return;
+  setStatus('Loading the 3D viewer…');
+  let THREE, OrbitControls;
+  try {
+    [THREE, { OrbitControls }] = await Promise.all([import('three'), import('three/addons/controls/OrbitControls.js')]);
+  } catch (e) {
+    setStatus("Couldn't load the 3D viewer: three.js didn't download from unpkg.com (offline or blocked). The rest of the scanner still works.", 'err');
+    return;
+  }
+  const out = withManualExtras(scanResult, trees, manualBuildings);
+  const plan = scene3dPlan(out);
+  const ui = document.createElement('div');
+  ui.id = 'view3d';
+  ui.innerHTML = `<div id="v3dBar"><button id="v3dClose">✕ Close</button><button id="v3dFly">▶ Fly the lap</button>
+    <label class="inline" style="margin:0"><input id="v3dRetro" type="checkbox"> Retro pixels</label>
+    <button id="v3dGlb">⬇ .glb</button><span id="v3dInfo" class="hint grow"></span></div>
+    <div id="v3dHost"><div id="v3dHelp">Drag to turn · scroll or pinch to zoom · right-drag or two fingers to move</div></div>`;
+  document.body.appendChild(ui);
+  const host = $('v3dHost');
+  let renderer;
+  try { renderer = new THREE.WebGLRenderer({ antialias: false, preserveDrawingBuffer: true }); }
+  catch (e) { ui.remove(); setStatus("Couldn't start 3D: this browser has WebGL turned off or unavailable.", 'err'); return; }
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  host.appendChild(renderer.domElement);
+  const scene = new THREE.Scene();
+  const sky = new THREE.Color('#9cc9ef');
+  scene.background = sky;
+  const diag = Math.hypot(plan.size[0], plan.size[1]) || 500;
+  scene.fog = new THREE.Fog(sky, diag * 0.6, diag * 1.6);
+  scene.add(new THREE.HemisphereLight('#ffffff', '#6b7a4f', 1.6));
+  const sun = new THREE.DirectionalLight('#fff4e0', 1.6); sun.position.set(-0.5, 1, 0.35); scene.add(sun);
+  const P = (x, y, h = 0) => new THREE.Vector3(x, h, -y);   // kartmap metres → 3D
+  const mats = new Map();
+  const okColour = c => typeof c === 'string' && (!window.CSS || CSS.supports('color', c));
+  const mat = (c, extra) => {
+    const key = c + JSON.stringify(extra || {});
+    if (!mats.has(key)) mats.set(key, new THREE.MeshLambertMaterial({ color: new THREE.Color(okColour(c) ? c : '#c9c9c9'), ...(extra || {}) }));
+    return mats.get(key);
+  };
+  // ground: the same picture as "Export ground image" (aerial colours if sampled), nearest-pixel filtering
+  const gplan = groundImagePlan(out.meta.bbox, 1, 2048);
+  const gcanvas = drawGroundImage(out, gplan, !!out.meta.imagery);
+  const gtex = new THREE.CanvasTexture(gcanvas);
+  gtex.colorSpace = THREE.SRGBColorSpace; gtex.magFilter = THREE.NearestFilter; gtex.minFilter = THREE.NearestMipmapNearestFilter;
+  const gw = gplan.width * gplan.metresPerPixel, gh = gplan.height * gplan.metresPerPixel;
+  // v12a: with ground heights, the ground is a height field (one corner every ~8 m) instead of flat
+  const segX = demGrids ? Math.min(320, Math.ceil(gw / 8)) : 1, segY = demGrids ? Math.min(320, Math.ceil(gh / 8)) : 1;
+  const ggeo = new THREE.PlaneGeometry(gw, gh, segX, segY);
+  if (demGrids && out.meta.elevation) {
+    const Ug = makeUnprojector(out.meta.origin.lat, out.meta.origin.lon), base = out.meta.elevation.base, cxg = gplan.minX + gw / 2, cyg = gplan.maxY - gh / 2;
+    const pa = ggeo.attributes.position;
+    for (let i = 0; i < pa.count; i++) { const [la, lo] = Ug([cxg + pa.getX(i), cyg + pa.getY(i)]); const v = sampleGrid(demGrids, la, lo); pa.setZ(i, v == null ? 0 : v - base - 0.4); }
+    ggeo.computeVertexNormals();
+  }
+  const ground = new THREE.Mesh(ggeo, new THREE.MeshLambertMaterial({ map: gtex }));
+  ground.rotation.x = -Math.PI / 2;
+  ground.position.copy(P(gplan.minX + gw / 2, gplan.maxY - gh / 2, 0));
+  ground.name = 'ground';
+  scene.add(ground);
+  // buildings: footprints pushed up to their height (roof colour on top, wall colour on the sides)
+  const bgroup = new THREE.Group(); bgroup.name = 'buildings'; scene.add(bgroup);
+  let bad = 0;
+  for (const b of plan.buildings) {
+    try {
+      const shape = new THREE.Shape(b.outline.map(q => new THREE.Vector2(q[0], q[1])));
+      for (const hole of b.holes) shape.holes.push(new THREE.Path(hole.map(q => new THREE.Vector2(q[0], q[1]))));
+      const geo = new THREE.ExtrudeGeometry(shape, { depth: b.top - b.base, bevelEnabled: false });
+      geo.rotateX(-Math.PI / 2);
+      geo.translate(0, b.base + b.ground, 0);
+      const wall = b.blocks ? '#ff4d4d' : b.manual ? '#ffb703' : b.wall;
+      const roof = b.blocks ? '#d00000' : (okColour(b.roof) ? b.roof : new THREE.Color(okColour(wall) ? wall : '#c9c9c9').multiplyScalar(0.72).getStyle());
+      const m = new THREE.Mesh(geo, [mat(roof), mat(wall)]);
+      m.name = b.id;
+      bgroup.add(m);
+    } catch (e) { bad++; }
+  }
+  // track: a flat ribbon just above the ground, white start line, cyan checkpoint posts
+  const t = plan.track, pos = [];
+  for (let i = 0; i < t.line.length - 1; i++) {
+    const e0 = t.elev[i] + 0.08, e1 = t.elev[i + 1] + 0.08;
+    const a = P(...t.left[i], e0), b2 = P(...t.right[i], e0), c = P(...t.left[i + 1], e1), d = P(...t.right[i + 1], e1);
+    pos.push(a.x, a.y, a.z, b2.x, b2.y, b2.z, c.x, c.y, c.z, b2.x, b2.y, b2.z, d.x, d.y, d.z, c.x, c.y, c.z);
+  }
+  const tgeo = new THREE.BufferGeometry(); tgeo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); tgeo.computeVertexNormals();
+  const track = new THREE.Mesh(tgeo, new THREE.MeshLambertMaterial({ color: '#3d3d48', side: THREE.DoubleSide })); track.name = 'track'; scene.add(track);
+  if (plan.start) {
+    const s = new THREE.Mesh(new THREE.BoxGeometry(plan.start.width || t.width, 0.05, 1.2), mat('#ffffff'));
+    s.position.copy(P(plan.start.pos[0], plan.start.pos[1], plan.start.g + 0.12));
+    s.rotation.y = Math.atan2(plan.start.dir[0], -plan.start.dir[1]);   // turns the box's depth axis to the travel direction (3D z = -north)
+    s.name = 'start line'; scene.add(s);
+  }
+  for (const c of plan.checkpoints.slice(1)) {
+    const post = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.15, 2.5, 6), mat('#00b4d8'));
+    post.position.copy(P(c.pos[0] - c.dir[1] * (t.width / 2 + 0.5), c.pos[1] + c.dir[0] * (t.width / 2 + 0.5), c.g + 1.25));
+    post.name = 'checkpoint ' + c.i; scene.add(post);
+  }
+  // trees and props: one "instanced" mesh each, so thousands stay fast
+  const dummy = new THREE.Object3D();
+  const instanced = (geo, material, list, place, name) => {
+    if (!list.length) return null;
+    const m = new THREE.InstancedMesh(geo, material, list.length);
+    list.forEach((it, i) => { place(it); dummy.updateMatrix(); m.setMatrixAt(i, dummy.matrix); });
+    m.name = name; scene.add(m); return m;
+  };
+  instanced(new THREE.CylinderGeometry(0.25, 0.35, 1, 5), mat('#6b4f2a'), plan.trees, tr => { dummy.position.copy(P(tr.x, tr.y, tr.g + tr.h * 0.3)); dummy.scale.set(1, tr.h * 0.6, 1); }, 'tree trunks');
+  instanced(new THREE.IcosahedronGeometry(1, 0), mat('#3f7d3a', { flatShading: true }), plan.trees.filter(tr => tr.type !== 'palm'), tr => { dummy.position.copy(P(tr.x, tr.y, tr.g + tr.h * 0.65)); dummy.scale.set(tr.r, tr.h * 0.4, tr.r); }, 'tree tops');
+  instanced(new THREE.ConeGeometry(1, 0.5, 6), mat('#4f8f3a', { flatShading: true }), plan.trees.filter(tr => tr.type === 'palm'), tr => { dummy.position.copy(P(tr.x, tr.y, tr.g + tr.h * 0.95)); dummy.scale.set(tr.r, tr.r * 0.5, tr.r); }, 'palm tops');
+  instanced(new THREE.BoxGeometry(0.7, 0.9, 0.7), mat('#ffb703'), plan.props, pr => { dummy.position.copy(P(pr.x, pr.y, pr.g + 0.45)); dummy.scale.set(1, 1, 1); }, 'props');
+  for (const l of plan.landmarks) {
+    const pin = new THREE.Mesh(new THREE.OctahedronGeometry(2, 0), mat('#e63946'));
+    pin.position.copy(P(l.x, l.y, l.g + 30)); pin.name = 'landmark ' + l.name; scene.add(pin);
+  }
+  // camera
+  const camera = new THREE.PerspectiveCamera(60, 1, 0.5, diag * 3);
+  const centre = P(plan.centre[0], plan.centre[1], 0);
+  camera.position.copy(centre).add(new THREE.Vector3(diag * 0.25, diag * 0.35, diag * 0.45));
+  const controls = new OrbitControls(camera, renderer.domElement);
+  controls.target.copy(centre); controls.maxPolarAngle = Math.PI * 0.49; controls.update();
+  v3d = { THREE, renderer, scene, camera, controls, ui, host, fly: null, raf: 0, retro: false, gtex };
+  const resize = () => {
+    const w = host.clientWidth, hh = host.clientHeight;
+    renderer.setPixelRatio(v3d.retro ? 0.33 : Math.min(devicePixelRatio, 2));
+    renderer.setSize(w, hh, false); camera.aspect = w / Math.max(1, hh); camera.updateProjectionMatrix();
+  };
+  v3d.resize = resize; resize();
+  window.addEventListener('resize', resize);
+  const len = out.route.centerline ? out.route.centerline.length : out.route.length;
+  $('v3dInfo').textContent = `${plan.buildings.length - bad} buildings · ${plan.trees.length} trees · ${plan.props.length} props · ${plan.landmarks.length} landmarks · ${(len / 1000).toFixed(2)} km track` +
+    (bad ? ` · ${bad} shapes couldn't be drawn` : '') + '. Red = blocks the track, orange = drawn by you.';
+  let last = performance.now();
+  const frame = now => {
+    const dt = Math.min(0.1, (now - last) / 1000); last = now;
+    if (v3d.fly) stepFly(dt); else controls.update();
+    renderer.render(scene, camera);
+    v3d.raf = requestAnimationFrame(frame);
+  };
+  v3d.raf = requestAnimationFrame(frame);
+  $('v3dClose').onclick = close3D;
+  $('v3dFly').onclick = () => toggleFly(plan.track);
+  $('v3dRetro').onchange = e => { v3d.retro = e.target.checked; host.classList.toggle('retro', v3d.retro); resize(); };
+  $('v3dGlb').onclick = () => download3D(out);
+  setStatus(`3D preview open. ${bad ? bad + " shapes couldn't be drawn (odd outlines in OSM). " : ''}Close it to get back to the map.`, bad ? 'warn' : 'ok');
+}
+// "Fly the lap": camera at kart height, 25 m/s, looking 15 m ahead along the smooth track line.
+function toggleFly(track) {
+  if (v3d.fly) { v3d.fly = null; $('v3dFly').textContent = '▶ Fly the lap'; v3d.controls.enabled = true; return; }
+  const pts = track.line, cum = [0];
+  for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
+  v3d.fly = { pts, cum, s: 0, total: cum[cum.length - 1], closed: track.closed, elev: track.elev };
+  v3d.controls.enabled = false;
+  $('v3dFly').textContent = '■ Stop';
+}
+function flyAt(f, s) {
+  if (f.closed) s = ((s % f.total) + f.total) % f.total; else s = Math.max(0, Math.min(f.total, s));
+  let i = 1; while (i < f.cum.length - 1 && f.cum[i] < s) i++;
+  const a = f.pts[i - 1], b = f.pts[i], seg = (f.cum[i] - f.cum[i - 1]) || 1, k = (s - f.cum[i - 1]) / seg;
+  const e = f.elev ? f.elev[i - 1] + (f.elev[i] - f.elev[i - 1]) * k : 0;
+  return [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, e];
+}
+function stepFly(dt) {
+  const f = v3d.fly;
+  f.s += 25 * dt;
+  if (!f.closed && f.s >= f.total) { toggleFly(); return; }
+  const p = flyAt(f, f.s), q = flyAt(f, f.s + 15);
+  v3d.camera.position.set(p[0], p[2] + 2.2, -p[1]);
+  v3d.camera.lookAt(q[0], q[2] + 1.4, -q[1]);
+}
+async function download3D(out) {
+  const btn = $('v3dGlb');
+  btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    const { GLTFExporter } = await import('three/addons/exporters/GLTFExporter.js');
+    const glb = await new GLTFExporter().parseAsync(v3d.scene, { binary: true, onlyVisible: true });
+    const safe = (out.meta.name || 'route').replace(/[^a-z0-9_-]+/gi, '-').toLowerCase();
+    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([glb], { type: 'model/gltf-binary' }));
+    a.download = `kartmap_${safe}_preview.glb`; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    setStatus(`Saved the 3D preview as .glb (${(glb.byteLength / 1048576).toFixed(1)} MB). It's a rough look-see model; the game still builds its level from the JSON.`, 'ok');
+  } catch (e) {
+    setStatus("Couldn't save the .glb: " + (e instanceof TypeError ? 'the exporter did not download from unpkg.com' : e.message), 'err');
+  } finally { btn.disabled = false; btn.textContent = '⬇ .glb'; }
+}
+function close3D() {
+  if (!v3d) return;
+  cancelAnimationFrame(v3d.raf);
+  window.removeEventListener('resize', v3d.resize);
+  v3d.controls.dispose();
+  v3d.scene.traverse(o => { if (o.geometry) o.geometry.dispose(); const ms = Array.isArray(o.material) ? o.material : o.material ? [o.material] : []; for (const m of ms) { if (m.map) m.map.dispose(); m.dispose(); } });
+  v3d.renderer.dispose();
+  v3d.renderer.forceContextLoss();
+  v3d.ui.remove();
+  v3d = null;
+  setTimeout(() => map.invalidateSize(), 50);
+}
+$('view3dBtn').onclick = open3D;
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && v3d) close3D(); });
+
+// ======================================================================
+// v12a (browser): ground heights from Queensland's LiDAR terrain model
+// ======================================================================
+let demGrids = null;   // the downloaded height tiles, kept for the terrain file and the 3D preview
+async function fetchDem(box, metresPerPixel) {
+  if (window.__demFetch) return window.__demFetch(box, metresPerPixel);   // tests
+  const plan = planImageTiles(box, metresPerPixel, CONFIG.imagery.maxWidth, CONFIG.imagery.maxHeight);
+  const grids = [];
+  for (let i = 0; i < plan.length; i++) {
+    const t = plan[i];
+    setStatus(`Downloading ground heights ${i + 1} of ${plan.length}…`);
+    const url = `${DEM_SOURCE.service}/exportImage?bbox=${t.west},${t.south},${t.east},${t.north}&bboxSR=4326&imageSR=4326&size=${t.width},${t.height}&format=bsq&pixelType=F32&interpolation=RSP_BilinearInterpolation&f=image`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`the elevation server replied ${res.status}`);
+    const buf = await res.arrayBuffer();
+    if (buf.byteLength < t.width * t.height * 4) throw new Error(`the elevation server sent ${buf.byteLength} bytes instead of ${t.width * t.height * 4} (it may be busy; try again)`);
+    grids.push({ box: t, width: t.width, height: t.height, data: parseBsqF32(buf, t.width, t.height) });
+  }
+  return grids;
+}
+async function getHeights() {
+  if (!scanResult) return;
+  const btn = $('heightsBtn'); btn.disabled = true;
+  try {
+    const U = makeUnprojector(scanResult.meta.origin.lat, scanResult.meta.origin.lon), bb = scanResult.meta.bbox;
+    const sw = U([bb.minX, bb.minY]), ne = U([bb.maxX, bb.maxY]);
+    const grids = await fetchDem({ south: sw[0], west: sw[1], north: ne[0], east: ne[1] }, 2);
+    setStatus('Working out heights…');
+    const e = applyElevation(scanResult, grids, makeUnprojector, { metresPerSample: 2 });
+    if (!e) { setStatus('No ground heights here: the Queensland terrain model has no data for this area (outside Queensland?).', 'warn'); return; }
+    demGrids = grids;
+    $('terrainBtn').disabled = false;
+    showStats();
+    setStatus(`Ground heights added: the track climbs ${Math.round(e.climb)} m per lap, its highest point is ${e.trackHighest} m above its lowest, steepest ${Math.abs(e.steepest.grade)}%.` +
+      (e.bridgedPoints ? ' Bridges are kept level between their ends.' : '') + ' Export JSON to save them.', 'ok');
+  } catch (err) {
+    setStatus('Ground heights failed: ' + (err instanceof TypeError ? "couldn't reach the Queensland elevation server (offline or blocked)" : err.message) + '. Your scan is unchanged.', 'err');
+  } finally { btn.disabled = false; }
+}
+function exportTerrain() {
+  if (!scanResult || !demGrids) return;
+  const tf = terrainFile(scanResult, demGrids, makeUnprojector, 4);
+  const safe = (scanResult.meta.name || 'route').replace(/[^a-z0-9_-]+/gi, '-').toLowerCase();
+  const file = `kartmap_${safe}_terrain.json`;
+  scanResult.meta.elevation.terrainFile = file;
+  scanResult.meta.elevation.terrainSpacing = tf.spacing;
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([JSON.stringify(tf)], { type: 'application/json' }));
+  a.download = file; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  setStatus(`Terrain file saved (${tf.width}×${tf.height} heights, every ${tf.spacing} m). Export JSON again so the level file names it.`, 'ok');
+}
+$('heightsBtn').onclick = getHeights;
+$('terrainBtn').onclick = exportTerrain;
+
+// ======================================================================
+// v12b (browser): share link, measuring, help card
+// ======================================================================
+$('shareBtn').onclick = async () => {
+  if (!waypoints.length) { setStatus('Draw a route first.', 'warn'); return; }
+  const link = location.origin + location.pathname + '#t=' + await packTrack(snapshot(els.name.value.trim()));
+  const box = $('shareOut');
+  box.value = link; box.hidden = false; box.select();
+  let how = 'Link ready below: copy it';
+  try { await navigator.clipboard.writeText(link); how = 'Link copied'; } catch (e) { /* clipboard blocked: the box is selected for a manual copy */ }
+  if (navigator.share && matchMedia('(pointer: coarse)').matches) { try { await navigator.share({ title: 'Kart track: ' + (els.name.value || 'route'), url: link }); how = 'Shared'; } catch (e) { /* cancelled */ } }
+  setStatus(`${how} (${link.length} characters). Open it on another device to get this exact track${link.length > 8000 ? ". It's long: some chat apps may cut it, so use Back up all for very long tracks" : ''}.`, link.length > 8000 ? 'warn' : 'ok');
+};
+// Opening a share link: load the track from the address, then tidy the address.
+async function openSharedLink() {
+  const m = /^#t=(.+)$/.exec(location.hash);
+  if (!m) return false;
+  try {
+    const t = await unpackTrack(m[1]);
+    await applyTrack(t);
+    setStatus(`Opened a shared track${t.name ? ' "' + t.name + '"' : ''}. Save it to keep it, or Undo to go back.`, 'ok');
+  } catch (e) {
+    setStatus("Couldn't open that share link: " + e.message + '.', 'err');
+  }
+  try { window.history.replaceState(null, '', location.pathname + location.search); } catch (e) {}   // (plain `history` is the Undo list here)
+  return true;
+}
+window.addEventListener('hashchange', openSharedLink);
+
+// ---- measuring tape (📏 on the map) ----
+let measuring = null;   // { pts, line, label }
+const MeasureCtl = L.Control.extend({
+  options: { position: 'topleft' },
+  onAdd() {
+    const b = L.DomUtil.create('button', 'leaflet-bar');
+    b.id = 'measureBtn'; b.type = 'button'; b.title = 'Measure a distance'; b.textContent = '📏';
+    b.style.cssText = 'width:34px;height:34px;font-size:16px;padding:0;background:#fff;color:#000;cursor:pointer';
+    L.DomEvent.disableClickPropagation(b);
+    b.onclick = () => toggleMeasure();
+    return b;
+  }
+});
+map.addControl(new MeasureCtl());
+function toggleMeasure() {
+  const b = $('measureBtn');
+  if (measuring) {
+    measuring.line.remove(); measuring.dots.remove(); measuring = null;
+    b.style.background = '#fff'; setMode(mode); setStatus('Measuring off.');
+    return;
+  }
+  measuring = { pts: [], line: L.polyline([], { color: '#ffbe0b', weight: 3, dashArray: '2 6', interactive: false }).addTo(map), dots: L.layerGroup().addTo(map) };
+  b.style.background = '#ffbe0b';
+  map.dragging.enable();
+  els.map.classList.add('drawing');
+  setStatus('Measuring: click points on the map. Click 📏 again to stop.');
+}
+function addMeasurePoint(ll) {
+  measuring.pts.push(ll);
+  measuring.line.setLatLngs(measuring.pts);
+  L.circleMarker(ll, { radius: 4, color: '#ffbe0b', weight: 2, fillColor: '#fff', fillOpacity: 1, interactive: false }).addTo(measuring.dots);
+  const total = routeLength(measuring.pts);
+  const last = measuring.pts.length > 1 ? dist(measuring.pts[measuring.pts.length - 2], ll) : 0;
+  setStatus(`Measured ${total >= 1000 ? (total / 1000).toFixed(2) + ' km' : total.toFixed(1) + ' m'}` + (measuring.pts.length > 2 ? ` (last bit ${last.toFixed(1)} m)` : '') + '. Click 📏 to stop.', 'ok');
+}
+// takes the click before the drawing modes do
+map.on('click', e => { if (measuring) addMeasurePoint([e.latlng.lat, e.latlng.lng]); });
+
+// ---- help card ----
+function showHelp(show) { $('helpCard').hidden = !show; }
+$('helpBtn').onclick = () => showHelp($('helpCard').hidden);
+$('helpClose').onclick = () => { showHelp(false); try { localStorage.setItem('kartmap-help-seen', '1'); } catch (e) {} };
+try { if (!localStorage.getItem('kartmap-help-seen') && !localStorage.getItem('kartmap-v1')) showHelp(true); } catch (e) { showHelp(true); }
+
+// ======================================================================
+// v12c (browser): elevation profile, minimap PNG, track card PNG
+// ======================================================================
+function profileHtml(out) {
+  const g = profileGeometry(out, 300, 90, 6);
+  if (!g) return '';
+  return `<div class="profile" id="profile"><div class="hint">Height along the lap (m above the lowest point)</div>
+    <svg viewBox="0 0 300 90" preserveAspectRatio="none" role="img" aria-label="Elevation profile: highest ${g.top} m">
+      <line x1="6" x2="294" y1="${round2(g.sy(0))}" y2="${round2(g.sy(0))}" stroke="var(--grid)" stroke-width="1"/>
+      <line x1="6" x2="294" y1="${round2(g.sy(g.top))}" y2="${round2(g.sy(g.top))}" stroke="var(--grid)" stroke-width="1" stroke-dasharray="2 3"/>
+      <path d="${g.area}" fill="var(--series-1)" fill-opacity="0.15"/>
+      <path d="${g.d}" fill="none" stroke="var(--series-1)" stroke-width="2" vector-effect="non-scaling-stroke" stroke-linejoin="round"/>
+      <line id="profX" y1="6" y2="84" stroke="var(--ink-2)" stroke-width="1" vector-effect="non-scaling-stroke" visibility="hidden"/>
+      <text x="8" y="${round2(g.sy(g.top)) + 10}" font-size="10" fill="var(--ink-2)">${g.top} m</text>
+    </svg><div class="readout" id="profRead" hidden></div></div>`;
+}
+// crosshair: snaps to the nearest track point under the pointer
+els.stats.addEventListener('pointermove', e => {
+  const svg = e.target.closest && e.target.closest('#profile svg');
+  if (!svg || !scanResult) return;
+  const g = profileGeometry(scanResult, 300, 90, 6);
+  if (!g) return;
+  const r = svg.getBoundingClientRect(), x = (e.clientX - r.left) / r.width * 300;
+  const i = Math.max(0, Math.min(g.es.length - 1, Math.round((x - 6) / 288 * (g.es.length - 1))));
+  const line = $('profX'), read = $('profRead');
+  line.setAttribute('x1', g.sx(i * g.spacing)); line.setAttribute('x2', g.sx(i * g.spacing)); line.setAttribute('visibility', 'visible');
+  read.hidden = false; read.textContent = `${(i * g.spacing / 1000).toFixed(2)} km · ${g.es[i].toFixed(1)} m`;
+});
+els.stats.addEventListener('pointerleave', () => { const l = $('profX'), r = $('profRead'); if (l) l.setAttribute('visibility', 'hidden'); if (r) r.hidden = true; });
+
+function savePng(canvas, file, after) {
+  canvas.toBlob(blob => {
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = file; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    if (after) after(blob);
+  }, 'image/png');
+}
+function drawTrackLine(g, mp, scale, opts) {
+  const pts = mp.points;
+  g.lineJoin = g.lineCap = 'round';
+  const path = () => { g.beginPath(); pts.forEach((p, i) => i ? g.lineTo(p[0] * scale, p[1] * scale) : g.moveTo(p[0] * scale, p[1] * scale)); if (mp.closed) g.closePath(); };
+  path(); g.strokeStyle = opts.edge; g.lineWidth = opts.width + 4 * scale; g.stroke();
+  path(); g.strokeStyle = opts.road; g.lineWidth = opts.width; g.stroke();
+  // start/finish: a short chequered bar across the track
+  const [sx, sy] = [mp.start[0] * scale, mp.start[1] * scale], [dx, dy] = mp.dir, half = opts.width * 1.1, n = 6;
+  for (let k = 0; k < n; k++) for (let row = 0; row < 2; row++) {
+    const t0 = -half + (2 * half) * k / n, t1 = -half + (2 * half) * (k + 1) / n, r0 = row * opts.width * 0.35 - opts.width * 0.35, r1 = r0 + opts.width * 0.35;
+    g.fillStyle = (k + row) % 2 ? '#ffffff' : '#111111';
+    g.beginPath();
+    for (const [t, r] of [[t0, r0], [t1, r0], [t1, r1], [t0, r1]]) g.lineTo(sx - dy * t + dx * r, sy + dx * t + dy * r);
+    g.fill();
+  }
+}
+function exportMinimap() {
+  if (!scanResult) return;
+  const out = withManualExtras(scanResult, trees, manualBuildings), size = 256;
+  const mp = minimapPlan(out, size, 12);
+  const cv = document.createElement('canvas'); cv.width = cv.height = size;
+  drawTrackLine(cv.getContext('2d'), mp, 1, { width: 5, road: '#ffffff', edge: '#111111' });
+  const safe = (out.meta.name || 'route').replace(/[^a-z0-9_-]+/gi, '-').toLowerCase(), file = `kartmap_${safe}_minimap.png`;
+  scanResult.meta.minimap = { file, size, metresPerPixel: mp.mpp, minX: mp.minX, maxY: mp.maxY, note: 'Kart at (x, y) is at pixel ((x - minX) / metresPerPixel, (maxY - y) / metresPerPixel). North is up. Transparent background.' };
+  savePng(cv, file, () => setStatus(`Minimap saved (${size}×${size}, ${mp.mpp} m per pixel). Export JSON again so the file says how to place karts on it.`, 'ok'));
+}
+function exportCard() {
+  if (!scanResult) return;
+  const out = withManualExtras(scanResult, trees, manualBuildings);
+  const W = 1200, H = 630, cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  const g = cv.getContext('2d');
+  g.fillStyle = '#16161d'; g.fillRect(0, 0, W, H);
+  // map square: faint buildings and the track
+  const S = 560, X0 = 35, Y0 = 35, mp = minimapPlan(out, S, 36);
+  g.fillStyle = '#20202a'; g.fillRect(X0, Y0, S, S);
+  g.save(); g.translate(X0, Y0); g.beginPath(); g.rect(0, 0, S, S); g.clip();
+  g.fillStyle = '#3a3a4a';
+  for (const b of out.buildings) { if (b.hasParts) continue; g.beginPath(); b.footprint.forEach((q, i) => { const p = mp.toPx(q); i ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1]); }); g.closePath(); g.fill(); }
+  g.fillStyle = '#2d6a4f';
+  for (const p of out.points) if (p.kind === 'tree') { const q = mp.toPx(p.pos); g.fillRect(q[0] - 1.5, q[1] - 1.5, 3, 3); }
+  drawTrackLine(g, mp, 1, { width: 9, road: '#e63946', edge: '#0b0b10' });
+  g.restore();
+  // text side
+  const font = (wt, px) => `${wt} ${px}px system-ui, "Segoe UI", sans-serif`;
+  g.fillStyle = '#9a9ab0'; g.font = font(600, 18); g.fillText('KART MAP SCANNER', 635, 70);
+  g.fillStyle = '#e8e8f0'; g.font = font(700, 46);
+  let name = out.meta.name || 'Untitled track';
+  while (g.measureText(name).width > 530 && name.length > 4) name = name.slice(0, -2) + '…';
+  g.fillText(name, 635, 125);
+  g.fillStyle = '#9a9ab0'; g.font = font(400, 18); g.fillText('Real streets, scanned from open map data', 635, 155);
+  const c = out.meta.counts, e = out.meta.elevation;
+  const stats = [['Length', (out.route.length / 1000).toFixed(2) + ' km'], ['Corners', (out.route.corners || []).length], ['Checkpoints', out.race ? out.race.checkpoints.length : 0],
+    ['Shortcuts', c.shortcuts || 0], ['Buildings', c.buildings + (c.manualBuildings || 0)], ['Trees', out.points.filter(p => p.kind === 'tree').length],
+    ['Landmarks', c.landmarks || 0], e ? ['Climb per lap', Math.round(e.climb) + ' m'] : ['Width', out.route.width + ' m']];
+  stats.forEach(([k, v], i) => {
+    const x = 635 + (i % 2) * 270, y = 215 + Math.floor(i / 2) * 68;
+    g.fillStyle = '#9a9ab0'; g.font = font(400, 16); g.fillText(k, x, y);
+    g.fillStyle = '#e8e8f0'; g.font = font(700, 30); g.fillText(String(v), x, y + 34);
+  });
+  const pg = profileGeometry(out, 530, 80, 4);
+  if (pg) {
+    g.save(); g.translate(635, 500);
+    g.fillStyle = 'rgba(57,135,229,0.18)'; g.fill(new Path2D(pg.area));
+    g.strokeStyle = '#3987e5'; g.lineWidth = 2; g.lineJoin = 'round'; g.stroke(new Path2D(pg.d));
+    g.fillStyle = '#9a9ab0'; g.font = font(400, 13); g.fillText(`Height along the lap · highest ${pg.top} m`, 4, -6);
+    g.restore();
+  }
+  g.fillStyle = '#6a6a80'; g.font = font(400, 12);
+  const credit = 'Map data © OpenStreetMap contributors' + (out.meta.overture ? ', Overture Maps' : '') + (out.meta.elevation || out.meta.imagery ? ', © State of Queensland (CC BY-SA)' : '');
+  g.fillText(credit, 635, 612);
+  const safe = (out.meta.name || 'route').replace(/[^a-z0-9_-]+/gi, '-').toLowerCase();
+  savePng(cv, `kartmap_${safe}_card.png`, () => setStatus('Track card saved (1200×630, a good size for sharing).', 'ok'));
+}
+$('minimapBtn').onclick = exportMinimap;
+$('cardBtn').onclick = exportCard;
+
 // ---- remember the last route between visits (optional; fails silently) ----
 function save() {
   try {
     localStorage.setItem('kartmap-v1', JSON.stringify({
       waypoints, trees, snap: els.snap.checked, loop: els.loop.checked,
-      radius: els.radius.value, width: els.width.value, name: els.name.value, canopy: els.canopy.value
+      radius: els.radius.value, width: els.width.value, name: els.name.value, canopy: els.canopy.value,
+      manualBuildings, race: raceOpts
     }));
   } catch (e) { /* storage blocked: tool still works, it just won't remember */ }
 }
-(function restore() {
+(async function restore() {
+  if (await openSharedLink()) return;   // v12b: a share link wins over the last route
   let s = null;
   try { s = JSON.parse(localStorage.getItem('kartmap-v1')); } catch (e) {}
   if (!s) return;
@@ -1755,6 +3445,8 @@ function save() {
   if (s.name) els.name.value = s.name;
   if (s.canopy) { els.canopy.value = s.canopy; els.canopyVal.textContent = s.canopy; }
   if (Array.isArray(s.trees)) { trees = s.trees; renderTrees(); }
+  if (Array.isArray(s.manualBuildings)) { manualBuildings = s.manualBuildings; renderManualBuildings(); }
+  if (s.race) raceOpts = { reverse: !!s.race.reverse, start: Array.isArray(s.race.start) ? s.race.start : null };
   if (Array.isArray(s.waypoints) && s.waypoints.length) {
     waypoints = s.waypoints;
     map.fitBounds(waypoints, { padding: [40, 40], maxZoom: 17 });
