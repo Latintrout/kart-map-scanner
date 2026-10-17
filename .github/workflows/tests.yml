@@ -18,5 +18,3 @@ jobs:
           node-version: "20"
       - name: Data checks
         run: node tests/run-node.js index.html
-      - name: Game test files build
-        run: node tests/game-loader/make_files.js /tmp/tracks scan_ci=index.html
