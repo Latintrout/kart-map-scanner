@@ -530,7 +530,18 @@ function runV13(lib, check, same) {
   check('v13 race check: a plain loop races well', lib.raceCheck(sq).problems.length === 0 && lib.raceCheck(sq).seconds > 20);
   const f8 = []; for (let k = 0; k <= 200; k++) { const t = k / 200 * 2 * Math.PI; f8.push([200 * Math.sin(t), 100 * Math.sin(2 * t)]); }
   const p8 = lib.raceCheck(mk(f8)).problems;
-  check('v13 race check: a figure eight at street level is one red crossing in the middle', p8.length === 1 && p8[0].level === 'red' && /crosses itself/.test(p8[0].label) && Math.hypot(...p8[0].xy) < 10, JSON.stringify(p8));
+  check('v13 race check: a figure eight at street level is one crossing in the middle (amber: the game builds a flyover)', p8.length === 1 && p8[0].level === 'amber' && /crosses itself/.test(p8[0].label) && Math.hypot(...p8[0].xy) < 10, JSON.stringify(p8));
+  // v13: pick which road goes over
+  const e8 = mk(f8); e8.race = { checkpoints: [] }; e8.meta = { origin: { lat: -27.47, lon: 153.02 }, counts: {} };
+  const plain = lib.withManualExtras(e8, [], [], []);
+  const c8 = plain.race.crossings;
+  check('v13 crossing plan: one crossing, two passes with headings, the game picks', c8 && c8.length === 1 && c8[0].over === null && c8[0].s[0] < c8[0].s[1] && c8[0].heading.every(h => Math.abs(Math.hypot(...h) - 1) < 0.01), JSON.stringify(c8));
+  const want = d => lib.withManualExtras(e8, [], [], [{ xy: [3, -2], dir: d }]).race.crossings[0];
+  check('v13 crossing plan: the pass whose heading was picked goes over, either way round', want(c8[0].heading[1]).over === 1 && want(c8[0].heading[0].map(v => -v)).over === 0);
+  check('v13 crossing plan: a pick far from the crossing is ignored', lib.withManualExtras(e8, [], [], [{ xy: [150, 0], dir: c8[0].heading[1] }]).race.crossings[0].over === null);
+  const p8b = lib.raceCheck(lib.withManualExtras(e8, [], [], [{ xy: [0, 0], dir: c8[0].heading[1] }])).problems;
+  check('v13 race check names the pass picked to go over', /second pass \(at \d+ m\) over/.test(p8b[0].label), p8b[0].label);
+  check('v13 a route with no crossing gets no crossings list', lib.withManualExtras({ ...sq, meta: e8.meta, race: { checkpoints: [] } }, [], [], []).race.crossings === undefined);
   const f8b = mk(f8); f8b.route.elevation = f8.map((p, i) => (i > 70 && i < 130 ? 8 : 0));
   check('v13 race check: the same eight with one pass 8 m up (a bridge) has no crossing', !lib.raceCheck(f8b).problems.some(p => /crosses itself/.test(p.label)));
   const ob = lib.raceCheck(mk([[0, 0], [300, 0], [300, 6], [0, 6], [0, 0]])).problems;
@@ -546,6 +557,11 @@ function runV13(lib, check, same) {
   const dr = lib.gameDrops(town);
   check('v13 game rules: a building within 1.5 m of the road edge is left out, one 6 m away stays, roofs on posts stay', dr.buildings.has('w1') && !dr.buildings.has('w2') && !dr.buildings.has('w4'), JSON.stringify([...dr.buildings]));
   check('v13 game rules: far buildings (over 50 m from the road) are plain; tree on the road and far bench left out, tree far away kept', dr.far.has('w3') && dr.points.has('n1') && !dr.points.has('n2') && dr.points.has('n3') && !dr.points.has('n4'), JSON.stringify([[...dr.far], [...dr.points]]));
+  town.barriers = [{ id: 'f1', kind: 'fence', points: [[200, -10], [200, 10]] }, { id: 'f2', kind: 'fence', points: [[200, 20], [220, 20]] }];
+  const offRoad = lib.gameCleared(town), cn = lib.clearedNotes(offRoad);
+  check('v13 left off the track: the building and tree on the road and the fence across it, not the far bench or the fence beside it',
+    offRoad.buildings.map(b => b.id).join() === 'w1' && offRoad.points.map(p => p.id).join() === 'n1' && offRoad.barriers.map(b => b.id).join() === 'f1', JSON.stringify([offRoad.buildings, offRoad.barriers, offRoad.points].map(l => l.map(x => x.id))));
+  check('v13 left off the track: listed in plain words by name and kind', cn.length === 3 && /1 building on its road: w1/.test(cn[0]) && /1 fence or wall .*\(1 fence\)/.test(cn[1]) && /1 prop .*\(1 tree\)/.test(cn[2]), JSON.stringify(cn));
   // suggested item boxes and boost pads
   const rect2 = mk([[0, 0], [600, 0], [600, 150], [0, 150], [0, 0]]); rect2.route.width = 10;
   const sp = lib.gameSpots(rect2);
