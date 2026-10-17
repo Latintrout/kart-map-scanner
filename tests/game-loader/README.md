@@ -1,16 +1,10 @@
-# Game loader test (developer-only)
+# Game loader test (the game check)
 
-Checks scanner output against the real game: the Godot loader in `Latintrout/brisbane-kart`
-(`game/scripts/kartmap.gd`, `kartmap_scenery.gd`).
+The check that scanner files load in the real game now lives in the game's repo,
+`Latintrout/brisbane-kart`, under `tools/scanner_check/` (test-file maker and Godot harness).
+Its **Scanner check** workflow runs on every game push and pull request, once a day against
+this repo's `main`, and by hand (brisbane-kart → Actions → Scanner check → Run workflow,
+naming a scanner branch to test it before merging).
 
-1. Check out the game (the branch with the kartmap importer) and install Godot 4.7.2.
-2. Edit the last lines of `make_files.js` so the two output folders point at `<game>/game/tracks/`,
-   then: `node make_files.js <older-scanner.html> <newer-scanner.html>`.
-3. Copy `harness_kartmap.gd` into `<game>/game/` and run:
-   `godot --headless --path <game>/game --import` then
-   `godot --headless --path <game>/game --script res://harness_kartmap.gd`
-4. Compare the printed counters (buildings near/far, wheel, props, landmarks). Any error or
-   warning in the log is a failure. Delete the harness and test track folders afterwards.
-
-Result on 2026-10-15 (made-up South-Bank-like scan): v8.1 near 7, wheel false, props 5;
-v8.2 near 9 (tower drawn), wheel true, props 10. No errors.
+When the scanner exports something new, add it to `tools/scanner_check/make_files.js` in the
+game repo so the check covers it. To run it by hand, see the README there.

@@ -1,6 +1,6 @@
 # kartmap file format (version 2)
 
-_Last updated for scanner v12c (2026-10-16). v9b, v11 and v12b made no format changes (v11's `.glb` is a separate preview model). **(v12a)** adds ground heights, **(v12c)** `meta.minimap`._ Fields marked **(v8)**, **(v8.1)**, **(v8.2)**, **(v8.3)** or **(v9a)** are newer than version 1. All are optional, so readers of version 1 files still work. Files say `"version": 2` from scanner v8.2 on, matching the "kartmap v2" the game's loader (brisbane-kart, `kartmap.gd`) was written for. That loader accepts versions 1 and 2 and **rejects anything higher**, so a future version 3 needs a loader update first._
+_Last updated for scanner v13 (2026-10-17). v9b, v11 and v12b made no format changes (v11's `.glb` is a separate preview model). **(v12a)** adds ground heights, **(v12c)** `meta.minimap`, **(v13)** the bare ground under bridges, a height grid inside the file, shop signs, street signs, labelled height guesses and suggested item boxes / boost pads._ Fields marked **(v8)**, **(v8.1)**, **(v8.2)**, **(v8.3)** or **(v9a)** are newer than version 1. All are optional, so readers of version 1 files still work. Files say `"version": 2` from scanner v8.2 on, matching the "kartmap v2" the game's loader (brisbane-kart, `kartmap.gd`) was written for. That loader accepts versions 1 and 2 and **rejects anything higher**, so a future version 3 needs a loader update first._
 
 **Guesses are always marked.** Any field ending in `Source` (`heightSource`, `widthSource`, `roofShapeSource`) says where a value came from. The values `default`, `estimated`, `guess` and **(v8.3)** `ml-estimate` mean it's a guess: later data (LiDAR, hand edits) may replace guesses freely, but must never replace real values (`osm`, `levels`, `lanes`, `lidar`, **(v8.3)** `overture`, **(v9a)** `manual`).
 
@@ -33,7 +33,8 @@ into a level in the Godot kart game.
 | `landmarks` | **(v8)** Named places worth modelling by hand (attractions, galleries, fountains, monuments) |
 | `railways` | **(v8.1)** Railway, light rail and tram lines |
 | `markings` | **(v8.1)** Road markings: crossings, stop lines, give-way lines |
-| `race` | **(v8.1)** Suggested start line, start grid, checkpoints and shortcuts |
+| `race` | **(v8.1)** Suggested start line, start grid, checkpoints and shortcuts; **(v13)** item boxes and boost pads |
+| `streetSigns` | **(v13)** Street name signs where named streets and paths meet the track: `[{ text, pos, street }]` |
 | `manualTrees` | Copy of hand-placed trees in lat/lon (only used by the scanner to reload a file; the game can ignore it) |
 | `manualBuildings` | **(v9a)** Copy of hand-drawn buildings in lat/lon, `[{ ring, height, name? }]` (for reloading; the game uses the copies in `buildings`) |
 
@@ -48,7 +49,7 @@ into a level in the Godot kart game.
 | `areasTrimmedTo` | Box that large areas (like the river) were cut to |
 | `counts` | Number of each feature type (v8 adds `barriers`, `landmarks`, `bridges`, `tunnels`) |
 | `minimap` | **(v12c)** Set after "Minimap PNG": `{ file, size, metresPerPixel, minX, maxY, note }`. A transparent, north-up picture of the track for the HUD. A kart at (x, y) is at pixel ((x − minX) / metresPerPixel, (maxY − y) / metresPerPixel) |
-| `elevation` | **(v12a)** `null`, or ground heights from the Queensland LiDAR terrain model: `{ source, service, licence: "CC BY-SA", attribution, base, units, groundOnly, metresPerSample, trackLowest, trackHighest, climb, descent, steepest: { grade, at }, bridgedPoints, counts, terrainFile?, terrainSpacing? }`. `base` = metres above sea level (AHD) of the track's lowest point; every other height is metres above `base`. `grade` is % over 20 m (+ uphill in race direction), `at` = metres along the centerline |
+| `elevation` | **(v12a)** `null`, or ground heights from the Queensland LiDAR terrain model: `{ source, service, licence: "CC BY-SA", attribution, base, units, groundOnly, metresPerSample, trackLowest, trackHighest, climb, descent, steepest: { grade, at }, bridgedPoints, counts, grid, terrainFile?, terrainSpacing? }`. `base` = metres above sea level (AHD) of the track's lowest point; every other height is metres above `base`. `grade` is % over 20 m (+ uphill in race direction), `at` = metres along the centerline. **(v13)** `grid`: the ground every 10 m over `bbox`, `{ minX, maxY, spacing, width, height, encoding, missing, data }`, encoded like the terrain file below, so the game's ground can follow the hills without the separate terrain file |
 | `generator` | **(v8)** Which scanner version made the file, e.g. `"kart-map-scanner v8.1"` |
 | `quality` | **(v8.1)** Report card: `heights` (% measured / estimated / default), `roofShapes` (% mapped / guessed), `buildingsOnTrack` (ids), `barriersOnTrack`, `propsOnTrack`, `treesTyped` (%), and `notes` (plain-English warnings) |
 | `attribution` | "© OpenStreetMap contributors, ODbL", plus **(v8.3)** Overture and Queensland imagery credits when those were used. Must appear in the game's credits |
@@ -67,9 +68,10 @@ into a level in the Godot kart game.
 | `snappedToRoads` | `true` if snapped to car roads; `false` if drawn by hand (e.g. along footpaths) |
 | `waypoints` | The scanner's editing points in lat/lon, in the order they were drawn. The game should ignore these |
 | `elevation` | **(v12a)** Height (m above `meta.elevation.base`) of each of `points`, same length. Smoothed over ±8 m; on bridges and in tunnels a straight line between the two ends (the terrain model is bare ground, so it would put a bridge deck down in the river) |
+| `ground` | **(v13)** Only when the track crosses a bridge or tunnel: the bare ground under each of `points` (same length, smoothed the same way, but not bridged). Where `elevation` is well above `ground` the track is on a bridge deck; the game draws piers down to `ground` |
 | `reversed` | **(v9a)** `true` if the race runs against the drawing direction (already applied to `points`) |
 | `startPoint` | **(v9a)** `[lat, lon]` of the start picked by hand on a loop (already applied to `points`; `meta.origin` sits there too) |
-| `centerline` | **(v8.1)** `{ spacing, points, length, elevation? }` (**v12a** `elevation`: one height per point, as for `route.elevation`): the track line smoothed (corners rounded about 5 m) with points exactly `spacing` (2 m) apart. **Use this for the track surface**; `points` is the raw line |
+| `centerline` | **(v8.1)** `{ spacing, points, length, elevation? }` (**v12a** `elevation`: one height per point, as for `route.elevation`; **v13** `ground` likewise, as for `route.ground`): the track line smoothed (corners rounded about 5 m) with points exactly `spacing` (2 m) apart. **Use this for the track surface**; `points` is the raw line |
 | `corners` | **(v8.1)** `[{ at, pos, angle }]`: turns of more than 35°. `at` = metres along the centerline, `angle` in degrees (+ left, − right) |
 
 ## roads
@@ -105,6 +107,8 @@ Each: `{ id, kind, name?, height, heightSource, footprint, holes?, roofShape?, r
 - **(v9a)** `source: "manual"`, `heightSource: "manual"`: a building drawn by hand in the scanner (id `mb1`, `mb2`…), with the height typed in. Treat the height as real. Roof is `flat` (`roofShapeSource: "guess"`). No `trackDist` / `onTrack` on these.
 - **(v12a)** `ground`: height of the lowest ground under the outline (m above `meta.elevation.base`), so the building starts there and doesn't float on a slope. `height` and `minHeight` are still measured from the building's own ground.
 - `holes` (optional) lists courtyards to cut out, each its own polygon.
+- **(v13)** `heightSource: "guess"` with `heightGuess` saying why: `shop` (7 m, 8 m if large), `similar buildings nearby` (median of 4+ measured buildings of similar size within 100 m), `house`, `industrial area`, `commercial area` / `retail area`, or `size`. Replaces most `default` heights. Still a guess: anything measured may replace it.
+- **(v13)** `shops`: `[{ type, sign }]`, up to 3 shops in or right beside this building. `type` is what it sells (`cafe`, `chicken`, `pizza`, `pub`, `hairdresser`, `supermarket`, `bank`… or plain `shop`); `sign` is a **made-up, jokey name** for that kind of shop ("Chicken BBQ", "Bean There", "Curl Up & Dye"), the same every scan. **Real shop and brand names are never in the file:** shops' `name` is replaced by their sign name, and branded buildings, malls and shopping strips have no `name`. Street, park and river names are kept.
 - **(v8) Looks, when OSM has them (all optional):**
   - `roofShape`: `flat`, `gabled`, `hipped`, `pyramidal`, `skillion`, `dome`…
   - `roofColour` and `colour` (walls): a colour name (`red`) or hex (`#ffffff`).
@@ -149,7 +153,7 @@ Each: `{ id, kind, group, source, pos, name?, canopy? }`
 
 - `kind` is what the object is. Since v8 there are many more kinds: `tree`, `street_lamp`, `traffic_signals`, `bus_stop`, `crossing`, `bench`, `waste_basket`, `picnic_table`, `fountain`, `drinking_water`, `bicycle_parking`, `shelter`, `bollard`, `gate`, `artwork`, `memorial`, `flagpole`, `fire_hydrant`, `power_pole`, playground equipment (`swing`, `slide`…), billboards and more. Treat any kind you don't recognise as a generic small prop.
 - **(v8)** `group` is the OSM category the kind comes from: `natural`, `highway`, `amenity`, `leisure`, `playground`, `tourism`, `historic`, `man_made`, `barrier`, `power`, `emergency` or `advertising`. Useful for picking a fallback model.
-- `name` (optional, v8): e.g. the name of a statue.
+- `name` (optional, v8): e.g. the name of a statue. **(v13)** On cafés, restaurants, pubs and other shops it is the made-up sign name, never the real one.
 - **(v8.1) Trees:** `treeType` (`palm`, `eucalypt`, `fig`, `conifer`, `broadleaf`; absent = unknown, use a default), and `height` / `canopy` in metres when mapped. **(v8.2)** `genus`, `species`, `leafType` (`broadleaved` / `needleleaved`) and `leafCycle` (`evergreen` / `deciduous`) as separate fields.
 - **(v8.1)** `trackDist` and `onTrack` as for buildings. Crossings moved from props to `markings`.
 - Shops and offices are **not** props. **(v8.2)** Cafés, restaurants, bars, ice-cream places, toilets, parking meters and playgrounds **are** (the game draws outdoor tables, toilet blocks and so on). They're never landmarks.
@@ -177,6 +181,11 @@ Suggestions only (`suggested: true`). The game or a later editor may move them.
 - `checkpoints`: `[{ i, at, pos, dir, width }]`. About every 100 m, at least 8; checkpoint 0 is the start/finish. `dir` is the direction of travel (unit vector).
 - `grid`: 8 start slots, `[{ slot, behind, pos, dir }]`, 2 per row, 6 m apart, behind the start line.
 - `shortcuts`: `[{ from, to, skips, length, saving, via, points }]`. Paths that rejoin the track at least 30 m sooner than driving it. `from`/`to` = metres along the centerline, `via` = road ids used, `points` = the path. Never more than half a lap (that would be driving backwards). Sorted best first, at most 10.
+- **(v13)** `itemBoxes`: `[{ s, count }]` and `boostPads`: `[{ s, lateral }]`, in the same shape as the game's `gameplay.json` (`item_boxes`, `boost_pads`). `s` is metres along **the game's own line** (the centerline smoothed and resampled every 3 m the way brisbane-kart does it), not along `route.centerline`; `gameLength` is that line's length, so a reader whose line comes out a little different can scale `s`. Boost pads sit just out of the corner before the two longest straights; item box rows (4 boxes on roads 10 m+ wide, else 3) about every 250 m on straight bits, away from the start line, pads and steep bits.
+
+## streetSigns (v13)
+
+`[{ text, pos, street }]`: one sign per named street (or named path, like a promenade) that meets the track, on the corner just off the track edge. `text` is the name in capitals with the type shortened (`GREY ST`, `STANLEY ST`); `street` is the road's id. The same text isn't repeated within 80 m; at most 60.
 
 ## IDs
 
@@ -196,6 +205,10 @@ Suggestions only (`suggested: true`). The game or a later editor may move them.
 10. **(v8.2) Loader contract:** the scanner checks every scan against what the game's loader reads (valid footprints, heights, parts present for `hasParts`, positions on landmarks and props) and warns before export if anything would break in the game.
 11. **(v8.3) Colours:** mapped colours (`roofColour`, `colour`) first, then `sampledRoofColour` / area `sampledColour` from the aerial photo, then the game's own palette.
 12. **(v12a) Hills:** with `meta.elevation`, raise the track by `route.elevation` (or `centerline.elevation`), and each building/prop/tree by its `ground`. The full height grid is in the terrain file:
+
+### Export for game (v13)
+
+The 🎮 *Export for game* button saves `scan_<name>.zip` holding one folder, `scan_<name>/`, with the level file, the minimap PNG (`meta.minimap` filled in), the terrain file when ground heights were fetched (`meta.elevation.terrainFile` filled in) and a short README. Unzipped into the game's `game/tracks/`, it is a track.
 
 ### Terrain file (v12a), `kartmap_<name>_terrain.json`
 
