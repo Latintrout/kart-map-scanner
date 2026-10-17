@@ -129,6 +129,8 @@ function runScannerTests(lib) {
   else check('v12b functions present', false, 'trackForLink not found (running against v12a?)');
   if (has('minimapPlan')) runV12c(lib, check, same);
   else check('v12c functions present', false, 'minimapPlan not found (running against v12b?)');
+  if (has('terrainGrid')) runV13(lib, check, same);
+  else check('v13 functions present', false, 'terrainGrid not found (running against v12c?)');
 
   return results;
 }
@@ -489,7 +491,39 @@ function runV83(lib, check, same) {
   check('v8.3 file stays loader-compatible after all v8.3 additions', lib.loaderContractProblems(outC).length === 0, lib.loaderContractProblems(outC).join('; '));
 }
 
-if (typeof module !== 'undefined') module.exports = { runScannerTests };
+if (typeof module !== 'undefined') 
+
+// v13: the game's needs (hills in the game, race checks, game-style preview, signs, sounds, item spots)
+function runV13(lib, check, same) {
+  const la = -27.48, lo = 153.02, mLon = 111320 * Math.cos(la * Math.PI / 180);
+  const off = (dx, dy) => ({ lat: la + dy / 111320, lon: lo + dx / mLon });
+  const llOff = (dx, dy) => { const o = off(dx, dy); return [o.lat, o.lon]; };
+  const box = { west: lo - 100 / mLon, east: lo + 400 / mLon, south: la - 100 / 111320, north: la + 300 / 111320 };
+  const W = 250, H = 200, data = new Float32Array(W * H);
+  for (let r = 0; r < H; r++) for (let c = 0; c < W; c++) { const x = -100 + (c + 0.5) * 2; data[r * W + c] = (x >= 100 && x <= 140) ? -3 : 20 + 0.05 * x; }
+  const grids = [{ box, width: W, height: H, data }];
+  const route = [llOff(0, 0), llOff(300, 0)];
+  const els = [
+    { type: 'way', id: 1, tags: { highway: 'residential' }, geometry: [off(0, 0), off(95, 0)] },
+    { type: 'way', id: 2, tags: { highway: 'residential', bridge: 'yes', layer: '1' }, geometry: [off(95, 0), off(145, 0)] },
+    { type: 'way', id: 3, tags: { highway: 'residential' }, geometry: [off(145, 0), off(300, 0)] }
+  ];
+  const { out } = lib.buildOutput({ elements: els }, { route, waypoints: route, radius: 80, width: 8, loop: false, snapped: false, name: 'hill', now: 'X' });
+  lib.applyElevation(out, grids, lib.makeUnprojector, { metresPerSample: 2 });
+  const cl = out.route.centerline, mid = cl.points.findIndex(p => p[0] >= 120), far = cl.points.findIndex(p => p[0] >= 250);
+  check('v13 bare ground under the route is exported when it crosses a bridge (same length as the line)', Array.isArray(cl.ground) && cl.ground.length === cl.points.length && out.route.ground.length === out.route.points.length);
+  check('v13 under the bridge the ground is the river, well below the deck (game draws piers)', cl.elevation[mid] - cl.ground[mid] > 8, cl.elevation[mid] + ' / ' + cl.ground[mid]);
+  check('v13 away from the bridge ground and road agree', Math.abs(cl.elevation[far] - cl.ground[far]) < 0.2, cl.elevation[far] + ' / ' + cl.ground[far]);
+  const g = out.meta.elevation.grid, bytes = lib.base64ToBytes(g.data), dv = new DataView(bytes.buffer);
+  const xA = Math.round((250 - g.minX) / 10), yA = Math.round((g.maxY - 0) / 10), hA = dv.getInt16((yA * g.width + xA) * 2, true) / 100;
+  check('v13 height grid kept in the file every 10 m (reads back right)', g.spacing === 10 && bytes.length === g.width * g.height * 2 && Math.abs(hA - (20 + 0.05 * (g.minX + xA * 10) - out.meta.elevation.base)) < 0.1, hA);
+  const { out: flat } = lib.buildOutput({ elements: [els[0]] }, { route: [llOff(0, 0), llOff(90, 0)], waypoints: route, radius: 80, width: 8, loop: false, snapped: false, name: 'x', now: 'X' });
+  lib.applyElevation(flat, grids, lib.makeUnprojector, { metresPerSample: 2 });
+  check('v13 no bridge → no extra ground list (files stay small)', flat.route.ground === undefined && flat.route.centerline.ground === undefined);
+  check('v13 file with the new fields still passes the game-loader check', lib.loaderContractProblems(out).length === 0);
+}
+
+module.exports = { runScannerTests };
 
 function runV9a(lib, check, same) {
   const la = -27.52, lo = 153.05;
@@ -703,4 +737,3 @@ function runV12c(lib, check, same) {
   out.route.centerline.elevation = out.route.centerline.points.map(() => 0.3);
   check('v12c profile: a flat track is drawn at least 2 m tall (no fake drama)', lib.profileGeometry(out, 300, 90, 6).top === 2);
 }
-

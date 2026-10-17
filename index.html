@@ -1394,7 +1394,7 @@ function buildOutput(data, o) {
     meta: {
       name: o.name || 'route',
       generated: o.now || new Date().toISOString(),
-      generator: 'kart-map-scanner v12c',
+      generator: 'kart-map-scanner v13',
       origin: { lat: origin[0], lon: origin[1] },
       units: 'metres',
       axes: 'x = east, y = north. In Godot: Vector3(x, 0, -y)',
@@ -1725,6 +1725,15 @@ function applyElevation(out, grids, unprojFactory, info) {
   const nearestH = p => { let best = 0, bd = Infinity; for (let i = 0; i < line.length; i++) { const d = Math.hypot(line[i][0] - p[0], line[i][1] - p[1]); if (d < bd) { bd = d; best = i; } } return smooth[best]; };
   out.route.elevation = cl ? out.route.points.map(p => rel(nearestH(p))) : smooth.map(rel);
   if (cl) cl.elevation = smooth.map(rel);
+  // v13: the bare ground under the route too (only when some of it is bridged), so the game can
+  // tell a bridge deck from the river or road under it and draw piers there
+  if (deck.some(Boolean)) {
+    const under = fillGaps(line.map(at));
+    const ug = under.map((v, i) => { if (!K) return v; let s = 0, c = 0; for (let k = -K; k <= K; k++) { const j = out.route.closed ? (i + k + under.length) % under.length : i + k; if (j >= 0 && j < under.length) { s += under[j]; c++; } } return s / c; });
+    if (cl) cl.ground = ug.map(rel);
+    const nearestG = p => { let best = 0, bd = Infinity; for (let i = 0; i < line.length; i++) { const d = Math.hypot(line[i][0] - p[0], line[i][1] - p[1]); if (d < bd) { bd = d; best = i; } } return ug[best]; };
+    out.route.ground = cl ? out.route.points.map(p => rel(nearestG(p))) : ug.map(rel);
+  }
   // climb, descent and the steepest 20 m
   let climb = 0, descent = 0, steep = { grade: 0, at: 0 };
   const sp = cl ? (cl.spacing || 2) : null;
@@ -1736,7 +1745,7 @@ function applyElevation(out, grids, unprojFactory, info) {
     metresPerSample: (info && info.metresPerSample) || null, trackLowest: 0, trackHighest: rel(Math.max(...smooth)),
     climb: Math.round(climb * 10) / 10, descent: Math.round(descent * 10) / 10, steepest: steep,
     bridgedPoints: bridged, bridgedNote: bridged ? 'Track points on bridges/in tunnels use a straight line between the two ends (the terrain model has no bridges).' : undefined,
-    counts: grounds };
+    counts: grounds, grid: terrainGrid(out, grids, unprojFactory, base, 10) };
   out.meta.attribution = attributionFor({ overture: !!out.meta.overture, imagery: !!out.meta.imagery, elevation: true });
   const q = out.meta.quality;
   if (q && Array.isArray(q.notes)) {
@@ -1769,7 +1778,15 @@ function base64ToBytes(s) {
 // above meta.elevation.base as little-endian 16-bit numbers (-32768 = no data), base64.
 function terrainFile(out, grids, unprojFactory, spacing) {
   if (!out.meta.elevation) return null;
-  const U = unprojFactory(out.meta.origin.lat, out.meta.origin.lon), bb = out.meta.bbox, base = out.meta.elevation.base;
+  const g = terrainGrid(out, grids, unprojFactory, out.meta.elevation.base, spacing);
+  return { format: 'kartmap-terrain', version: 1, name: out.meta.name, origin: out.meta.origin,
+    minX: g.minX, maxY: g.maxY, spacing, width: g.width, height: g.height, base: out.meta.elevation.base,
+    encoding: g.encoding, source: DEM_SOURCE.name, licence: DEM_SOURCE.licence, attribution: DEM_SOURCE.attribution, missing: g.missing, data: g.data };
+}
+// v13: the height grid itself (also kept in the main file as meta.elevation.grid, every 10 m, so the
+// game's ground follows the hills without the separate terrain file).
+function terrainGrid(out, grids, unprojFactory, base, spacing) {
+  const U = unprojFactory(out.meta.origin.lat, out.meta.origin.lon), bb = out.meta.bbox;
   const w = Math.max(2, Math.ceil((bb.maxX - bb.minX) / spacing) + 1), h = Math.max(2, Math.ceil((bb.maxY - bb.minY) / spacing) + 1);
   const bytes = new Uint8Array(w * h * 2), view = new DataView(bytes.buffer);
   let missing = 0;
@@ -1780,10 +1797,9 @@ function terrainFile(out, grids, unprojFactory, spacing) {
     if (v != null) cm = Math.max(-32767, Math.min(32767, cm)); else missing++;
     view.setInt16((r * w + c) * 2, cm, true);
   }
-  return { format: 'kartmap-terrain', version: 1, name: out.meta.name, origin: out.meta.origin,
-    minX: bb.minX, maxY: bb.maxY, spacing, width: w, height: h, base,
+  return { minX: bb.minX, maxY: bb.maxY, spacing, width: w, height: h,
     encoding: 'int16 little-endian, centimetres above base, row by row from the north-west corner (minX, maxY) going east then south; -32768 = no data',
-    source: DEM_SOURCE.name, licence: DEM_SOURCE.licence, attribution: DEM_SOURCE.attribution, missing, data: bytesToBase64(bytes) };
+    missing, data: bytesToBase64(bytes) };
 }
 
 // ======================================================================
