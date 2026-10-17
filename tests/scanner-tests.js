@@ -521,6 +521,30 @@ function runV13(lib, check, same) {
   lib.applyElevation(flat, grids, lib.makeUnprojector, { metresPerSample: 2 });
   check('v13 no bridge → no extra ground list (files stay small)', flat.route.ground === undefined && flat.route.centerline.ground === undefined);
   check('v13 file with the new fields still passes the game-loader check', lib.loaderContractProblems(out).length === 0);
+  // race check and game rules
+  const mk = pts => ({ route: { points: pts, closed: true, width: 8 }, buildings: [], points: [] });
+  const sq = mk([[0, 0], [300, 0], [300, 200], [0, 200], [0, 0]]);
+  const gl = lib.gameLine(sq);
+  check("v13 game line: 3 m apart, same length as the game builds (972 m for a 300 × 200 m loop)", gl.step === 3 && gl.pts.length === 324, gl.pts.length);
+  check('v13 race check: a plain loop races well', lib.raceCheck(sq).problems.length === 0 && lib.raceCheck(sq).seconds > 20);
+  const f8 = []; for (let k = 0; k <= 200; k++) { const t = k / 200 * 2 * Math.PI; f8.push([200 * Math.sin(t), 100 * Math.sin(2 * t)]); }
+  const p8 = lib.raceCheck(mk(f8)).problems;
+  check('v13 race check: a figure eight at street level is one red crossing in the middle', p8.length === 1 && p8[0].level === 'red' && /crosses itself/.test(p8[0].label) && Math.hypot(...p8[0].xy) < 10, JSON.stringify(p8));
+  const f8b = mk(f8); f8b.route.elevation = f8.map((p, i) => (i > 70 && i < 130 ? 8 : 0));
+  check('v13 race check: the same eight with one pass 8 m up (a bridge) has no crossing', !lib.raceCheck(f8b).problems.some(p => /crosses itself/.test(p.label)));
+  const ob = lib.raceCheck(mk([[0, 0], [300, 0], [300, 6], [0, 6], [0, 0]])).problems;
+  check('v13 race check: out and back along one street is reported once, plus its hairpins', ob.filter(p => /same street/.test(p.label)).length === 1 && ob.some(p => /Hairpin/.test(p.label)), JSON.stringify(ob.map(p => p.label)));
+  const st = mk([[0, 0], [300, 0], [300, 200], [0, 200], [0, 0]]); st.route.elevation = [0, 0, 50, 50, 0];
+  check('v13 race check: a 25% climb is red', lib.raceCheck(st).problems.some(p => p.level === 'red' && /Steep/.test(p.label)));
+  const open = { route: { points: [[0, 0], [300, 0], [300, 200]], closed: false, width: 8 }, buildings: [], points: [] };
+  check('v13 race check: an open route warns about the straight line back', lib.raceCheck(open).problems.some(p => /Open route/.test(p.label) && /361 m/.test(p.label)), JSON.stringify(lib.raceCheck(open).problems.map(p => p.label)));
+  const town = mk([[0, 0], [300, 0], [300, 200], [0, 200], [0, 0]]);
+  town.buildings = [{ id: 'w1', kind: 'yes', footprint: [[100, 3], [120, 3], [120, 20], [100, 20], [100, 3]] }, { id: 'w2', kind: 'yes', footprint: [[100, 10], [120, 10], [120, 30], [100, 30], [100, 10]] },
+    { id: 'w3', kind: 'yes', footprint: [[100, 90], [120, 90], [120, 110], [100, 110], [100, 90]] }, { id: 'w4', kind: 'roof', footprint: [[100, -5], [120, -5], [120, 5], [100, 5], [100, -5]] }];
+  town.points = [{ id: 'n1', kind: 'tree', pos: [150, 1] }, { id: 'n2', kind: 'bench', pos: [150, 9] }, { id: 'n3', kind: 'bench', pos: [150, 100] }, { id: 'n4', kind: 'tree', pos: [150, 100] }];
+  const dr = lib.gameDrops(town);
+  check('v13 game rules: a building within 1.5 m of the road edge is left out, one 6 m away stays, roofs on posts stay', dr.buildings.has('w1') && !dr.buildings.has('w2') && !dr.buildings.has('w4'), JSON.stringify([...dr.buildings]));
+  check('v13 game rules: far buildings (over 50 m from the road) are plain; tree on the road and far bench left out, tree far away kept', dr.far.has('w3') && dr.points.has('n1') && !dr.points.has('n2') && dr.points.has('n3') && !dr.points.has('n4'), JSON.stringify([[...dr.far], [...dr.points]]));
 }
 
 module.exports = { runScannerTests };

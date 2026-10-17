@@ -94,6 +94,8 @@
   #stats .profile, #stats .profile div { display: block; }   /* not the two-column rows the other stats use */
   .profile svg { width: 100%; height: 90px; display: block; touch-action: pan-y; }
   .profile .readout { position: absolute; top: 18px; right: 4px; font-size: 11px; color: var(--text); background: #16161dcc; padding: 1px 5px; border-radius: 4px; pointer-events: none; }
+  /* v13: race check */
+  #stats .race li { margin: 2px 0; } #stats .race .red { color: var(--err); } #stats .race .amber { color: var(--warn); } #stats .race .good { color: var(--ok); }
 .lm-photos{display:flex;gap:4px;margin:3px 0 4px}.lm-photos img{width:64px;height:48px;object-fit:cover;border-radius:3px;border:1px solid #ccc}
 </style>
 </head>
@@ -1638,7 +1640,25 @@ function scene3dPlan(out) {
     start: out.race ? { ...out.race.startLine, g: elevAt(out.race.startLine.at || 0) } : null,
     checkpoints: out.race ? out.race.checkpoints.map(c => ({ ...c, g: elevAt(c.at || 0) })) : [],
     landmarks: (out.landmarks || []).filter(l => Array.isArray(l.pos)).map(l => ({ x: l.pos[0], y: l.pos[1], g: l.ground || 0, name: l.name, kind: l.kind })),
-    hills: !!out.meta.elevation
+    hills: !!out.meta.elevation,
+    game: gameView(out, buildings, trees, props)
+  };
+}
+// v13: "Game view" in the 3D preview: the road where the game puts it (its rounded line), and
+// which buildings, trees and props it leaves out or draws plain (see gameDrops).
+function gameView(out, buildings, trees, props) {
+  const g = gameLine(out);
+  if (g.pts.length < 3) return null;
+  const drops = gameDrops(out, g);
+  const ids = new Map((out.points || []).filter(p => Array.isArray(p.pos)).map(p => [p.pos[0] + ',' + p.pos[1], p.id]));
+  const line = g.pts.map(p => [round2(p[0]), round2(p[1])]);
+  line.push(line[0]);
+  return {
+    track: { line, closed: true, elev: g.pts.map(p => round2(p[2])).concat([round2(g.pts[0][2])]), width: g.width, ...ribbon(line, g.width, true) },
+    droppedBuildings: buildings.filter(b => drops.buildings.has(b.id)).map(b => b.id),
+    farBuildings: buildings.filter(b => drops.far.has(b.id)).map(b => b.id),
+    droppedTrees: trees.map((t, i) => drops.points.has(ids.get(t.x + ',' + t.y)) ? i : -1).filter(i => i >= 0),
+    droppedProps: props.map((t, i) => drops.points.has(ids.get(t.x + ',' + t.y)) ? i : -1).filter(i => i >= 0)
   };
 }
 
@@ -1943,6 +1963,196 @@ function chunkPoints(pts, size) {
 function chooseSnapMethod(latlngs) {
   if (latlngs.length < 3) return 'route';
   return routeLength(latlngs) / (latlngs.length - 1) < 150 ? 'match' : 'route';
+}
+// ======================================================================
+// v13: what the game (brisbane-kart) will build, so a scan can be checked before it is played.
+// These copy the game's own numbers (game/scripts/kartmap.gd and kartmap_scenery.gd); if the
+// game changes them, change them here too.
+// ======================================================================
+const GAME = { step: 3, minSmooth: 12, clear: 1.5, near: 50, propClear: 1, kartSpeed: 30 };
+// The line the game drives: the scanner's centerline (else the raw points), closed into a loop,
+// every 3 m, corners rounded by averaging over at least 12 m each side, twice. [x, y, h] each.
+function gameLine(out) {
+  const r = out.route || {}, cl = r.centerline && Array.isArray(r.centerline.points) && r.centerline.points.length >= 3 ? r.centerline : null;
+  const src = cl ? cl.points : (r.points || []), hs = cl ? cl.elevation : r.elevation;
+  const width = r.width || 12;
+  let pts = [];
+  src.forEach((p, i) => {
+    const v = [p[0], p[1], Array.isArray(hs) && hs.length === src.length ? hs[i] : 0];
+    if (!pts.length || Math.hypot(v[0] - pts[pts.length - 1][0], v[1] - pts[pts.length - 1][1]) > 0.5) pts.push(v);
+  });
+  if (pts.length > 2 && Math.hypot(pts[0][0] - pts[pts.length - 1][0], pts[0][1] - pts[pts.length - 1][1]) < 0.5) pts.pop();
+  if (pts.length < 3) return { pts, width, step: GAME.step };
+  const resample = (p, step) => {
+    const n = p.length; let total = 0;
+    for (let i = 0; i < n; i++) total += Math.hypot(p[(i + 1) % n][0] - p[i][0], p[(i + 1) % n][1] - p[i][1]);
+    const count = Math.max(3, Math.round(total / step)), spacing = total / count, o = [];
+    let seg = 0, segStart = 0, segLen = Math.hypot(p[1 % n][0] - p[0][0], p[1 % n][1] - p[0][1]);
+    for (let k = 0; k < count; k++) {
+      const s = k * spacing;
+      while (s > segStart + segLen && seg < n - 1) { segStart += segLen; seg++; segLen = Math.hypot(p[(seg + 1) % n][0] - p[seg][0], p[(seg + 1) % n][1] - p[seg][1]); }
+      const t = segLen < 1e-4 ? 0 : Math.max(0, Math.min(1, (s - segStart) / segLen)), a = p[seg], b = p[(seg + 1) % n];
+      o.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]);
+    }
+    return o;
+  };
+  const average = (p, reach) => p.map((_, i) => {
+    const s = [0, 0, 0];
+    for (let k = -reach; k <= reach; k++) { const q = p[((i + k) % p.length + p.length) % p.length]; s[0] += q[0]; s[1] += q[1]; s[2] += q[2]; }
+    return s.map(v => v / (2 * reach + 1));
+  });
+  let even = resample(pts, GAME.step);
+  const reach = Math.ceil(Math.max(GAME.minSmooth, width) / GAME.step);
+  for (let k = 0; k < 2; k++) even = average(even, reach);
+  return { pts: resample(even, GAME.step), width, step: GAME.step };
+}
+// Distance (m) from p to the game's road edge (negative = on the road). `g` from gameLine.
+function gameEdgeDistance(g, p) {
+  let best = Infinity;
+  const n = g.pts.length;
+  for (let i = 0; i < n; i++) { const d = distPointSeg(p, g.pts[i], g.pts[(i + 1) % n]); if (d < best) best = d; }
+  return best - g.width / 2;
+}
+function gamePolygonEdgeDistance(g, ring, reach = Infinity) {
+  const n = g.pts.length;
+  let best = Infinity;
+  const lo = [Infinity, Infinity], hi = [-Infinity, -Infinity];
+  for (const q of ring) { lo[0] = Math.min(lo[0], q[0]); lo[1] = Math.min(lo[1], q[1]); hi[0] = Math.max(hi[0], q[0]); hi[1] = Math.max(hi[1], q[1]); }
+  const grow = Math.min(reach, 1e6) + g.width;
+  for (let i = 0; i < n; i++) {
+    const c = g.pts[i];
+    if (c[0] < lo[0] - grow || c[0] > hi[0] + grow || c[1] < lo[1] - grow || c[1] > hi[1] + grow) continue;
+    if (pointInRing(c, ring)) return -g.width / 2 - 1;
+    for (let e = 0; e < ring.length - 1; e++) { const d = distPointSeg(c, ring[e], ring[e + 1]); if (d < best) best = d; }
+  }
+  return best - g.width / 2;
+}
+function pointInRing(p, ring) {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const a = ring[i], b = ring[j];
+    if ((a[1] > p[1]) !== (b[1] > p[1]) && p[0] < (b[0] - a[0]) * (p[1] - a[1]) / ((b[1] - a[1]) || 1e-9) + a[0]) inside = !inside;
+  }
+  return inside;
+}
+// What the game leaves out or simplifies, by id: buildings within 1.5 m of its road edge,
+// trees and props standing on the road, street furniture more than 50 m out; far buildings
+// (over 50 m from the road) are plain boxes with no windows or collision.
+function gameDrops(out, g) {
+  g = g || gameLine(out);
+  const buildings = new Set(), points = new Set(), far = new Set();
+  const lo = [Infinity, Infinity], hi = [-Infinity, -Infinity];
+  for (const p of g.pts) { lo[0] = Math.min(lo[0], p[0]); lo[1] = Math.min(lo[1], p[1]); hi[0] = Math.max(hi[0], p[0]); hi[1] = Math.max(hi[1], p[1]); }
+  const reach = GAME.near + g.width;
+  const nearBox = q => q[0] > lo[0] - reach && q[0] < hi[0] + reach && q[1] > lo[1] - reach && q[1] < hi[1] + reach;
+  for (const b of out.buildings || []) {
+    if (b.hasParts || !Array.isArray(b.footprint) || b.footprint.length < 3) continue;
+    if (/^(roof|canopy|carport|shelter|pergola)$/.test(b.kind || '') && !b.part) continue;   // roofs on posts: karts drive under
+    const c = centroid(b.footprint);
+    if (!nearBox(c)) { far.add(b.id); continue; }
+    const d = gamePolygonEdgeDistance(g, b.footprint, GAME.near + 5);
+    if (d < GAME.clear) buildings.add(b.id); else if (d > GAME.near) far.add(b.id);
+  }
+  for (const p of out.points || []) {
+    if (!Array.isArray(p.pos)) continue;
+    if (!nearBox(p.pos)) { if (p.kind !== 'tree') points.add(p.id); continue; }
+    const d = gameEdgeDistance(g, p.pos);
+    if (d < GAME.propClear || (p.kind !== 'tree' && d > GAME.near)) points.add(p.id);
+  }
+  return { buildings, points, far };
+}
+// "Will it race well?": problems the game will have with this route, worst first.
+// Each: { level: 'red' | 'amber', label, xy, at } (at = metres along the game's lap).
+function raceCheck(out, g) {
+  g = g || gameLine(out);
+  const pts = g.pts, n = pts.length, step = g.step, w = g.width, probs = [];
+  if (n < 10) return { problems: [{ level: 'red', label: 'The route is too short to race', xy: (out.route.points || [[0, 0]])[0], at: 0 }], lap: 0, minRadius: null };
+  const lap = n * step;
+  const at = i => Math.round(i * step);
+  // 1. tight bends: radius through samples 4 apart (24 m of road), so a wobble in the line
+  // doesn't count, only real turns (more than 45 degrees over those 24 m)
+  const radius = i => {
+    const a = pts[(i - 4 + n) % n], b = pts[i], c = pts[(i + 4) % n];
+    const turn = Math.abs(Math.atan2((b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0]), (b[0] - a[0]) * (c[0] - b[0]) + (b[1] - a[1]) * (c[1] - b[1])));
+    if (turn < Math.PI / 4) return Infinity;
+    const ab = Math.hypot(b[0] - a[0], b[1] - a[1]), bc = Math.hypot(c[0] - b[0], c[1] - b[1]), ca = Math.hypot(a[0] - c[0], a[1] - c[1]);
+    const cross = Math.abs((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]));
+    return cross < 1e-6 ? Infinity : ab * bc * ca / (2 * cross);
+  };
+  const radii = pts.map((_, i) => radius(i));
+  const runs = (flag, minLen) => {   // runs of consecutive flagged samples around the loop: [start, length]
+    const res = []; let first = flag.findIndex(f => !f);
+    if (first < 0) return flag.length ? [[0, n]] : [];
+    for (let k = 0; k < n;) {
+      const i = (first + k) % n;
+      if (!flag[i]) { k++; continue; }
+      let len = 0; while (len < n && flag[(first + k + len) % n]) len++;
+      if (len >= (minLen || 1)) res.push([i, len]);
+      k += len;
+    }
+    return res;
+  };
+  const minR = Math.min(...radii);
+  for (const [s, len] of runs(radii.map(r => r < 10), 1)) {
+    let worst = s; for (let k = 0; k < len; k++) if (radii[(s + k) % n] < radii[worst]) worst = (s + k) % n;
+    const r = radii[worst];
+    probs.push({ level: r < 6 ? 'red' : 'amber', label: `${r < 6 ? 'Hairpin too tight to drive' : 'Very tight bend'} (radius ${Math.round(r)} m${r < 6 ? '' : ', karts slow right down'})`, xy: pts[worst].slice(0, 2), at: at(worst) });
+  }
+  // 2. corners the game rounds off the street: its road runs well away from the scanner's line
+  const src = out.route.centerline && out.route.centerline.points && out.route.centerline.points.length > 2 ? out.route.centerline.points : out.route.points;
+  const off = pts.map(p => { let b = Infinity; for (let i = 0; i < src.length - 1; i++) b = Math.min(b, distPointSeg(p, src[i], src[i + 1])); return b; });
+  for (const [s, len] of runs(off.map(d => d > w / 2 + 1), 2)) {
+    let worst = s; for (let k = 0; k < len; k++) if (off[(s + k) % n] > off[worst]) worst = (s + k) % n;
+    probs.push({ level: 'amber', label: `The game rounds this corner, so its road cuts ${Math.round(off[worst])} m off the street (buildings there are left out)`, xy: pts[worst].slice(0, 2), at: at(worst) });
+  }
+  // 3. crossings and doubling back at street level
+  const gap = Math.ceil((w * 2 + 30) / step);
+  const loopGap = (i, j) => { const d = Math.abs(i - j); return Math.min(d, n - d); };
+  const segX = (a, b, c, d) => {
+    const d1 = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]), d2 = (b[0] - a[0]) * (d[1] - a[1]) - (b[1] - a[1]) * (d[0] - a[0]);
+    const d3 = (d[0] - c[0]) * (a[1] - c[1]) - (d[1] - c[1]) * (a[0] - c[0]), d4 = (d[0] - c[0]) * (b[1] - c[1]) - (d[1] - c[1]) * (b[0] - c[0]);
+    return d1 * d2 < 0 && d3 * d4 < 0;
+  };
+  const crossings = [], close = new Array(n).fill(false);
+  const cell = Math.max(w * 2, 20), grid = new Map(), key = (x, y) => Math.floor(x / cell) + ',' + Math.floor(y / cell);
+  pts.forEach((p, i) => { const k = key(p[0], p[1]); if (!grid.has(k)) grid.set(k, []); grid.get(k).push(i); });
+  for (let i = 0; i < n; i++) {
+    const p = pts[i], cx = Math.floor(p[0] / cell), cy = Math.floor(p[1] / cell);
+    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (const j of grid.get((cx + dx) + ',' + (cy + dy)) || []) {
+      if (j <= i || loopGap(i, j) < gap) continue;
+      const q = pts[j];
+      if (Math.abs(p[2] - q[2]) >= 5) continue;   // one passes over the other (a bridge): fine
+      if (segX(p, pts[(i + 1) % n], q, pts[(j + 1) % n])) crossings.push(i, j);
+      else if (Math.hypot(p[0] - q[0], p[1] - q[1]) < w + 2) close[i] = true;   // flagged on the first pass along the street only
+    }
+  }
+  const crossAt = [];
+  for (let c = 0; c < crossings.length; c += 2) if (!crossAt.some(k => loopGap(crossings[c], k) < gap)) crossAt.push(crossings[c]);
+  for (const i of crossAt) probs.push({ level: 'red', label: 'The route crosses itself here at street level: the game puts walls across the crossing', xy: pts[i].slice(0, 2), at: at(i) });
+  for (const [s, len] of runs(close, Math.ceil(15 / step))) {
+    const mid = (s + Math.floor(len / 2)) % n;
+    let nearCrossing = false;
+    for (let k = 0; k < len && !nearCrossing; k++) nearCrossing = crossings.some(c => loopGap((s + k) % n, c) < gap);
+    if (nearCrossing) continue;
+    probs.push({ level: 'red', label: `The route runs back along the same street for ${Math.round(len * step)} m: both directions' walls overlap`, xy: pts[mid].slice(0, 2), at: at(mid) });
+  }
+  // 4. hills too steep for karts (grade over 20 m)
+  const k20 = Math.max(1, Math.round(20 / step));
+  let steep = { grade: 0, i: 0 };
+  for (let i = 0; i < n; i++) { const gr = (pts[(i + k20) % n][2] - pts[i][2]) / (k20 * step) * 100; if (Math.abs(gr) > Math.abs(steep.grade)) steep = { grade: gr, i }; }
+  if (Math.abs(steep.grade) > 12) probs.push({ level: Math.abs(steep.grade) > 20 ? 'red' : 'amber', label: `Steep ${steep.grade > 0 ? 'climb' : 'drop'}: ${Math.round(Math.abs(steep.grade))}% (the game's own hill tracks stay under 12%; lower its height_scale if karts struggle)`, xy: pts[steep.i].slice(0, 2), at: at(steep.i) });
+  // 5. width, lap length, open routes
+  if (w < 6) probs.push({ level: 'amber', label: `Narrow track (${w} m): six karts will bump a lot; 8 m or more races better`, xy: pts[0].slice(0, 2), at: 0 });
+  const secs = Math.round(lap / GAME.kartSpeed);
+  if (lap < 450) probs.push({ level: 'amber', label: `Short lap: ${Math.round(lap)} m (about ${secs} s a lap)`, xy: pts[0].slice(0, 2), at: 0 });
+  if (lap > 4000) probs.push({ level: 'amber', label: `Long lap: ${(lap / 1000).toFixed(1)} km (about ${Math.round(secs / 60)} min a lap)`, xy: pts[0].slice(0, 2), at: 0 });
+  const rp = out.route.points || [];
+  if (!out.route.closed && rp.length > 1) {
+    const back = Math.hypot(rp[0][0] - rp[rp.length - 1][0], rp[0][1] - rp[rp.length - 1][1]);
+    if (back > 30) probs.push({ level: 'amber', label: `Open route: the game joins the end back to the start with a ${Math.round(back)} m straight line, which may cut through buildings. Tick Loop to plan the way back`, xy: rp[rp.length - 1], at: Math.round(lap - back) });
+  }
+  probs.sort((a, b) => (a.level === b.level ? a.at - b.at : a.level === 'red' ? -1 : 1));
+  return { problems: probs, lap: Math.round(lap), seconds: secs, minRadius: Math.round(minR), steepest: Math.round(steep.grade * 10) / 10 };
 }
 // ======================================================================
 // PURE-END
@@ -2722,11 +2932,23 @@ function showStats() {
   const qHtml = q ? `<details open style="margin-top:6px"><summary>Quality report</summary>` +
     `<div class="hint" style="margin-top:4px">Heights: ${q.heights.measured}% measured, ${q.heights.estimated}% estimated, ${q.heights.default}% default guess. Roofs: ${q.roofShapes.mapped}% mapped.</div>` +
     (q.notes.length ? `<ul style="margin:4px 0 0;padding-left:18px">${q.notes.map(n => `<li>${esc(n)}</li>`).join('')}</ul>` : '') + `</details>` : '';
-  const probs = problemSpots(scanPreview);
+  const probs = allProblems(out);
   const probHtml = probs.length ? `<button id="nextProblemBtn" style="width:100%;margin-top:6px">Show problem on the map (${probs.length})</button>` : '';
-  els.stats.innerHTML = rows.map(([k, v]) => `<div><span>${k}</span><b>${v}</b></div>`).join('') + profileHtml(out) + qHtml + probHtml +
+  els.stats.innerHTML = rows.map(([k, v]) => `<div><span>${k}</span><b>${v}</b></div>`).join('') + profileHtml(out) + raceHtml(out, esc) + qHtml + probHtml +
     (lm.length ? `<details style="margin-top:6px"><summary>Landmarks to model by hand (${lm.length})</summary>` +
       `<ul style="margin:4px 0 0;padding-left:18px">${lm.map(l => `<li>${esc(l.name)} <span class="hint">(${esc(l.kind)})</span>${photoHtml(l, esc)}</li>`).join('')}</ul></details>` : '');
+}
+// v13: "Will it race well?" in the game: the race check, red first. Green when nothing is wrong.
+function raceHtml(out, esc) {
+  const rc = raceCheck(out);
+  const head = `Race check: ${(rc.lap / 1000).toFixed(2)} km lap in the game, about ${rc.seconds} s`;
+  if (!rc.problems.length) return `<details open style="margin-top:6px" class="race"><summary>${head}</summary><div class="good" style="margin-top:4px">✓ Races well: no tight hairpins, crossings or steep bits.</div></details>`;
+  return `<details open style="margin-top:6px" class="race"><summary>${head} · ${rc.problems.length} to look at</summary><ul style="margin:4px 0 0;padding-left:18px">` +
+    rc.problems.map(p => `<li class="${p.level}">${p.level === 'red' ? '⛔' : '⚠'} ${esc(p.label)} <span class="hint">(${p.at} m)</span></li>`).join('') + '</ul></details>';
+}
+// Everything "Show problem" steps through: things standing on the track, then the race check's spots.
+function allProblems(out) {
+  return problemSpots(scanPreview).concat(raceCheck(out).problems.map(p => ({ cat: 'race', xy: p.xy, label: p.label })));
 }
 // v8.3: small reference photos under a landmark, each linking to its Commons page (author + licence there).
 function photoHtml(l, esc) {
@@ -2964,14 +3186,14 @@ let problemIdx = -1;
 const problemMarker = L.circleMarker([0, 0], { radius: 18, color: '#ffbe0b', weight: 3, fill: false, interactive: false });
 els.stats.addEventListener('click', e => {
   if (!e.target.closest('#nextProblemBtn') || !scanResult) return;
-  const probs = problemSpots(scanPreview);
+  const probs = allProblems(withManualExtras(scanResult, trees, manualBuildings));
   if (!probs.length) return;
   problemIdx = (problemIdx + 1) % probs.length;
   const pr = probs[problemIdx];
   const ll = makeUnprojector(scanResult.meta.origin.lat, scanResult.meta.origin.lon)(pr.xy);
   map.setView(ll, Math.max(map.getZoom(), 18));
   problemMarker.setLatLng(ll).addTo(map);
-  setStatus(`Problem ${problemIdx + 1} of ${probs.length}: ${pr.label}. Nudge the route, or leave it for the game to remove.`, 'warn');
+  setStatus(`Problem ${problemIdx + 1} of ${probs.length}: ${pr.label}. ${pr.cat === 'race' ? 'Redraw the route here if you can.' : 'Nudge the route, or leave it for the game to remove.'}`, 'warn');
   e.target.textContent = `Next problem (${problemIdx + 1} of ${probs.length})`;
 });
 
@@ -3019,6 +3241,7 @@ async function open3D() {
   ui.id = 'view3d';
   ui.innerHTML = `<div id="v3dBar"><button id="v3dClose">✕ Close</button><button id="v3dFly">▶ Fly the lap</button>
     <label class="inline" style="margin:0"><input id="v3dRetro" type="checkbox"> Retro pixels</label>
+    <label class="inline" style="margin:0" title="What the game will build: its rounded road, and without what it leaves out"><input id="v3dGame" type="checkbox"> Game view</label>
     <button id="v3dGlb">⬇ .glb</button><span id="v3dInfo" class="hint grow"></span></div>
     <div id="v3dHost"><div id="v3dHelp">Drag to turn · scroll or pinch to zoom · right-drag or two fingers to move</div></div>`;
   document.body.appendChild(ui);
@@ -3089,6 +3312,23 @@ async function open3D() {
   }
   const tgeo = new THREE.BufferGeometry(); tgeo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); tgeo.computeVertexNormals();
   const track = new THREE.Mesh(tgeo, new THREE.MeshLambertMaterial({ color: '#3d3d48', side: THREE.DoubleSide })); track.name = 'track'; scene.add(track);
+  // v13: the game's road (its own rounded line, with walls), shown in Game view instead
+  let gameTrack = null;
+  if (plan.game) {
+    const gt = plan.game.track, gp = [], wp = [];
+    for (let i = 0; i < gt.line.length - 1; i++) {
+      const e0 = gt.elev[i] + 0.1, e1 = gt.elev[i + 1] + 0.1;
+      const a = P(...gt.left[i], e0), b2 = P(...gt.right[i], e0), c = P(...gt.left[i + 1], e1), d = P(...gt.right[i + 1], e1);
+      gp.push(a.x, a.y, a.z, b2.x, b2.y, b2.z, c.x, c.y, c.z, b2.x, b2.y, b2.z, d.x, d.y, d.z, c.x, c.y, c.z);
+      for (const [u, v] of [[a, c], [b2, d]]) { const up = 1.2; wp.push(u.x, u.y, u.z, v.x, v.y, v.z, v.x, v.y + up, v.z, u.x, u.y, u.z, v.x, v.y + up, v.z, u.x, u.y + up, u.z); }
+    }
+    const ggeo2 = new THREE.BufferGeometry(); ggeo2.setAttribute('position', new THREE.Float32BufferAttribute(gp, 3)); ggeo2.computeVertexNormals();
+    const wgeo = new THREE.BufferGeometry(); wgeo.setAttribute('position', new THREE.Float32BufferAttribute(wp, 3)); wgeo.computeVertexNormals();
+    gameTrack = new THREE.Group(); gameTrack.name = 'game track'; gameTrack.visible = false;
+    gameTrack.add(new THREE.Mesh(ggeo2, new THREE.MeshLambertMaterial({ color: '#4a4a52', side: THREE.DoubleSide })));
+    gameTrack.add(new THREE.Mesh(wgeo, new THREE.MeshLambertMaterial({ color: '#9a9a96', side: THREE.DoubleSide })));
+    scene.add(gameTrack);
+  }
   if (plan.start) {
     const s = new THREE.Mesh(new THREE.BoxGeometry(plan.start.width || t.width, 0.05, 1.2), mat('#ffffff'));
     s.position.copy(P(plan.start.pos[0], plan.start.pos[1], plan.start.g + 0.12));
@@ -3108,10 +3348,23 @@ async function open3D() {
     list.forEach((it, i) => { place(it); dummy.updateMatrix(); m.setMatrixAt(i, dummy.matrix); });
     m.name = name; scene.add(m); return m;
   };
-  instanced(new THREE.CylinderGeometry(0.25, 0.35, 1, 5), mat('#6b4f2a'), plan.trees, tr => { dummy.position.copy(P(tr.x, tr.y, tr.g + tr.h * 0.3)); dummy.scale.set(1, tr.h * 0.6, 1); }, 'tree trunks');
-  instanced(new THREE.IcosahedronGeometry(1, 0), mat('#3f7d3a', { flatShading: true }), plan.trees.filter(tr => tr.type !== 'palm'), tr => { dummy.position.copy(P(tr.x, tr.y, tr.g + tr.h * 0.65)); dummy.scale.set(tr.r, tr.h * 0.4, tr.r); }, 'tree tops');
-  instanced(new THREE.ConeGeometry(1, 0.5, 6), mat('#4f8f3a', { flatShading: true }), plan.trees.filter(tr => tr.type === 'palm'), tr => { dummy.position.copy(P(tr.x, tr.y, tr.g + tr.h * 0.95)); dummy.scale.set(tr.r, tr.r * 0.5, tr.r); }, 'palm tops');
-  instanced(new THREE.BoxGeometry(0.7, 0.9, 0.7), mat('#ffb703'), plan.props, pr => { dummy.position.copy(P(pr.x, pr.y, pr.g + 0.45)); dummy.scale.set(1, 1, 1); }, 'props');
+  // v13: in Game view the trees and props the game leaves out shrink to nothing
+  const goneTrees = new Set(plan.game ? plan.game.droppedTrees.map(i => plan.trees[i]) : []), goneProps = new Set(plan.game ? plan.game.droppedProps.map(i => plan.props[i]) : []);
+  const shrink = it => { if (v3d && v3d.game && (goneTrees.has(it) || goneProps.has(it))) dummy.scale.set(0, 0, 0); };
+  const plantAll = () => {
+    for (const m of v3d.instanced) { m.list.forEach((it, i) => { m.place(it); shrink(it); dummy.updateMatrix(); m.mesh.setMatrixAt(i, dummy.matrix); }); m.mesh.instanceMatrix.needsUpdate = true; }
+  };
+  const inst = [];
+  const keep = (mesh, list, place) => { if (mesh) inst.push({ mesh, list, place }); };
+  const placeTrunk = tr => { dummy.position.copy(P(tr.x, tr.y, tr.g + tr.h * 0.3)); dummy.scale.set(1, tr.h * 0.6, 1); };
+  const placeTop = tr => { dummy.position.copy(P(tr.x, tr.y, tr.g + tr.h * 0.65)); dummy.scale.set(tr.r, tr.h * 0.4, tr.r); };
+  const placePalm = tr => { dummy.position.copy(P(tr.x, tr.y, tr.g + tr.h * 0.95)); dummy.scale.set(tr.r, tr.r * 0.5, tr.r); };
+  const placeProp = pr => { dummy.position.copy(P(pr.x, pr.y, pr.g + 0.45)); dummy.scale.set(1, 1, 1); };
+  const tops = plan.trees.filter(tr => tr.type !== 'palm'), palms = plan.trees.filter(tr => tr.type === 'palm');
+  keep(instanced(new THREE.CylinderGeometry(0.25, 0.35, 1, 5), mat('#6b4f2a'), plan.trees, placeTrunk, 'tree trunks'), plan.trees, placeTrunk);
+  keep(instanced(new THREE.IcosahedronGeometry(1, 0), mat('#3f7d3a', { flatShading: true }), tops, placeTop, 'tree tops'), tops, placeTop);
+  keep(instanced(new THREE.ConeGeometry(1, 0.5, 6), mat('#4f8f3a', { flatShading: true }), palms, placePalm, 'palm tops'), palms, placePalm);
+  keep(instanced(new THREE.BoxGeometry(0.7, 0.9, 0.7), mat('#ffb703'), plan.props, placeProp, 'props'), plan.props, placeProp);
   for (const l of plan.landmarks) {
     const pin = new THREE.Mesh(new THREE.OctahedronGeometry(2, 0), mat('#e63946'));
     pin.position.copy(P(l.x, l.y, l.g + 30)); pin.name = 'landmark ' + l.name; scene.add(pin);
@@ -3122,7 +3375,7 @@ async function open3D() {
   camera.position.copy(centre).add(new THREE.Vector3(diag * 0.25, diag * 0.35, diag * 0.45));
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.target.copy(centre); controls.maxPolarAngle = Math.PI * 0.49; controls.update();
-  v3d = { THREE, renderer, scene, camera, controls, ui, host, fly: null, raf: 0, retro: false, gtex };
+  v3d = { THREE, renderer, scene, camera, controls, ui, host, fly: null, raf: 0, retro: false, gtex, game: false, instanced: inst };
   const resize = () => {
     const w = host.clientWidth, hh = host.clientHeight;
     renderer.setPixelRatio(v3d.retro ? 0.33 : Math.min(devicePixelRatio, 2));
@@ -3131,8 +3384,9 @@ async function open3D() {
   v3d.resize = resize; resize();
   window.addEventListener('resize', resize);
   const len = out.route.centerline ? out.route.centerline.length : out.route.length;
-  $('v3dInfo').textContent = `${plan.buildings.length - bad} buildings · ${plan.trees.length} trees · ${plan.props.length} props · ${plan.landmarks.length} landmarks · ${(len / 1000).toFixed(2)} km track` +
+  const info = `${plan.buildings.length - bad} buildings · ${plan.trees.length} trees · ${plan.props.length} props · ${plan.landmarks.length} landmarks · ${(len / 1000).toFixed(2)} km track` +
     (bad ? ` · ${bad} shapes couldn't be drawn` : '') + '. Red = blocks the track, orange = drawn by you.';
+  $('v3dInfo').textContent = info;
   let last = performance.now();
   const frame = now => {
     const dt = Math.min(0.1, (now - last) / 1000); last = now;
@@ -3142,8 +3396,24 @@ async function open3D() {
   };
   v3d.raf = requestAnimationFrame(frame);
   $('v3dClose').onclick = close3D;
-  $('v3dFly').onclick = () => toggleFly(plan.track);
+  $('v3dFly').onclick = () => toggleFly(v3d.game && plan.game ? plan.game.track : plan.track);
   $('v3dRetro').onchange = e => { v3d.retro = e.target.checked; host.classList.toggle('retro', v3d.retro); resize(); };
+  // v13: Game view swaps in the game's road and hides what it leaves out; far buildings go plain grey
+  const dropped = new Set(plan.game ? plan.game.droppedBuildings : []), farIds = new Set(plan.game ? plan.game.farBuildings : []);
+  const farMat = mat('#a8a8a4');
+  $('v3dGame').disabled = !plan.game;
+  $('v3dGame').onchange = e => {
+    v3d.game = e.target.checked;
+    track.visible = !v3d.game; if (gameTrack) gameTrack.visible = v3d.game;
+    for (const m of bgroup.children) {
+      if (dropped.has(m.name)) m.visible = !v3d.game;
+      if (farIds.has(m.name)) { if (!m.userData.mats) m.userData.mats = m.material; m.material = v3d.game ? farMat : m.userData.mats; }
+    }
+    plantAll();
+    const g = plan.game;
+    $('v3dInfo').textContent = v3d.game ? `Game view: the game's rounded road with its walls. It leaves out ${g.droppedBuildings.length} buildings next to the road and ${g.droppedTrees.length + g.droppedProps.length} trees and props on it; ${g.farBuildings.length} far buildings are plain boxes (grey).` : info;
+    if (v3d.fly) toggleFly(plan.track);
+  };
   $('v3dGlb').onclick = () => download3D(out);
   setStatus(`3D preview open. ${bad ? bad + " shapes couldn't be drawn (odd outlines in OSM). " : ''}Close it to get back to the map.`, bad ? 'warn' : 'ok');
 }
