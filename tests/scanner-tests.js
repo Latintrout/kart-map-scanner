@@ -37,7 +37,8 @@ function runScannerTests(lib) {
   check('v1 counts: 2 roads, 3 buildings, 1 area, 1 waterway, 2 points',
     c1.roads === 2 && c1.buildings === 3 && c1.areas === 1 && c1.waterways === 1 && c1.points === 2, JSON.stringify(c1));
   check('v1 building heights: default 5, levels 9, osm 9.5',
-    same(r1.buildings.map(b => [b.height, b.heightSource]), [[5, 'default'], [9, 'levels'], [9.5, 'osm']]), JSON.stringify(r1.buildings.map(b => [b.height, b.heightSource])));
+    lib.guessHeights ? r1.buildings[0].heightSource === 'guess' && r1.buildings[0].height >= 5 && r1.buildings[0].height <= 6.5 && same(r1.buildings.slice(1).map(b => [b.height, b.heightSource]), [[9, 'levels'], [9.5, 'osm']])
+      : same(r1.buildings.map(b => [b.height, b.heightSource]), [[5, 'default'], [9, 'levels'], [9.5, 'osm']]), JSON.stringify(r1.buildings.map(b => [b.height, b.heightSource])));
   check('v1 broken (unclosed) building is skipped, not crashed on', !r1.buildings.some(b => b.id === 'w8'));
   check('v1 road widths: residential 6 default, primary 4 lanes = 12.8',
     same(r1.roads.map(r => [r.kind, r.width, r.widthSource]), [['residential', 6, 'default'], ['primary', 12.8, 'lanes']]));
@@ -268,7 +269,7 @@ function runV81(lib, check, same) {
 
   // --- smarter heights ---
   check('v8.1 unmeasured house next to measured ones gets their typical height (estimated)', B('w14').heightSource === 'estimated' && B('w14').height === 6, JSON.stringify([B('w14').height, B('w14').heightSource]));
-  check('v8.1 isolated unmeasured house keeps the default guess', B('w15').heightSource === 'default');
+  check('v8.1 isolated unmeasured house keeps the default guess (v13: a house-sized guess, labelled)', lib.guessHeights ? B('w15').heightSource === 'guess' && B('w15').heightGuess === 'house' && B('w15').height >= 5 && B('w15').height <= 6.5 : B('w15').heightSource === 'default', JSON.stringify(B('w15')));
   check('v8.1 measured heights are never changed', B('w12').height === 7 && B('w12').heightSource === 'osm');
 
   // --- roof guesses ---
@@ -312,7 +313,7 @@ function runV81(lib, check, same) {
   const q = out.meta.quality;
   const h = q && q.heights;
   check('v8.1 quality report: height shares add up to 100%', h && Math.abs(h.measured + h.estimated + h.default - 100) < 0.6, JSON.stringify(h));
-  check('v8.1 quality report names buildings blocking the track', q && q.notes.some(n => /Central Cafes/.test(n)) && q.buildingsOnTrack.includes('w18'), JSON.stringify(q && q.notes));
+  check('v8.1 quality report names buildings blocking the track (v13: a shop building\'s real name is not kept, so by id)', q && q.notes.some(n => (lib.safeName ? /w18/ : /Central Cafes/).test(n)) && q.buildingsOnTrack.includes('w18'), JSON.stringify(q && q.notes));
 
   // --- smooth track line ---
   const cl = out.route.centerline;
@@ -334,7 +335,7 @@ function runV81(lib, check, same) {
   check('v8.2 a path skipping 40% of the lap is not offered as a shortcut', !sc.some(s => s.via.includes('w43')));
 
   // --- guesses are marked ---
-  check('v8.1 every building height says where it came from', out.buildings.every(b => ['osm', 'levels', 'estimated', 'default'].includes(b.heightSource)));
+  check('v8.1 every building height says where it came from', out.buildings.every(b => ['osm', 'levels', 'estimated', 'default', 'guess'].includes(b.heightSource) && (b.heightSource !== 'guess' || b.heightGuess)));
   check('v8.1+ generator tag present', /^kart-map-scanner v(8\.\d+|\d+[a-z]?)$/.test(out.meta.generator), out.meta.generator);
 
   // --- speed: a South-Bank-sized scan must stay quick ---
@@ -545,6 +546,46 @@ function runV13(lib, check, same) {
   const dr = lib.gameDrops(town);
   check('v13 game rules: a building within 1.5 m of the road edge is left out, one 6 m away stays, roofs on posts stay', dr.buildings.has('w1') && !dr.buildings.has('w2') && !dr.buildings.has('w4'), JSON.stringify([...dr.buildings]));
   check('v13 game rules: far buildings (over 50 m from the road) are plain; tree on the road and far bench left out, tree far away kept', dr.far.has('w3') && dr.points.has('n1') && !dr.points.has('n2') && dr.points.has('n3') && !dr.points.has('n4'), JSON.stringify([[...dr.far], [...dr.points]]));
+  // suggested item boxes and boost pads
+  const rect2 = mk([[0, 0], [600, 0], [600, 150], [0, 150], [0, 0]]); rect2.route.width = 10;
+  const sp = lib.gameSpots(rect2);
+  const onStraight = s => { const q = gl2.pts[Math.round(s / 3) % gl2.pts.length]; return Math.min(Math.abs(q[1]), Math.abs(q[1] - 150)) < 3 && q[0] > 20 && q[0] < 580 || Math.min(Math.abs(q[0]), Math.abs(q[0] - 600)) < 3 && q[1] > 20 && q[1] < 130; };
+  const gl2 = lib.gameLine(rect2);
+  check('v13 item spots: two boost pads at the start of the two long straights', sp.boostPads.length === 2 && sp.boostPads.every(q => { const pt = gl2.pts[Math.round(q.s / 3)]; return Math.abs(pt[1]) < 3 || Math.abs(pt[1] - 150) < 3; }), JSON.stringify(sp.boostPads.map(q => gl2.pts[Math.round(q.s / 3)])));
+  check('v13 item spots: a row of 4 item boxes per ~250 m, on straight bits, not on the start line', sp.itemBoxes.length === 6 && sp.itemBoxes.every(b => b.count === 4 && b.s > 50 && b.s < sp.gameLength - 30 && onStraight(b.s)) && sp.gameLength === gl2.pts.length * 3, JSON.stringify(sp));
+  // shop signs, street signs, height guesses
+  check('v13 shop kind: a chicken restaurant is "chicken", a chocolate cafe "dessert", a bank "bank", a vacant shop nothing',
+    lib.shopKind({ amenity: 'restaurant', cuisine: 'portuguese;chicken' }) === 'chicken' && lib.shopKind({ amenity: 'cafe', cuisine: 'chocolate' }) === 'dessert' && lib.shopKind({ amenity: 'bank', name: 'Some Bank' }) === 'bank' && lib.shopKind({ shop: 'vacant' }) === null);
+  const allNames = Object.values(lib.signNames()).flat();
+  check('v13 shop signs: every type has made-up names, same pick every scan', allNames.length > 150 && lib.funnySign('chicken', 'n42') === lib.funnySign('chicken', 'n42') && lib.signNames().chicken.includes(lib.funnySign('chicken', 'n42')));
+  const sq2 = (x, y, w, h) => [off(x, y), off(x + w, y), off(x + w, y + h), off(x, y + h), off(x, y)];
+  const town2 = [
+    { type: 'way', id: 10, tags: { highway: 'secondary', name: 'Main Road' }, geometry: [off(0, 0), off(300, 0)] },
+    { type: 'way', id: 11, tags: { highway: 'residential', name: 'Grey Street' }, geometry: [off(150, 0), off(150, 120)] },
+    { type: 'way', id: 20, tags: { building: 'yes' }, geometry: sq2(160, 8, 15, 12) },
+    { type: 'way', id: 21, tags: { building: 'yes', 'addr:housenumber': '4' }, geometry: sq2(200, 60, 10, 10) },
+    { type: 'way', id: 22, tags: { building: 'yes' }, geometry: sq2(40, 60, 40, 40) },
+    { type: 'way', id: 30, tags: { landuse: 'industrial' }, geometry: sq2(20, 40, 80, 80) },
+    { type: 'node', id: 40, lat: off(167, 14).lat, lon: off(167, 14).lon, tags: { amenity: 'restaurant', cuisine: 'chicken', name: 'A Real Chicken Brand' } },
+    { type: 'node', id: 41, lat: off(167, 15).lat, lon: off(167, 15).lon, tags: { shop: 'hairdresser', name: 'Real Salon Name' } }
+  ];
+  const { out: t2 } = lib.buildOutput({ elements: town2 }, { route: [llOff(0, 0), llOff(300, 0)], waypoints: route, radius: 150, width: 8, loop: false, snapped: false, name: 'town', now: 'X' });
+  const TB = id => t2.buildings.find(b => b.id === id) || {};
+  check('v13 shops: a building gets a funny sign for each shop in it, never the real name', (TB('w20').shops || []).length === 2 && lib.signNames().chicken.includes(TB('w20').shops[0].sign) && lib.signNames().hairdresser.includes(TB('w20').shops[1].sign) && !/Real (Chicken|Salon)|Brand/.test(JSON.stringify(t2)), JSON.stringify(TB('w20')));
+  check('v13 height guesses: shop 7 m, house with an address ~5 m, shed in an industrial area, each labelled why',
+    TB('w20').heightSource === 'guess' && TB('w20').heightGuess === 'shop' && TB('w20').height === 7 &&
+    TB('w21').heightGuess === 'house' && TB('w21').height >= 5 && TB('w21').height <= 6.5 &&
+    TB('w22').heightGuess === 'industrial area' && TB('w22').height >= 8, JSON.stringify(['w20', 'w21', 'w22'].map(id => [TB(id).height, TB(id).heightGuess])));
+  const gs = (t2.streetSigns || []).filter(s => s.text === 'GREY ST');
+  check('v13 street signs: one "GREY ST" sign at the side street, off the road', gs.length === 1 && Math.abs(gs[0].pos[0] - 150) < 12 && gs[0].pos[1] > 5 && gs[0].pos[1] < 15, JSON.stringify(t2.streetSigns));
+  check('v13 street signs: the track\'s own street gets no side-street sign (it never leaves the track)', !(t2.streetSigns || []).some(s => s.text === 'MAIN RD'));
+  check('v13 street sign text shortened', lib.streetSignText('Little Stanley Street') === 'LITTLE STANLEY ST' && lib.streetSignText('The Esplanade') === 'THE ESPLANADE');
+  check('v13 no real names: branded shop buildings get their funny sign as name, malls lose theirs, streets keep theirs',
+    lib.safeName({ name: 'BrandY Burgers', amenity: 'fast_food' }, 'w1') !== 'BrandY Burgers' && lib.signNames().fast_food.includes(lib.safeName({ name: 'BrandY Burgers', amenity: 'fast_food' }, 'w1')) &&
+    lib.safeName({ name: 'BrandZ Plaza', landuse: 'retail' }, 'w2') === undefined && lib.safeName({ name: 'BrandQ', brand: 'BrandQ', building: 'yes' }, 'w3') === undefined &&
+    lib.safeName({ name: 'Grey Street', highway: 'primary' }, 'w4') === 'Grey Street' && lib.safeName({ name: 'Musgrave Park', leisure: 'park' }, 'w5') === 'Musgrave Park');
+  check('v13 item spots: in the scanned file\'s race section', t2.race === null || t2.race === undefined || Array.isArray(t2.race.itemBoxes) || t2.route.centerline.points.length < 20);
+  check('v13 file with shops and signs still passes the game-loader check', lib.loaderContractProblems(t2).length === 0);
 }
 
 module.exports = { runScannerTests };

@@ -375,6 +375,7 @@ const overpass = { elements: [
     // ---------- v13: race check and Game view ----------
     const st = await page.textContent('#stats');
     check('v13 stats show the race check (lap in the game, and either "Races well" or what to look at)', /Race check: [\d.]+ km lap in the game, about \d+ s/.test(st) && (/Races well/.test(st) || /to look at/.test(st)), st.slice(0, 300));
+    check('v13 stats count shop signs, street signs, item box rows and boost pads', /Shop signs \/ street signs\s*\d+ \/ \d+/.test(st) && /Item box rows \/ boost pads\s*(\d+ \/ \d+|–)/.test(st), st.slice(0, 900));
     await page.click('#view3dBtn');
     await page.waitForFunction(() => /buildings/.test((document.getElementById('v3dInfo') || {}).textContent || ''), null, { timeout: 20000 });
     check('v13 Game view switch is there and on offer', !(await page.isDisabled('#v3dGame')));

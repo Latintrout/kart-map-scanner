@@ -466,6 +466,8 @@ rel(bw.w)["type"="multipolygon"]->.r;
   node.n["power"];
   node.n["emergency"];
   node.n["advertising"];
+  node.n["shop"];
+  node.n["cuisine"];
 );
 out geom;`;
 }
@@ -1155,8 +1157,12 @@ function buildOutput(data, o) {
     preview.push({ cat: 'area', id, kind, xy: [polygon, ...h] });
     noteLandmark(t, id, centroid(polygon), 1);
   };
+  const shopSpots = [], guessHints = new Map();   // v13
   const addBuilding = (id, t, name, footprint, holes) => {
     const [height, heightSource] = buildingHeight(t);
+    const sk = shopKind(t);
+    if (sk) shopSpots.push({ id, type: sk, pos: centroid(footprint), building: id });
+    guessHints.set(id, { shop: !!sk, addr: !!t['addr:housenumber'] });
     const b = { id, kind: t.building, name, height, heightSource, footprint, ...buildingLooks(t) };
     if (t['overture:added']) b.source = 'overture';   // v8.3: not in OSM, added from Overture
     if (holes && holes.length) b.holes = holes;
@@ -1188,7 +1194,7 @@ function buildOutput(data, o) {
 
   for (const el of (data.elements || [])) {
     const t = el.tags || {};
-    const name = t.name || undefined;
+    const name = safeName(t, (el.type === 'node' ? 'n' : el.type === 'relation' ? 'r' : 'w') + el.id);   // v13: no real shop or brand names
 
     if (el.type === 'node') {
       if (el.lat == null) continue;
@@ -1209,6 +1215,8 @@ function buildOutput(data, o) {
         : t.highway === 'stop' ? { kind: 'stop_line' } : t.highway === 'give_way' ? { kind: 'give_way_line' } : null;
       if (mk) { res.markings.push({ id: 'n' + el.id, ...mk, pos }); grow(pos); preview.push({ cat: 'marking', kind: mk.kind, xy: pos }); }
       noteLandmark(t, prop ? 'n' + el.id : null, pos, 0);
+      const sk = shopKind(t);   // v13: shops get a sign on their building
+      if (sk) shopSpots.push({ id: 'n' + el.id, type: sk, pos });
       continue;
     }
 
@@ -1320,6 +1328,9 @@ function buildOutput(data, o) {
       b.height = round2(m); b.heightSource = 'estimated';
     }
   });
+  // v13: shop signs, then smarter guesses for heights still on the plain default
+  attachShops(res, shopSpots);
+  guessHeights(res, guessHints);
   // Roof shapes: mapped ones are marked 'osm', the rest get a guess marked 'guess'.
   for (const b of res.buildings) {
     if (b.roofShape) b.roofShapeSource = 'osm';
@@ -1353,7 +1364,7 @@ function buildOutput(data, o) {
   const nb = wholes.length;   // parts are pieces of buildings, so they're left out of the percentages
   const pct = n => nb ? Math.round(1000 * n / nb) / 10 : 0;
   const hMeasured = wholes.filter(b => measured(b.heightSource)).length;
-  const hEstimated = wholes.filter(b => b.heightSource === 'estimated' || b.heightSource === 'ml-estimate').length;
+  const hEstimated = wholes.filter(b => b.heightSource === 'estimated' || b.heightSource === 'ml-estimate' || b.heightSource === 'guess').length;
   const onTrackB = res.buildings.filter(b => b.onTrack);
   const trees = res.points.filter(p => p.kind === 'tree');
   const notes = [];
@@ -1441,6 +1452,8 @@ function buildOutput(data, o) {
     markings: res.markings,
     race
   };
+  out.streetSigns = streetSigns(out);   // v13: street name signs at side streets
+  if (race) Object.assign(race, gameSpots(out));   // v13: suggested item boxes and boost pads
   return { out, preview };
 }
 
@@ -1965,6 +1978,203 @@ function chooseSnapMethod(latlngs) {
   return routeLength(latlngs) / (latlngs.length - 1) < 150 ? 'match' : 'route';
 }
 // ======================================================================
+// v13: shop signs with made-up names, street name signs, smarter height guesses
+// ======================================================================
+// Shop signs never use a real shop's name or brand (Brandon's rule, to stay clear of trademarks).
+// Each shop gets a made-up, jokey name for what it sells, picked from the list for its type, the
+// same one every scan (chosen by its OSM id). Add more names freely; keep them generic.
+const SIGN_NAMES = {
+  cafe: ['Bean There', 'Brew Ha Ha', 'Mug Life', 'Espresso Yourself', 'Latte Da', 'Grounds for Joy', 'The Flat White Flats', 'Cup Of Joe-ey'],
+  chicken: ['Chicken BBQ', 'Cluck Yeah', 'Peri Nice', 'Fowl Play', 'Wing It', 'Rooster Booster'],
+  dessert: ['The Sweet Stack', 'Choc Shock', 'Sundae Funday', 'Sugar Rush', 'Cocoa Loco'],
+  ice_cream: ['Scoop There It Is', 'Brain Freeze', 'Sundae Funday', 'Cone Zone', 'Gelato Go Go'],
+  burger: ['Bun Intended', 'Burger Me', 'Patty Wagon', 'Big Bun Energy', 'Grill Seeker'],
+  pizza: ['Slice Slice Baby', 'Pizza the Action', 'Crust Me', 'Dough Ray Me'],
+  sushi: ['Roll Call', 'Sushi Do', 'Wasabi Me', 'Raw Deal Sushi'],
+  asian: ['Wok This Way', 'Noodle Doodle', 'Dumpling Darling', 'Bao Down'],
+  thai: ['Thai Me Up', 'Pad Thai-tanic', 'Thai Tanic', 'Basil Brush'],
+  indian: ['Curry On', 'Naan Stop', 'Tikka Look', 'Spice Spice Baby'],
+  mexican: ['Taco Bout It', 'Nacho Average', 'Burrito Bandito', 'Holy Guacamole'],
+  kebab: ['Doner Party', 'Kebab Babe', 'Wrap Battle', 'Spit Roast Express'],
+  seafood: ['The Battered Bits', 'Fin-tastic', 'Prawn Star', 'Oh My Cod', 'Hook Line & Dinner'],
+  bakery: ['Loaf Story', 'Rise and Grind', 'Bready Set Go', 'Knead To Know', 'Crumbs Up'],
+  bubble_tea: ['Bubble Trouble', 'Tea Rex', 'Tapioca Talk'],
+  juice: ['Juicy Lucy', 'Squeeze Me', 'Pulp Friction'],
+  donut: ['Hole Lotta Love', 'Glazed & Confused', 'Donut Worry'],
+  restaurant: ['Eat Street', 'The Hungry Ibis', 'Fork Yeah', 'Plate Expectations', 'Chew Chew'],
+  fast_food: ['Grab & Go Go', 'Snack Attack', 'Fast & Fryous', 'Quick Bites'],
+  pub: ['The Thirsty Ibis', 'The Tired Koala', 'Ute & Barrel', 'The Rusty Ute', 'The Cranky Cockatoo'],
+  bar: ['Bar None', 'The Tipsy Turtle', 'Raise the Bar', 'Shaken Not Stirred'],
+  supermarket: ['Food Barn', 'Stuff Mart', 'Big Trolley', 'Aisle Be Back'],
+  convenience: ['Open Late Mart', 'Milk & More', 'Corner Stop', 'Snack Shack'],
+  alcohol: ['Grog Shop', 'Cheers Mate Liquor', 'Bottle Rocket'],
+  clothes: ['Threads', 'Fit Happens', 'Frock Star', 'Wear It Is'],
+  shoes: ['Sole Mates', 'Heel Good', 'Shoe-In'],
+  hairdresser: ['Curl Up & Dye', 'Shear Genius', 'Fade to Grey', 'Hair Today', 'Mane Event'],
+  beauty: ['Nail It', 'Glow Up', 'Polished'],
+  pharmacy: ['Pill Hill', 'The Remedy Shed', 'Feel Better Chemist'],
+  books: ['Paper Tigers', 'Spine Time', 'Novel Idea'],
+  newsagent: ['Paper Round', 'News Flash'],
+  electronics: ['Plug Ugly', 'Phone Zone', 'Gadget Garage', 'Charge Me Up'],
+  jewelry: ['Bling Thing', 'Shiny Things', 'Ring Ring'],
+  florist: ['Petal Pushers', 'Bloom Town', 'Stem Cell'],
+  butcher: ['Meat Me Here', 'Chop Shop', 'Snag City'],
+  bank: ['Big Coin Bank', 'Piggy Bank Co.', 'Money Box'],
+  post_office: ['Mail Snail', 'Stamp Camp'],
+  gym: ['Sweat Shed', 'Pump Station', 'Flex Appeal'],
+  hardware: ['The Shed Shop', 'Spanners & Things', 'Drill Seekers'],
+  pet: ['Pawsome', 'Fur Real', 'Wag Wag'],
+  optician: ['Eye Spy', 'Specs Appeal'],
+  dentist: ['Drill Hill', 'Tooth Hurty'],
+  doctor: ['Feel Better Clinic', 'Say Aah'],
+  car: ['Spanner Bros', 'Brake Point', 'Wheel Deal'],
+  fuel: ['Gas Guzzlers', 'Fill Er Up', 'Petrol Head'],
+  laundry: ['Spin City', 'Suds Up', 'Wash & Go'],
+  toys: ['Toy Box', 'Play Day', 'Fun Stuff'],
+  sports: ['Game On', 'Good Sport', 'Kick Off'],
+  music: ['Note Worthy', 'Rock Shop', 'Treble Maker'],
+  furniture: ['Sit Happens', 'Couch Potato', 'Table Manners'],
+  travel: ['Away We Go', 'Escape Hatch'],
+  tattoo: ['Ink Spot', 'Skin Deep'],
+  real_estate: ['House Hunters', 'Sold Out'],
+  shop: ['Corner Shop', 'Bits & Bobs', 'Odds & Ends', 'Stuff & Things', 'The Shop Shop']
+};
+const CUISINE_SIGNS = {
+  chicken: 'chicken', portuguese: 'chicken', peri_peri: 'chicken', wings: 'chicken', fried_chicken: 'chicken',
+  chocolate: 'dessert', dessert: 'dessert', cake: 'dessert', crepe: 'dessert', waffle: 'dessert', pancake: 'dessert',
+  ice_cream: 'ice_cream', frozen_yogurt: 'ice_cream', gelato: 'ice_cream',
+  burger: 'burger', american: 'burger', pizza: 'pizza', italian: 'pizza', sushi: 'sushi', japanese: 'sushi', ramen: 'asian',
+  chinese: 'asian', asian: 'asian', vietnamese: 'asian', korean: 'asian', dumpling: 'asian', noodle: 'asian', malaysian: 'asian',
+  thai: 'thai', indian: 'indian', nepalese: 'indian', curry: 'indian', mexican: 'mexican', tex_mex: 'mexican', burrito: 'mexican',
+  kebab: 'kebab', turkish: 'kebab', lebanese: 'kebab', greek: 'kebab', middle_eastern: 'kebab',
+  seafood: 'seafood', fish: 'seafood', fish_and_chips: 'seafood', bakery: 'bakery', pie: 'bakery',
+  bubble_tea: 'bubble_tea', juice: 'juice', smoothie: 'juice', donut: 'donut', coffee_shop: 'cafe', coffee: 'cafe'
+};
+const SHOP_SIGNS = {
+  supermarket: 'supermarket', convenience: 'convenience', alcohol: 'alcohol', wine: 'alcohol', beverages: 'alcohol',
+  clothes: 'clothes', fashion: 'clothes', boutique: 'clothes', shoes: 'shoes', hairdresser: 'hairdresser', barber: 'hairdresser',
+  beauty: 'beauty', cosmetics: 'beauty', chemist: 'pharmacy', books: 'books', newsagent: 'newsagent', stationery: 'newsagent',
+  electronics: 'electronics', mobile_phone: 'electronics', computer: 'electronics', jewelry: 'jewelry', florist: 'florist',
+  butcher: 'butcher', bakery: 'bakery', pastry: 'bakery', confectionery: 'dessert', chocolate: 'dessert', ice_cream: 'ice_cream',
+  hardware: 'hardware', doityourself: 'hardware', pet: 'pet', optician: 'optician', car_repair: 'car', car: 'car', tyres: 'car',
+  laundry: 'laundry', dry_cleaning: 'laundry', toys: 'toys', sports: 'sports', bicycle: 'sports', outdoor: 'sports',
+  musical_instrument: 'music', music: 'music', furniture: 'furniture', interior_decoration: 'furniture', travel_agency: 'travel',
+  tattoo: 'tattoo', estate_agent: 'real_estate', coffee: 'cafe', tea: 'bubble_tea', deli: 'restaurant', seafood: 'seafood'
+};
+const AMENITY_SIGNS = {
+  cafe: 'cafe', restaurant: 'restaurant', fast_food: 'fast_food', ice_cream: 'ice_cream', pub: 'pub', bar: 'bar', biergarten: 'pub',
+  bank: 'bank', pharmacy: 'pharmacy', post_office: 'post_office', dentist: 'dentist', doctors: 'doctor', clinic: 'doctor', fuel: 'fuel', food_court: 'restaurant'
+};
+// The sign type for a shop, eatery or service (or null): cuisine first, so a chicken shop isn't just "restaurant".
+function shopKind(t) {
+  const isFood = /^(cafe|restaurant|fast_food|ice_cream|food_court)$/.test(t.amenity || '') || t.shop === 'bakery' || t.shop === 'coffee';
+  if (isFood && t.cuisine) for (const c of String(t.cuisine).toLowerCase().split(/[;,]\s*/)) if (CUISINE_SIGNS[c]) return CUISINE_SIGNS[c];
+  if (t.amenity && AMENITY_SIGNS[t.amenity]) return AMENITY_SIGNS[t.amenity];
+  if (t.leisure === 'fitness_centre' || t.leisure === 'sports_centre') return 'gym';
+  if (t.shop && t.shop !== 'vacant' && t.shop !== 'no') return SHOP_SIGNS[t.shop] || 'shop';
+  return null;
+}
+// The name kept in the file: real shop and brand names are swapped for the shop's made-up sign
+// name, and malls / shopping strips lose theirs (often a brand too). Streets, parks, rivers keep theirs.
+function safeName(t, id) {
+  if (!t.name) return undefined;
+  const sk = shopKind(t);
+  if (sk) return funnySign(sk, id);
+  if (t.brand || t['brand:wikidata'] || t.shop || /^(retail|commercial)$/.test(t.landuse || '') || /^(retail|commercial|supermarket|kiosk)$/.test(t.building || '')) return undefined;
+  return t.name;
+}
+function signNames() { return SIGN_NAMES; }
+function signHash(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; }
+function funnySign(type, seed) { const list = SIGN_NAMES[type] || SIGN_NAMES.shop; return list[signHash(String(seed)) % list.length]; }
+// Street names shortened for a small sign: "Grey Street" → "GREY ST".
+const STREET_ABBR = { street: 'ST', road: 'RD', avenue: 'AVE', drive: 'DR', parade: 'PDE', terrace: 'TCE', boulevard: 'BVD', lane: 'LN', place: 'PL', court: 'CT', crescent: 'CRES', highway: 'HWY', close: 'CL', way: 'WAY', bridge: 'BRIDGE' };
+function streetSignText(name) {
+  const w = String(name).trim().split(/\s+/);
+  const last = w[w.length - 1].toLowerCase();
+  if (w.length > 1 && STREET_ABBR[last]) w[w.length - 1] = STREET_ABBR[last];
+  return w.join(' ').toUpperCase().slice(0, 24);
+}
+// Street name signs where a named street meets or crosses the track (or the track itself turns
+// into a named street): one sign per street per 80 m, on a pole just off the track edge.
+function streetSigns(out) {
+  const line = out.route.centerline && out.route.centerline.points && out.route.centerline.points.length > 2 ? out.route.centerline.points : out.route.points;
+  if (!line || line.length < 2) return [];
+  const half = (out.route.width || 8) / 2, idx = makeTrackIndex(line), signs = [];
+  const NAMED = /^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|service|pedestrian|busway|footway|cycleway|path)(_link)?$/;   // named paths too: promenades get signs
+  for (const r of out.roads || []) {
+    if (!r.name || !NAMED.test(r.kind) || r.tunnel || r.bridge) continue;
+    const pts = r.points, dists = pts.map(p => idx.dist([p]));
+    for (let k = 0; k < pts.length; k++) {
+      if (dists[k] > half + 4) continue;   // a point of this street on the track: is it a junction?
+      for (const j of [k - 1, k + 1]) {
+        if (j < 0 || j >= pts.length || dists[j] < half + 8) continue;   // this way leads off the track: a side street
+        // the sign stands on the corner: a little way up the side street, beside it
+        let dx = pts[j][0] - pts[k][0], dy = pts[j][1] - pts[k][1]; const L = Math.hypot(dx, dy) || 1; dx /= L; dy /= L;
+        const back = Math.min(L, half + 3), side = (r.width || 6) / 2 + 1.2;
+        const pos = [round2(pts[k][0] + dx * back - dy * side), round2(pts[k][1] + dy * back + dx * side)];
+        if (idx.dist([pos]) < half + 1.5) continue;
+        const text = streetSignText(r.name);
+        if (signs.some(s => s.text === text && Math.hypot(s.pos[0] - pos[0], s.pos[1] - pos[1]) < 80)) continue;
+        signs.push({ text, pos, street: r.id });
+      }
+    }
+  }
+  return signs.slice(0, 60);
+}
+// Smarter guesses for buildings still on a plain default height after the neighbour step: what
+// sells there (shops: two storeys), the land use around it (houses in residential streets,
+// sheds in industrial ones), similar-sized measured buildings nearby, then its size. Marked
+// heightSource "guess" with heightGuess saying why, so the game uses them (it re-guesses only
+// "default"). A little variety per building keeps a street from being one flat line.
+function guessHeights(res, hints) {
+  const measured = h => h === 'osm' || h === 'levels' || h === 'lidar' || h === 'overture';
+  const zones = (res.areas || []).filter(a => /^(residential|commercial|retail|industrial)$/.test(a.kind));
+  const zoneAt = c => { for (const z of zones) if (pointInPoly(c, z.polygon) && !(z.holes || []).some(h => pointInPoly(c, h))) return z.kind; return null; };
+  const known = res.buildings.filter(b => !b.part && measured(b.heightSource)).map(b => ({ c: centroid(b.footprint), a: Math.abs(polygonArea(b.footprint)), h: b.height }));
+  const HOUSES = /^(house|detached|semidetached_house|terrace|bungalow|residential)$/;
+  let n = 0;
+  for (const b of res.buildings) {
+    if (b.part || b.heightSource !== 'default') continue;
+    const c = centroid(b.footprint), area = Math.abs(polygonArea(b.footprint)), hint = hints.get(b.id) || {};
+    const vary = (signHash(b.id) % 3) * 0.75;   // 0, 0.75 or 1.5 m
+    let h = null, why = null;
+    if (hint.shop || b.shops) { h = area > 600 ? 8 : 7; why = 'shop'; }
+    if (h == null) {
+      const sim = known.filter(k => Math.hypot(k.c[0] - c[0], k.c[1] - c[1]) <= 100 && k.a < area * 3 && k.a > area / 3).map(k => k.h).sort((x, y) => x - y);
+      if (sim.length >= 4) { h = sim[Math.floor(sim.length / 2)]; why = 'similar buildings nearby'; }
+    }
+    if (h == null) {
+      const zone = zoneAt(c);
+      if ((HOUSES.test(b.kind) || b.kind === 'yes') && area < 300 && (zone === 'residential' || hint.addr || HOUSES.test(b.kind))) { h = area < 40 ? 3 : 5 + vary; why = 'house'; }
+      else if (zone === 'industrial') { h = area > 500 ? 8 + vary : 5 + vary; why = 'industrial area'; }
+      else if (zone === 'commercial' || zone === 'retail') { h = area < 400 ? 8 + vary : 12 + vary * 2; why = zone + ' area'; }
+    }
+    if (h == null && b.kind === 'yes') { h = area < 30 ? 3 : area < 200 ? 5 + vary : area < 1000 ? 8 + vary : 11 + vary * 2; why = 'size'; }
+    if (h == null) continue;   // a kind with its own default (apartments, school…): keep it
+    b.height = round2(h); b.heightSource = 'guess'; b.heightGuess = why; n++;
+  }
+  return n;
+}
+// Shops (from building tags, or shop nodes inside or right beside a building) on their building:
+// b.shops = [{ type, sign }] with a made-up sign name. At most 3 per building.
+function attachShops(res, spots) {
+  const wholes = res.buildings.filter(b => !b.part && !b.hasParts || b.part);
+  let n = 0;
+  for (const s of spots) {
+    let host = s.building ? res.buildings.find(b => b.id === s.building) : wholes.find(b => pointInPoly(s.pos, b.footprint));
+    if (!host) {
+      let best = 8;
+      for (const b of wholes) { for (let i = 0; i < b.footprint.length; i++) { const d = distPointSeg(s.pos, b.footprint[i], b.footprint[(i + 1) % b.footprint.length]); if (d < best) { best = d; host = b; } } }
+    }
+    if (!host) continue;
+    host.shops = host.shops || [];
+    if (host.shops.length >= 3 || host.shops.some(x => x.type === s.type)) continue;
+    host.shops.push({ type: s.type, sign: funnySign(s.type, s.id) });
+    n++;
+  }
+  return n;
+}
+// ======================================================================
 // v13: what the game (brisbane-kart) will build, so a scan can be checked before it is played.
 // These copy the game's own numbers (game/scripts/kartmap.gd and kartmap_scenery.gd); if the
 // game changes them, change them here too.
@@ -2063,6 +2273,57 @@ function gameDrops(out, g) {
 }
 // "Will it race well?": problems the game will have with this route, worst first.
 // Each: { level: 'red' | 'amber', label, xy, at } (at = metres along the game's lap).
+// Suggested item boxes and boost pads, in metres along the game's line (gameLength says how long
+// that line was, so the game can scale if its own comes out a little different). Boost pads go
+// just out of the corner before the longest straights, so they launch karts down them; item box
+// rows sit on straight bits near evenly spaced spots (about one row per 250 m), away from the
+// start line, the pads and steep bits.
+function gameSpots(out, g) {
+  g = g || gameLine(out);
+  const p = g.pts, n = p.length, step = g.step;
+  if (n < 60) return {};
+  const length = n * step, turn = new Array(n), bent = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const a = p[(i - 1 + n) % n], b = p[i], c = p[(i + 1) % n];
+    let d = Math.atan2(c[1] - b[1], c[0] - b[0]) - Math.atan2(b[1] - a[1], b[0] - a[0]);
+    while (d > Math.PI) d -= 2 * Math.PI; while (d < -Math.PI) d += 2 * Math.PI;
+    turn[i] = Math.abs(d);
+  }
+  for (let i = 0; i < n; i++) { let t = 0; for (let k = -5; k <= 5; k++) t += turn[(i + k + n) % n]; bent[i] = t > 0.35; }   // over 20° within 15 m either side
+  const grade = i => { const a = p[i], b = p[(i + 7) % n]; return Math.abs(b[2] - a[2]) / 21; };
+  const okS = s => s > 50 && s < length - 30;   // the game's own rule: not on the start line
+  // straight runs (going round the loop once, starting from a bend so none is split)
+  const first = bent.indexOf(true), runs = [];
+  if (first < 0) runs.push({ from: 0, len: n });
+  else for (let k = 0, from = -1; k <= n; k++) {
+    const i = (first + k) % n, straight = k < n && !bent[i];
+    if (straight && from < 0) from = i;
+    if (!straight && from >= 0) { runs.push({ from, len: (i - from + n) % n || n }); from = -1; }
+  }
+  const pads = [];
+  for (const r of runs.slice().sort((x, y) => y.len - x.len)) {
+    if (pads.length >= 2 || r.len * step < 60) break;
+    for (let k = 5; k < r.len / 3; k++) {   // just out of the corner (later if that is the start line)
+      const s = Math.round(((r.from + k) % n) * step);
+      if (!okS(s)) continue;
+      if (pads.every(q => Math.min(Math.abs(q.s - s), length - Math.abs(q.s - s)) > 150)) pads.push({ s, lateral: 0 });
+      break;
+    }
+  }
+  const rows = Math.max(3, Math.min(6, Math.round(length / 250))), count = (g.width || 12) >= 10 ? 4 : 3, boxes = [];
+  for (let r = 0; r < rows; r++) {
+    const ideal = length * (0.15 + 0.8 * r / rows);
+    let best = null;
+    for (let s = ideal - 60; s <= ideal + 60; s += step) {
+      const ss = ((s % length) + length) % length, i = Math.round(ss / step) % n;
+      if (!okS(ss) || pads.some(q => Math.abs(q.s - ss) < 25) || boxes.some(b => Math.abs(b.s - ss) < 80)) continue;
+      const score = (bent[i] ? 0 : 2) - (grade(i) > 0.08 ? 1 : 0) - Math.abs(s - ideal) / 60;
+      if (!best || score > best.score) best = { s: Math.round(ss), score };
+    }
+    if (best) boxes.push({ s: best.s, count });
+  }
+  return { itemBoxes: boxes.sort((a, b) => a.s - b.s), boostPads: pads.sort((a, b) => a.s - b.s), gameLength: Math.round(length) };
+}
 function raceCheck(out, g) {
   g = g || gameLine(out);
   const pts = g.pts, n = pts.length, step = g.step, w = g.width, probs = [];
@@ -2920,6 +3181,8 @@ function showStats() {
     ['Railway lines', c.railways || 0],
     ['Road markings', c.markings || 0],
     ['Corners / checkpoints', `${(out.route.corners || []).length} / ${out.race ? out.race.checkpoints.length : 0}`],
+    ['Shop signs / street signs', `${out.buildings.reduce((n, b) => n + (b.shops ? b.shops.length : 0), 0)} / ${(out.streetSigns || []).length}`],   // v13
+    ['Item box rows / boost pads', out.race && out.race.itemBoxes ? `${out.race.itemBoxes.length} / ${out.race.boostPads.length}` : '–'],   // v13
     ['Shortcuts found', c.shortcuts || 0],
     ...(out.meta.elevation ? [['Hills (climb / highest)', `${Math.round(out.meta.elevation.climb)} m / ${out.meta.elevation.trackHighest} m`]] : []),
     ['File size', (size / 1024).toFixed(0) + ' KB']
