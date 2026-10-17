@@ -375,6 +375,10 @@ const overpass = { elements: [
     // ---------- v13: race check and Game view ----------
     const st = await page.textContent('#stats');
     check('v13 stats show the race check (lap in the game, and either "Races well" or what to look at)', /Race check: [\d.]+ km lap in the game, about \d+ s/.test(st) && (/Races well/.test(st) || /to look at/.test(st)), st.slice(0, 300));
+    const [zdl] = await Promise.all([page.waitForEvent('download'), page.click('#gameZipBtn')]);
+    const zpath = await zdl.path(), zbytes = require('fs').readFileSync(zpath);
+    check('v13 Export for game downloads one zip named for the game folder, with the level file and minimap inside', /^scan_[a-z0-9_-]+\.zip$/.test(zdl.suggestedFilename()) && zbytes.readUInt32LE(0) === 0x04034b50 && /kartmap_[^/]+\.json/.test(zbytes.toString('latin1')) && /_minimap\.png/.test(zbytes.toString('latin1')) && /README\.txt/.test(zbytes.toString('latin1')), zdl.suggestedFilename());
+    if (process.env.ZIPOUT) require('fs').copyFileSync(zpath, process.env.ZIPOUT);
     check('v13 stats count shop signs, street signs, item box rows and boost pads', /Shop signs \/ street signs\s*\d+ \/ \d+/.test(st) && /Item box rows \/ boost pads\s*(\d+ \/ \d+|–)/.test(st), st.slice(0, 900));
     await page.click('#view3dBtn');
     await page.waitForFunction(() => /buildings/.test((document.getElementById('v3dInfo') || {}).textContent || ''), null, { timeout: 20000 });

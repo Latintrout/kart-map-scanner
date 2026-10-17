@@ -28,6 +28,9 @@ Draw a route on a real map, scan the area along it from free OpenStreetMap data,
 - **Ground heights** from Queensland's free LiDAR terrain model: hills along the track and under every building, total climb and steepest slope, and a terrain file for the game.
 - **Minimap and track card**: a HUD minimap PNG (with the numbers to place karts on it), a 1200×630 track card with stats and the height profile, and a hover-able height-along-the-lap chart.
 - **3D preview** after a scan: orbit around the level, "Fly the lap" at kart height, switch on retro pixels, or save a rough `.glb` model.
+- **Race check** (made for Brisbane Kart): the lap time in the game, and anything that won't race well (hairpins, narrow or very steep bits, a route that crosses itself or doubles back, a too short or too long lap). The 3D preview's *Game view* shows the road and town the way the game builds them.
+- **Ready for the game**: smarter height guesses by building type and neighbourhood, shop signs with made-up funny names (never real shop names), street name signs at side streets, and suggested item boxes and boost pads.
+- **🎮 Export for game**: one zip with the level file, minimap and terrain file in a folder ready to unzip into the game's `game/tracks`.
 - **Export / Load** the level file. The format is documented in `docs/kartmap-format.md`.
 
 ## Tests

@@ -553,6 +553,13 @@ function runV13(lib, check, same) {
   const gl2 = lib.gameLine(rect2);
   check('v13 item spots: two boost pads at the start of the two long straights', sp.boostPads.length === 2 && sp.boostPads.every(q => { const pt = gl2.pts[Math.round(q.s / 3)]; return Math.abs(pt[1]) < 3 || Math.abs(pt[1] - 150) < 3; }), JSON.stringify(sp.boostPads.map(q => gl2.pts[Math.round(q.s / 3)])));
   check('v13 item spots: a row of 4 item boxes per ~250 m, on straight bits, not on the start line', sp.itemBoxes.length === 6 && sp.itemBoxes.every(b => b.count === 4 && b.s > 50 && b.s < sp.gameLength - 30 && onStraight(b.s)) && sp.gameLength === gl2.pts.length * 3, JSON.stringify(sp));
+  // Export for game: a zip the game can unzip into its tracks folder
+  const zenc = new TextEncoder(), zip = lib.makeZip([{ name: 'scan_x/a.json', data: zenc.encode('{"a":1}') }, { name: 'scan_x/b.png', data: new Uint8Array([1, 2, 3]) }], new Date(2026, 9, 17, 12, 0, 0));
+  const zdv = new DataView(zip.buffer), zend = zip.length - 22;
+  check('v13 zip: CRC-32 right, local header first, end record lists both files at the right offset',
+    lib.crc32(zenc.encode('hello')) === 0x3610a686 && zdv.getUint32(0, true) === 0x04034b50 && zdv.getUint32(zend, true) === 0x06054b50 && zdv.getUint16(zend + 10, true) === 2 &&
+    zdv.getUint32(zdv.getUint32(zend + 16, true), true) === 0x02014b50);
+  check('v13 game folder name: safe, lowercase, starts with scan_', lib.gameFolderName('South Bank loop!') === 'scan_south_bank_loop' && lib.gameFolderName('') === 'scan_route');
   // shop signs, street signs, height guesses
   check('v13 shop kind: a chicken restaurant is "chicken", a chocolate cafe "dessert", a bank "bank", a vacant shop nothing',
     lib.shopKind({ amenity: 'restaurant', cuisine: 'portuguese;chicken' }) === 'chicken' && lib.shopKind({ amenity: 'cafe', cuisine: 'chocolate' }) === 'dessert' && lib.shopKind({ amenity: 'bank', name: 'Some Bank' }) === 'bank' && lib.shopKind({ shop: 'vacant' }) === null);

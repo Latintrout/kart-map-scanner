@@ -206,6 +206,10 @@ Suggestions only (`suggested: true`). The game or a later editor may move them.
 11. **(v8.3) Colours:** mapped colours (`roofColour`, `colour`) first, then `sampledRoofColour` / area `sampledColour` from the aerial photo, then the game's own palette.
 12. **(v12a) Hills:** with `meta.elevation`, raise the track by `route.elevation` (or `centerline.elevation`), and each building/prop/tree by its `ground`. The full height grid is in the terrain file:
 
+### Export for game (v13)
+
+The 🎮 *Export for game* button saves `scan_<name>.zip` holding one folder, `scan_<name>/`, with the level file, the minimap PNG (`meta.minimap` filled in), the terrain file when ground heights were fetched (`meta.elevation.terrainFile` filled in) and a short README. Unzipped into the game's `game/tracks/`, it is a track.
+
 ### Terrain file (v12a), `kartmap_<name>_terrain.json`
 
 `{ format: "kartmap-terrain", version: 1, name, origin, minX, maxY, spacing, width, height, base, encoding, source, licence, attribution, missing, data }`. `data` is base64 of `width × height` 16-bit little-endian integers: centimetres above `base`, row by row starting at the north-west corner (`minX`, `maxY`), going east along a row and then south (row `r`, column `c` is at x = `minX + c × spacing`, y = `maxY − r × spacing`). `-32768` = no data. Bare ground only (bridges and buildings are not in it).
