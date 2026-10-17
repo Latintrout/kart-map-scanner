@@ -1,0 +1,20 @@
+# Runs the scanner's data checks (the same ones as the /tests/ page) on every push and pull
+# request. The game check (scanner files loaded by the real game) runs in the game's own repo,
+# brisbane-kart, every day and on demand: see tests/game-loader/README.md.
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  data-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Data checks
+        run: node tests/run-node.js index.html

@@ -371,6 +371,40 @@ const overpass = { elements: [
     const j12 = JSON.parse(fs.readFileSync(jf, 'utf8'));
     check('v12c export has the minimap placement info', j12.meta.minimap && j12.meta.minimap.file === mm.suggestedFilename() && j12.meta.minimap.metresPerPixel > 0 && typeof j12.meta.minimap.minX === 'number');
   }
+  if (V >= 13) {
+    // ---------- v13: race check and Game view ----------
+    const st = await page.textContent('#stats');
+    check('v13 stats show the race check (lap in the game, and either "Races well" or what to look at)', /Race check: [\d.]+ km lap in the game, about \d+ s/.test(st) && (/Races well/.test(st) || /to look at/.test(st)), st.slice(0, 300));
+    const [zdl] = await Promise.all([page.waitForEvent('download'), page.click('#gameZipBtn')]);
+    const zpath = await zdl.path(), zbytes = require('fs').readFileSync(zpath);
+    check('v13 Export for game downloads one zip named for the game folder, with the level file and minimap inside', /^scan_[a-z0-9_-]+\.zip$/.test(zdl.suggestedFilename()) && zbytes.readUInt32LE(0) === 0x04034b50 && /kartmap_[^/]+\.json/.test(zbytes.toString('latin1')) && /_minimap\.png/.test(zbytes.toString('latin1')) && /README\.txt/.test(zbytes.toString('latin1')), zdl.suggestedFilename());
+    if (process.env.ZIPOUT) require('fs').copyFileSync(zpath, process.env.ZIPOUT);
+    check('v13 the bad backup loaded earlier is in the error log as a damaged file', /couldn't be read/.test(await page.textContent('#errList')), await page.textContent('#errList'));
+    await page.evaluate(() => document.getElementById('errClear').click());
+    check('v13 Clear empties and hides the error log', await page.isHidden('#errLog'));
+    await page.evaluate(() => setTimeout(() => { throw new Error('boom test'); }, 0)); await page.waitForTimeout(200);
+    const elt = await page.textContent('#errLog');
+    check('v13 a page bug shows in the error log in plain words, with the technical message', !(await page.isHidden('#errLog')) && /send it to Claude/.test(elt) && /boom test/.test(elt), elt.slice(0, 200));
+    const [edl] = await Promise.all([page.waitForEvent('download'), page.evaluate(() => { document.getElementById('errLog').open = true; }).then(() => page.click('#errSave'))]);
+    check('v13 error log saves as a text file', /error-log\.txt$/.test(edl.suggestedFilename()) && /boom test/.test(require('fs').readFileSync(await edl.path(), 'utf8')));
+    await page.click('#errClear');
+    errors.splice(errors.findIndex(e => /boom test/.test(e)), 1);
+    check('v13 stats count shop signs, street signs, item box rows and boost pads', /Shop signs \/ street signs\s*\d+ \/ \d+/.test(st) && /Item box rows \/ boost pads\s*(\d+ \/ \d+|–)/.test(st), st.slice(0, 900));
+    await page.click('#view3dBtn');
+    await page.waitForFunction(() => /buildings/.test((document.getElementById('v3dInfo') || {}).textContent || ''), null, { timeout: 20000 });
+    check('v13 Game view switch is there and on offer', !(await page.isDisabled('#v3dGame')));
+    await page.check('#v3dGame'); await page.waitForTimeout(400);
+    const gi = await page.textContent('#v3dInfo');
+    const gpx = await page.evaluate(() => { const c = document.querySelector('#v3dHost canvas'); const t = document.createElement('canvas'); t.width = 200; t.height = 150; const g = t.getContext('2d'); g.drawImage(c, 0, 0, 200, 150); const d = g.getImageData(0, 0, 200, 150).data; let n = 0; for (let i = 0; i < d.length; i += 4) if (Math.abs(d[i] - 156) + Math.abs(d[i + 1] - 201) + Math.abs(d[i + 2] - 239) > 40) n++; return n; });
+    check('v13 Game view says what the game leaves out, and still renders', /^Game view: the game's rounded road/.test(gi) && /leaves out \d+ buildings/.test(gi) && gpx > 2000, gi + ' ' + gpx);
+    if (process.env.SHOT5) await page.screenshot({ path: process.env.SHOT5 });
+    await page.click('#v3dFly'); await page.waitForTimeout(400);
+    check('v13 Fly the lap works in Game view', /Stop/.test(await page.textContent('#v3dFly')));
+    await page.click('#v3dFly');
+    await page.uncheck('#v3dGame'); await page.waitForTimeout(200);
+    check('v13 Game view off brings back the normal info', /^\d+ buildings · /.test(await page.textContent('#v3dInfo')));
+    await page.click('#v3dClose');
+  }
   check('no script errors during the whole run', errors.length === 0, errors.join('; '));
   await ctx.close();
 

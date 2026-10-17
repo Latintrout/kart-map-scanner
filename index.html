@@ -94,6 +94,8 @@
   #stats .profile, #stats .profile div { display: block; }   /* not the two-column rows the other stats use */
   .profile svg { width: 100%; height: 90px; display: block; touch-action: pan-y; }
   .profile .readout { position: absolute; top: 18px; right: 4px; font-size: 11px; color: var(--text); background: #16161dcc; padding: 1px 5px; border-radius: 4px; pointer-events: none; }
+  /* v13: race check */
+  #stats .race li { margin: 2px 0; } #stats .race .red { color: var(--err); } #stats .race .amber { color: var(--warn); } #stats .race .good { color: var(--ok); }
 .lm-photos{display:flex;gap:4px;margin:3px 0 4px}.lm-photos img{width:64px;height:48px;object-fit:cover;border-radius:3px;border:1px solid #ccc}
 </style>
 </head>
@@ -117,7 +119,7 @@
       <li><b>Draw</b> the route with ✎ Pen (hold and drag along roads). It snaps to roads.</li>
       <li><b>Scan</b> area: grabs buildings, roads, trees and more around it.</li>
       <li><b>Check</b> the map: red = blocking the track. Try 🧊 3D preview.</li>
-      <li><b>Export JSON</b> and drop it in the game's tracks folder.</li>
+      <li><b>🎮 Export for game</b> and unzip it into the game's <code>game/tracks</code> folder.</li>
     </ol>
     <div class="hint" style="margin-top:4px">Extras (colours, heights, photos) are optional. 📏 (top-left of the map) measures distances. Ctrl+Z / Ctrl+Y undo and redo.</div>
   </section>
@@ -193,6 +195,15 @@
     <label class="inline"><input id="useOverture" type="checkbox" checked> Fill building gaps from Overture (recommended)</label>
     <button id="scanBtn" class="primary" style="width:100%;margin-top:6px">Scan area</button>
     <div id="status">Hold and drag on the map to draw a route.</div>
+    <details id="errLog" hidden style="margin-top:6px;font-size:12px">
+      <summary>⚠ Error log (<span id="errCount">0</span>): what went wrong, in plain words</summary>
+      <div id="errList" class="hint" style="max-height:220px;overflow:auto;margin-top:4px"></div>
+      <div class="row" style="margin-top:4px">
+        <button id="errCopy" title="Copy the log to paste to Claude">Copy log</button>
+        <button id="errSave">Save log (.txt)</button>
+        <button id="errClear">Clear</button>
+      </div>
+    </details>
   </section>
 
   <section>
@@ -205,6 +216,7 @@
       <button id="exportBtn" class="primary" disabled>Export JSON</button>
       <button id="loadBtn">Load JSON</button>
     </div>
+    <button id="gameZipBtn" class="primary" style="width:100%;margin-top:6px" disabled title="One zip with the level file, minimap and (after Get ground heights) the terrain file: unzip it into the game's tracks folder">🎮 Export for game (zip)</button>
     <input id="loadFile" type="file" accept=".json,application/json" hidden>
     <button id="view3dBtn" style="width:100%;margin-top:6px" disabled>🧊 3D preview</button>
     <div class="row" style="margin-top:6px">
@@ -464,6 +476,8 @@ rel(bw.w)["type"="multipolygon"]->.r;
   node.n["power"];
   node.n["emergency"];
   node.n["advertising"];
+  node.n["shop"];
+  node.n["cuisine"];
 );
 out geom;`;
 }
@@ -1153,8 +1167,12 @@ function buildOutput(data, o) {
     preview.push({ cat: 'area', id, kind, xy: [polygon, ...h] });
     noteLandmark(t, id, centroid(polygon), 1);
   };
+  const shopSpots = [], guessHints = new Map();   // v13
   const addBuilding = (id, t, name, footprint, holes) => {
     const [height, heightSource] = buildingHeight(t);
+    const sk = shopKind(t);
+    if (sk) shopSpots.push({ id, type: sk, pos: centroid(footprint), building: id });
+    guessHints.set(id, { shop: !!sk, addr: !!t['addr:housenumber'] });
     const b = { id, kind: t.building, name, height, heightSource, footprint, ...buildingLooks(t) };
     if (t['overture:added']) b.source = 'overture';   // v8.3: not in OSM, added from Overture
     if (holes && holes.length) b.holes = holes;
@@ -1186,7 +1204,7 @@ function buildOutput(data, o) {
 
   for (const el of (data.elements || [])) {
     const t = el.tags || {};
-    const name = t.name || undefined;
+    const name = safeName(t, (el.type === 'node' ? 'n' : el.type === 'relation' ? 'r' : 'w') + el.id);   // v13: no real shop or brand names
 
     if (el.type === 'node') {
       if (el.lat == null) continue;
@@ -1207,6 +1225,8 @@ function buildOutput(data, o) {
         : t.highway === 'stop' ? { kind: 'stop_line' } : t.highway === 'give_way' ? { kind: 'give_way_line' } : null;
       if (mk) { res.markings.push({ id: 'n' + el.id, ...mk, pos }); grow(pos); preview.push({ cat: 'marking', kind: mk.kind, xy: pos }); }
       noteLandmark(t, prop ? 'n' + el.id : null, pos, 0);
+      const sk = shopKind(t);   // v13: shops get a sign on their building
+      if (sk) shopSpots.push({ id: 'n' + el.id, type: sk, pos });
       continue;
     }
 
@@ -1318,6 +1338,9 @@ function buildOutput(data, o) {
       b.height = round2(m); b.heightSource = 'estimated';
     }
   });
+  // v13: shop signs, then smarter guesses for heights still on the plain default
+  attachShops(res, shopSpots);
+  guessHeights(res, guessHints);
   // Roof shapes: mapped ones are marked 'osm', the rest get a guess marked 'guess'.
   for (const b of res.buildings) {
     if (b.roofShape) b.roofShapeSource = 'osm';
@@ -1351,7 +1374,7 @@ function buildOutput(data, o) {
   const nb = wholes.length;   // parts are pieces of buildings, so they're left out of the percentages
   const pct = n => nb ? Math.round(1000 * n / nb) / 10 : 0;
   const hMeasured = wholes.filter(b => measured(b.heightSource)).length;
-  const hEstimated = wholes.filter(b => b.heightSource === 'estimated' || b.heightSource === 'ml-estimate').length;
+  const hEstimated = wholes.filter(b => b.heightSource === 'estimated' || b.heightSource === 'ml-estimate' || b.heightSource === 'guess').length;
   const onTrackB = res.buildings.filter(b => b.onTrack);
   const trees = res.points.filter(p => p.kind === 'tree');
   const notes = [];
@@ -1394,7 +1417,7 @@ function buildOutput(data, o) {
     meta: {
       name: o.name || 'route',
       generated: o.now || new Date().toISOString(),
-      generator: 'kart-map-scanner v12c',
+      generator: 'kart-map-scanner v13',
       origin: { lat: origin[0], lon: origin[1] },
       units: 'metres',
       axes: 'x = east, y = north. In Godot: Vector3(x, 0, -y)',
@@ -1439,6 +1462,8 @@ function buildOutput(data, o) {
     markings: res.markings,
     race
   };
+  out.streetSigns = streetSigns(out);   // v13: street name signs at side streets
+  if (race) Object.assign(race, gameSpots(out));   // v13: suggested item boxes and boost pads
   return { out, preview };
 }
 
@@ -1638,7 +1663,25 @@ function scene3dPlan(out) {
     start: out.race ? { ...out.race.startLine, g: elevAt(out.race.startLine.at || 0) } : null,
     checkpoints: out.race ? out.race.checkpoints.map(c => ({ ...c, g: elevAt(c.at || 0) })) : [],
     landmarks: (out.landmarks || []).filter(l => Array.isArray(l.pos)).map(l => ({ x: l.pos[0], y: l.pos[1], g: l.ground || 0, name: l.name, kind: l.kind })),
-    hills: !!out.meta.elevation
+    hills: !!out.meta.elevation,
+    game: gameView(out, buildings, trees, props)
+  };
+}
+// v13: "Game view" in the 3D preview: the road where the game puts it (its rounded line), and
+// which buildings, trees and props it leaves out or draws plain (see gameDrops).
+function gameView(out, buildings, trees, props) {
+  const g = gameLine(out);
+  if (g.pts.length < 3) return null;
+  const drops = gameDrops(out, g);
+  const ids = new Map((out.points || []).filter(p => Array.isArray(p.pos)).map(p => [p.pos[0] + ',' + p.pos[1], p.id]));
+  const line = g.pts.map(p => [round2(p[0]), round2(p[1])]);
+  line.push(line[0]);
+  return {
+    track: { line, closed: true, elev: g.pts.map(p => round2(p[2])).concat([round2(g.pts[0][2])]), width: g.width, ...ribbon(line, g.width, true) },
+    droppedBuildings: buildings.filter(b => drops.buildings.has(b.id)).map(b => b.id),
+    farBuildings: buildings.filter(b => drops.far.has(b.id)).map(b => b.id),
+    droppedTrees: trees.map((t, i) => drops.points.has(ids.get(t.x + ',' + t.y)) ? i : -1).filter(i => i >= 0),
+    droppedProps: props.map((t, i) => drops.points.has(ids.get(t.x + ',' + t.y)) ? i : -1).filter(i => i >= 0)
   };
 }
 
@@ -1725,6 +1768,15 @@ function applyElevation(out, grids, unprojFactory, info) {
   const nearestH = p => { let best = 0, bd = Infinity; for (let i = 0; i < line.length; i++) { const d = Math.hypot(line[i][0] - p[0], line[i][1] - p[1]); if (d < bd) { bd = d; best = i; } } return smooth[best]; };
   out.route.elevation = cl ? out.route.points.map(p => rel(nearestH(p))) : smooth.map(rel);
   if (cl) cl.elevation = smooth.map(rel);
+  // v13: the bare ground under the route too (only when some of it is bridged), so the game can
+  // tell a bridge deck from the river or road under it and draw piers there
+  if (deck.some(Boolean)) {
+    const under = fillGaps(line.map(at));
+    const ug = under.map((v, i) => { if (!K) return v; let s = 0, c = 0; for (let k = -K; k <= K; k++) { const j = out.route.closed ? (i + k + under.length) % under.length : i + k; if (j >= 0 && j < under.length) { s += under[j]; c++; } } return s / c; });
+    if (cl) cl.ground = ug.map(rel);
+    const nearestG = p => { let best = 0, bd = Infinity; for (let i = 0; i < line.length; i++) { const d = Math.hypot(line[i][0] - p[0], line[i][1] - p[1]); if (d < bd) { bd = d; best = i; } } return ug[best]; };
+    out.route.ground = cl ? out.route.points.map(p => rel(nearestG(p))) : ug.map(rel);
+  }
   // climb, descent and the steepest 20 m
   let climb = 0, descent = 0, steep = { grade: 0, at: 0 };
   const sp = cl ? (cl.spacing || 2) : null;
@@ -1736,7 +1788,7 @@ function applyElevation(out, grids, unprojFactory, info) {
     metresPerSample: (info && info.metresPerSample) || null, trackLowest: 0, trackHighest: rel(Math.max(...smooth)),
     climb: Math.round(climb * 10) / 10, descent: Math.round(descent * 10) / 10, steepest: steep,
     bridgedPoints: bridged, bridgedNote: bridged ? 'Track points on bridges/in tunnels use a straight line between the two ends (the terrain model has no bridges).' : undefined,
-    counts: grounds };
+    counts: grounds, grid: terrainGrid(out, grids, unprojFactory, base, 10) };
   out.meta.attribution = attributionFor({ overture: !!out.meta.overture, imagery: !!out.meta.imagery, elevation: true });
   const q = out.meta.quality;
   if (q && Array.isArray(q.notes)) {
@@ -1769,7 +1821,15 @@ function base64ToBytes(s) {
 // above meta.elevation.base as little-endian 16-bit numbers (-32768 = no data), base64.
 function terrainFile(out, grids, unprojFactory, spacing) {
   if (!out.meta.elevation) return null;
-  const U = unprojFactory(out.meta.origin.lat, out.meta.origin.lon), bb = out.meta.bbox, base = out.meta.elevation.base;
+  const g = terrainGrid(out, grids, unprojFactory, out.meta.elevation.base, spacing);
+  return { format: 'kartmap-terrain', version: 1, name: out.meta.name, origin: out.meta.origin,
+    minX: g.minX, maxY: g.maxY, spacing, width: g.width, height: g.height, base: out.meta.elevation.base,
+    encoding: g.encoding, source: DEM_SOURCE.name, licence: DEM_SOURCE.licence, attribution: DEM_SOURCE.attribution, missing: g.missing, data: g.data };
+}
+// v13: the height grid itself (also kept in the main file as meta.elevation.grid, every 10 m, so the
+// game's ground follows the hills without the separate terrain file).
+function terrainGrid(out, grids, unprojFactory, base, spacing) {
+  const U = unprojFactory(out.meta.origin.lat, out.meta.origin.lon), bb = out.meta.bbox;
   const w = Math.max(2, Math.ceil((bb.maxX - bb.minX) / spacing) + 1), h = Math.max(2, Math.ceil((bb.maxY - bb.minY) / spacing) + 1);
   const bytes = new Uint8Array(w * h * 2), view = new DataView(bytes.buffer);
   let missing = 0;
@@ -1780,10 +1840,9 @@ function terrainFile(out, grids, unprojFactory, spacing) {
     if (v != null) cm = Math.max(-32767, Math.min(32767, cm)); else missing++;
     view.setInt16((r * w + c) * 2, cm, true);
   }
-  return { format: 'kartmap-terrain', version: 1, name: out.meta.name, origin: out.meta.origin,
-    minX: bb.minX, maxY: bb.maxY, spacing, width: w, height: h, base,
+  return { minX: bb.minX, maxY: bb.maxY, spacing, width: w, height: h,
     encoding: 'int16 little-endian, centimetres above base, row by row from the north-west corner (minX, maxY) going east then south; -32768 = no data',
-    source: DEM_SOURCE.name, licence: DEM_SOURCE.licence, attribution: DEM_SOURCE.attribution, missing, data: bytesToBase64(bytes) };
+    missing, data: bytesToBase64(bytes) };
 }
 
 // ======================================================================
@@ -1929,6 +1988,498 @@ function chooseSnapMethod(latlngs) {
   return routeLength(latlngs) / (latlngs.length - 1) < 150 ? 'match' : 'route';
 }
 // ======================================================================
+// v13: shop signs with made-up names, street name signs, smarter height guesses
+// ======================================================================
+// Shop signs never use a real shop's name or brand (Brandon's rule, to stay clear of trademarks).
+// Each shop gets a made-up, jokey name for what it sells, picked from the list for its type, the
+// same one every scan (chosen by its OSM id). Add more names freely; keep them generic.
+const SIGN_NAMES = {
+  cafe: ['Bean There', 'Brew Ha Ha', 'Mug Life', 'Espresso Yourself', 'Latte Da', 'Grounds for Joy', 'The Flat White Flats', 'Cup Of Joe-ey'],
+  chicken: ['Chicken BBQ', 'Cluck Yeah', 'Peri Nice', 'Fowl Play', 'Wing It', 'Rooster Booster'],
+  dessert: ['The Sweet Stack', 'Choc Shock', 'Sundae Funday', 'Sugar Rush', 'Cocoa Loco'],
+  ice_cream: ['Scoop There It Is', 'Brain Freeze', 'Sundae Funday', 'Cone Zone', 'Gelato Go Go'],
+  burger: ['Bun Intended', 'Burger Me', 'Patty Wagon', 'Big Bun Energy', 'Grill Seeker'],
+  pizza: ['Slice Slice Baby', 'Pizza the Action', 'Crust Me', 'Dough Ray Me'],
+  sushi: ['Roll Call', 'Sushi Do', 'Wasabi Me', 'Raw Deal Sushi'],
+  asian: ['Wok This Way', 'Noodle Doodle', 'Dumpling Darling', 'Bao Down'],
+  thai: ['Thai Me Up', 'Pad Thai-tanic', 'Thai Tanic', 'Basil Brush'],
+  indian: ['Curry On', 'Naan Stop', 'Tikka Look', 'Spice Spice Baby'],
+  mexican: ['Taco Bout It', 'Nacho Average', 'Burrito Bandito', 'Holy Guacamole'],
+  kebab: ['Doner Party', 'Kebab Babe', 'Wrap Battle', 'Spit Roast Express'],
+  seafood: ['The Battered Bits', 'Fin-tastic', 'Prawn Star', 'Oh My Cod', 'Hook Line & Dinner'],
+  bakery: ['Loaf Story', 'Rise and Grind', 'Bready Set Go', 'Knead To Know', 'Crumbs Up'],
+  bubble_tea: ['Bubble Trouble', 'Tea Rex', 'Tapioca Talk'],
+  juice: ['Juicy Lucy', 'Squeeze Me', 'Pulp Friction'],
+  donut: ['Hole Lotta Love', 'Glazed & Confused', 'Donut Worry'],
+  restaurant: ['Eat Street', 'The Hungry Ibis', 'Fork Yeah', 'Plate Expectations', 'Chew Chew'],
+  fast_food: ['Grab & Go Go', 'Snack Attack', 'Fast & Fryous', 'Quick Bites'],
+  pub: ['The Thirsty Ibis', 'The Tired Koala', 'Ute & Barrel', 'The Rusty Ute', 'The Cranky Cockatoo'],
+  bar: ['Bar None', 'The Tipsy Turtle', 'Raise the Bar', 'Shaken Not Stirred'],
+  supermarket: ['Food Barn', 'Stuff Mart', 'Big Trolley', 'Aisle Be Back'],
+  convenience: ['Open Late Mart', 'Milk & More', 'Corner Stop', 'Snack Shack'],
+  alcohol: ['Grog Shop', 'Cheers Mate Liquor', 'Bottle Rocket'],
+  clothes: ['Threads', 'Fit Happens', 'Frock Star', 'Wear It Is'],
+  shoes: ['Sole Mates', 'Heel Good', 'Shoe-In'],
+  hairdresser: ['Curl Up & Dye', 'Shear Genius', 'Fade to Grey', 'Hair Today', 'Mane Event'],
+  beauty: ['Nail It', 'Glow Up', 'Polished'],
+  pharmacy: ['Pill Hill', 'The Remedy Shed', 'Feel Better Chemist'],
+  books: ['Paper Tigers', 'Spine Time', 'Novel Idea'],
+  newsagent: ['Paper Round', 'News Flash'],
+  electronics: ['Plug Ugly', 'Phone Zone', 'Gadget Garage', 'Charge Me Up'],
+  jewelry: ['Bling Thing', 'Shiny Things', 'Ring Ring'],
+  florist: ['Petal Pushers', 'Bloom Town', 'Stem Cell'],
+  butcher: ['Meat Me Here', 'Chop Shop', 'Snag City'],
+  bank: ['Big Coin Bank', 'Piggy Bank Co.', 'Money Box'],
+  post_office: ['Mail Snail', 'Stamp Camp'],
+  gym: ['Sweat Shed', 'Pump Station', 'Flex Appeal'],
+  hardware: ['The Shed Shop', 'Spanners & Things', 'Drill Seekers'],
+  pet: ['Pawsome', 'Fur Real', 'Wag Wag'],
+  optician: ['Eye Spy', 'Specs Appeal'],
+  dentist: ['Drill Hill', 'Tooth Hurty'],
+  doctor: ['Feel Better Clinic', 'Say Aah'],
+  car: ['Spanner Bros', 'Brake Point', 'Wheel Deal'],
+  fuel: ['Gas Guzzlers', 'Fill Er Up', 'Petrol Head'],
+  laundry: ['Spin City', 'Suds Up', 'Wash & Go'],
+  toys: ['Toy Box', 'Play Day', 'Fun Stuff'],
+  sports: ['Game On', 'Good Sport', 'Kick Off'],
+  music: ['Note Worthy', 'Rock Shop', 'Treble Maker'],
+  furniture: ['Sit Happens', 'Couch Potato', 'Table Manners'],
+  travel: ['Away We Go', 'Escape Hatch'],
+  tattoo: ['Ink Spot', 'Skin Deep'],
+  real_estate: ['House Hunters', 'Sold Out'],
+  shop: ['Corner Shop', 'Bits & Bobs', 'Odds & Ends', 'Stuff & Things', 'The Shop Shop']
+};
+const CUISINE_SIGNS = {
+  chicken: 'chicken', portuguese: 'chicken', peri_peri: 'chicken', wings: 'chicken', fried_chicken: 'chicken',
+  chocolate: 'dessert', dessert: 'dessert', cake: 'dessert', crepe: 'dessert', waffle: 'dessert', pancake: 'dessert',
+  ice_cream: 'ice_cream', frozen_yogurt: 'ice_cream', gelato: 'ice_cream',
+  burger: 'burger', american: 'burger', pizza: 'pizza', italian: 'pizza', sushi: 'sushi', japanese: 'sushi', ramen: 'asian',
+  chinese: 'asian', asian: 'asian', vietnamese: 'asian', korean: 'asian', dumpling: 'asian', noodle: 'asian', malaysian: 'asian',
+  thai: 'thai', indian: 'indian', nepalese: 'indian', curry: 'indian', mexican: 'mexican', tex_mex: 'mexican', burrito: 'mexican',
+  kebab: 'kebab', turkish: 'kebab', lebanese: 'kebab', greek: 'kebab', middle_eastern: 'kebab',
+  seafood: 'seafood', fish: 'seafood', fish_and_chips: 'seafood', bakery: 'bakery', pie: 'bakery',
+  bubble_tea: 'bubble_tea', juice: 'juice', smoothie: 'juice', donut: 'donut', coffee_shop: 'cafe', coffee: 'cafe'
+};
+const SHOP_SIGNS = {
+  supermarket: 'supermarket', convenience: 'convenience', alcohol: 'alcohol', wine: 'alcohol', beverages: 'alcohol',
+  clothes: 'clothes', fashion: 'clothes', boutique: 'clothes', shoes: 'shoes', hairdresser: 'hairdresser', barber: 'hairdresser',
+  beauty: 'beauty', cosmetics: 'beauty', chemist: 'pharmacy', books: 'books', newsagent: 'newsagent', stationery: 'newsagent',
+  electronics: 'electronics', mobile_phone: 'electronics', computer: 'electronics', jewelry: 'jewelry', florist: 'florist',
+  butcher: 'butcher', bakery: 'bakery', pastry: 'bakery', confectionery: 'dessert', chocolate: 'dessert', ice_cream: 'ice_cream',
+  hardware: 'hardware', doityourself: 'hardware', pet: 'pet', optician: 'optician', car_repair: 'car', car: 'car', tyres: 'car',
+  laundry: 'laundry', dry_cleaning: 'laundry', toys: 'toys', sports: 'sports', bicycle: 'sports', outdoor: 'sports',
+  musical_instrument: 'music', music: 'music', furniture: 'furniture', interior_decoration: 'furniture', travel_agency: 'travel',
+  tattoo: 'tattoo', estate_agent: 'real_estate', coffee: 'cafe', tea: 'bubble_tea', deli: 'restaurant', seafood: 'seafood'
+};
+const AMENITY_SIGNS = {
+  cafe: 'cafe', restaurant: 'restaurant', fast_food: 'fast_food', ice_cream: 'ice_cream', pub: 'pub', bar: 'bar', biergarten: 'pub',
+  bank: 'bank', pharmacy: 'pharmacy', post_office: 'post_office', dentist: 'dentist', doctors: 'doctor', clinic: 'doctor', fuel: 'fuel', food_court: 'restaurant'
+};
+// The sign type for a shop, eatery or service (or null): cuisine first, so a chicken shop isn't just "restaurant".
+function shopKind(t) {
+  const isFood = /^(cafe|restaurant|fast_food|ice_cream|food_court)$/.test(t.amenity || '') || t.shop === 'bakery' || t.shop === 'coffee';
+  if (isFood && t.cuisine) for (const c of String(t.cuisine).toLowerCase().split(/[;,]\s*/)) if (CUISINE_SIGNS[c]) return CUISINE_SIGNS[c];
+  if (t.amenity && AMENITY_SIGNS[t.amenity]) return AMENITY_SIGNS[t.amenity];
+  if (t.leisure === 'fitness_centre' || t.leisure === 'sports_centre') return 'gym';
+  if (t.shop && t.shop !== 'vacant' && t.shop !== 'no') return SHOP_SIGNS[t.shop] || 'shop';
+  return null;
+}
+// The name kept in the file: real shop and brand names are swapped for the shop's made-up sign
+// name, and malls / shopping strips lose theirs (often a brand too). Streets, parks, rivers keep theirs.
+function safeName(t, id) {
+  if (!t.name) return undefined;
+  const sk = shopKind(t);
+  if (sk) return funnySign(sk, id);
+  if (t.brand || t['brand:wikidata'] || t.shop || /^(retail|commercial)$/.test(t.landuse || '') || /^(retail|commercial|supermarket|kiosk)$/.test(t.building || '')) return undefined;
+  return t.name;
+}
+// v13: a plain .zip (files stored, not compressed) from [{ name, data: Uint8Array }], so the
+// "Export for game" folder downloads as one file. CRC-32 and headers by the zip spec.
+const CRC_TABLE = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+function crc32(bytes) { let c = 0xffffffff; for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; }
+function makeZip(files, when) {
+  const d = when || new Date(), enc = new TextEncoder();
+  const time = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1), date = ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
+  const locals = [], centrals = []; let offset = 0;
+  for (const f of files) {
+    const name = enc.encode(f.name), data = f.data, crc = crc32(data);
+    const lh = new DataView(new ArrayBuffer(30));
+    lh.setUint32(0, 0x04034b50, true); lh.setUint16(4, 20, true); lh.setUint16(6, 0x0800, true); lh.setUint16(8, 0, true);
+    lh.setUint16(10, time, true); lh.setUint16(12, date, true); lh.setUint32(14, crc, true); lh.setUint32(18, data.length, true); lh.setUint32(22, data.length, true);
+    lh.setUint16(26, name.length, true); lh.setUint16(28, 0, true);
+    const ch = new DataView(new ArrayBuffer(46));
+    ch.setUint32(0, 0x02014b50, true); ch.setUint16(4, 20, true); ch.setUint16(6, 20, true); ch.setUint16(8, 0x0800, true); ch.setUint16(10, 0, true);
+    ch.setUint16(12, time, true); ch.setUint16(14, date, true); ch.setUint32(16, crc, true); ch.setUint32(20, data.length, true); ch.setUint32(24, data.length, true);
+    ch.setUint16(28, name.length, true); ch.setUint32(42, offset, true);
+    locals.push(new Uint8Array(lh.buffer), name, data); centrals.push(new Uint8Array(ch.buffer), name);
+    offset += 30 + name.length + data.length;
+  }
+  const csize = centrals.reduce((n, a) => n + a.length, 0), end = new DataView(new ArrayBuffer(22));
+  end.setUint32(0, 0x06054b50, true); end.setUint16(8, files.length, true); end.setUint16(10, files.length, true); end.setUint32(12, csize, true); end.setUint32(16, offset, true);
+  const parts = [...locals, ...centrals, new Uint8Array(end.buffer)], out = new Uint8Array(parts.reduce((n, a) => n + a.length, 0));
+  let at = 0; for (const a of parts) { out.set(a, at); at += a.length; }
+  return out;
+}
+// The folder name the game lists the track under: lowercase, safe for any file system.
+function gameFolderName(name) { return 'scan_' + ((name || 'route').replace(/[^a-z0-9_-]+/gi, '_').replace(/^_+|_+$/g, '').toLowerCase() || 'route'); }
+// v13: the error log. What a technical message means in plain words: [what went wrong, what to try].
+const ERROR_EXPLAIN = [
+  [/Failed to fetch|NetworkError|Load failed|couldn't reach|offline|blocked/i, "Couldn't reach one of the free map servers (no internet, a blocker, or the server is down).", 'Check the internet connection, wait a minute and try again.'],
+  [/429|Too Many Requests|rate limit|busy|504|timeout|timed out|Gateway/i, 'The free map server is busy right now.', 'Wait a minute and try again, or scan a smaller radius.'],
+  [/QuotaExceeded|storage|quota/i, "The browser's storage for saved tracks is full.", 'Back up your saved tracks to a file, then delete some old ones.'],
+  [/WebGL|webgl|context lost|THREE/i, "The 3D preview can't run on this browser or graphics card.", 'Try another browser, or skip the 3D preview: exports still work.'],
+  [/JSON|Unexpected token|not a kartmap|not a track|backup|parse/i, "A file couldn't be read: it's damaged, not from the scanner, or was edited by hand with a typo.", 'Load a file exported by the scanner, or export it again.'],
+  [/memory|allocation|Maximum call stack|too large|Invalid array length/i, 'The scan was too big for the browser.', 'Use a smaller scan radius or a shorter route.'],
+  [/Draw a route|at least two|no route|too short/i, "There's no route to scan yet.", 'Draw the route on the map first (✎ Pen, hold and drag).'],
+  [/elevation|height|LiDAR|DEM/i, "Ground heights couldn't be fetched.", 'Try again later; the rest of the scan is fine without heights.'],
+  [/aerial|photo|imagery|colour/i, "The aerial photos couldn't be fetched.", 'Try again later; colours are optional.']
+];
+function explainError(text) {
+  for (const [re, what, tryIt] of ERROR_EXPLAIN) if (re.test(text)) return [what, tryIt];
+  return ['Something unexpected went wrong in the scanner.', 'Copy this log and send it to Claude so it can be fixed.'];
+}
+function errorLogText(entries, meta) {
+  const lines = ['Kart Map Scanner error log' + (meta ? ' (' + meta + ')' : ''), ''];
+  for (const e of entries) {
+    lines.push(`[${e.time}] ${e.kind === 'warn' ? 'WARNING' : 'ERROR'}: ${e.what}${e.count > 1 ? ` (x${e.count})` : ''}`, `    Try: ${e.tryIt}`, `    Message: ${e.message}`);
+    if (e.detail) lines.push(`    Detail: ${e.detail}`);
+    lines.push('');
+  }
+  return lines.join('\n');
+}
+function signNames() { return SIGN_NAMES; }
+function signHash(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; }
+function funnySign(type, seed) { const list = SIGN_NAMES[type] || SIGN_NAMES.shop; return list[signHash(String(seed)) % list.length]; }
+// Street names shortened for a small sign: "Grey Street" → "GREY ST".
+const STREET_ABBR = { street: 'ST', road: 'RD', avenue: 'AVE', drive: 'DR', parade: 'PDE', terrace: 'TCE', boulevard: 'BVD', lane: 'LN', place: 'PL', court: 'CT', crescent: 'CRES', highway: 'HWY', close: 'CL', way: 'WAY', bridge: 'BRIDGE' };
+function streetSignText(name) {
+  const w = String(name).trim().split(/\s+/);
+  const last = w[w.length - 1].toLowerCase();
+  if (w.length > 1 && STREET_ABBR[last]) w[w.length - 1] = STREET_ABBR[last];
+  return w.join(' ').toUpperCase().slice(0, 24);
+}
+// Street name signs where a named street meets or crosses the track (or the track itself turns
+// into a named street): one sign per street per 80 m, on a pole just off the track edge.
+function streetSigns(out) {
+  const line = out.route.centerline && out.route.centerline.points && out.route.centerline.points.length > 2 ? out.route.centerline.points : out.route.points;
+  if (!line || line.length < 2) return [];
+  const half = (out.route.width || 8) / 2, idx = makeTrackIndex(line), signs = [];
+  const NAMED = /^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|service|pedestrian|busway|footway|cycleway|path)(_link)?$/;   // named paths too: promenades get signs
+  for (const r of out.roads || []) {
+    if (!r.name || !NAMED.test(r.kind) || r.tunnel || r.bridge) continue;
+    const pts = r.points, dists = pts.map(p => idx.dist([p]));
+    for (let k = 0; k < pts.length; k++) {
+      if (dists[k] > half + 4) continue;   // a point of this street on the track: is it a junction?
+      for (const j of [k - 1, k + 1]) {
+        if (j < 0 || j >= pts.length || dists[j] < half + 8) continue;   // this way leads off the track: a side street
+        // the sign stands on the corner: a little way up the side street, beside it
+        let dx = pts[j][0] - pts[k][0], dy = pts[j][1] - pts[k][1]; const L = Math.hypot(dx, dy) || 1; dx /= L; dy /= L;
+        const back = Math.min(L, half + 3), side = (r.width || 6) / 2 + 1.2;
+        const pos = [round2(pts[k][0] + dx * back - dy * side), round2(pts[k][1] + dy * back + dx * side)];
+        if (idx.dist([pos]) < half + 1.5) continue;
+        const text = streetSignText(r.name);
+        if (signs.some(s => s.text === text && Math.hypot(s.pos[0] - pos[0], s.pos[1] - pos[1]) < 80)) continue;
+        signs.push({ text, pos, street: r.id });
+      }
+    }
+  }
+  return signs.slice(0, 60);
+}
+// Smarter guesses for buildings still on a plain default height after the neighbour step: what
+// sells there (shops: two storeys), the land use around it (houses in residential streets,
+// sheds in industrial ones), similar-sized measured buildings nearby, then its size. Marked
+// heightSource "guess" with heightGuess saying why, so the game uses them (it re-guesses only
+// "default"). A little variety per building keeps a street from being one flat line.
+function guessHeights(res, hints) {
+  const measured = h => h === 'osm' || h === 'levels' || h === 'lidar' || h === 'overture';
+  const zones = (res.areas || []).filter(a => /^(residential|commercial|retail|industrial)$/.test(a.kind));
+  const zoneAt = c => { for (const z of zones) if (pointInPoly(c, z.polygon) && !(z.holes || []).some(h => pointInPoly(c, h))) return z.kind; return null; };
+  const known = res.buildings.filter(b => !b.part && measured(b.heightSource)).map(b => ({ c: centroid(b.footprint), a: Math.abs(polygonArea(b.footprint)), h: b.height }));
+  const HOUSES = /^(house|detached|semidetached_house|terrace|bungalow|residential)$/;
+  let n = 0;
+  for (const b of res.buildings) {
+    if (b.part || b.heightSource !== 'default') continue;
+    const c = centroid(b.footprint), area = Math.abs(polygonArea(b.footprint)), hint = hints.get(b.id) || {};
+    const vary = (signHash(b.id) % 3) * 0.75;   // 0, 0.75 or 1.5 m
+    let h = null, why = null;
+    if (hint.shop || b.shops) { h = area > 600 ? 8 : 7; why = 'shop'; }
+    if (h == null) {
+      const sim = known.filter(k => Math.hypot(k.c[0] - c[0], k.c[1] - c[1]) <= 100 && k.a < area * 3 && k.a > area / 3).map(k => k.h).sort((x, y) => x - y);
+      if (sim.length >= 4) { h = sim[Math.floor(sim.length / 2)]; why = 'similar buildings nearby'; }
+    }
+    if (h == null) {
+      const zone = zoneAt(c);
+      if ((HOUSES.test(b.kind) || b.kind === 'yes') && area < 300 && (zone === 'residential' || hint.addr || HOUSES.test(b.kind))) { h = area < 40 ? 3 : 5 + vary; why = 'house'; }
+      else if (zone === 'industrial') { h = area > 500 ? 8 + vary : 5 + vary; why = 'industrial area'; }
+      else if (zone === 'commercial' || zone === 'retail') { h = area < 400 ? 8 + vary : 12 + vary * 2; why = zone + ' area'; }
+    }
+    if (h == null && b.kind === 'yes') { h = area < 30 ? 3 : area < 200 ? 5 + vary : area < 1000 ? 8 + vary : 11 + vary * 2; why = 'size'; }
+    if (h == null) continue;   // a kind with its own default (apartments, school…): keep it
+    b.height = round2(h); b.heightSource = 'guess'; b.heightGuess = why; n++;
+  }
+  return n;
+}
+// Shops (from building tags, or shop nodes inside or right beside a building) on their building:
+// b.shops = [{ type, sign }] with a made-up sign name. At most 3 per building.
+function attachShops(res, spots) {
+  const wholes = res.buildings.filter(b => !b.part && !b.hasParts || b.part);
+  let n = 0;
+  for (const s of spots) {
+    let host = s.building ? res.buildings.find(b => b.id === s.building) : wholes.find(b => pointInPoly(s.pos, b.footprint));
+    if (!host) {
+      let best = 8;
+      for (const b of wholes) { for (let i = 0; i < b.footprint.length; i++) { const d = distPointSeg(s.pos, b.footprint[i], b.footprint[(i + 1) % b.footprint.length]); if (d < best) { best = d; host = b; } } }
+    }
+    if (!host) continue;
+    host.shops = host.shops || [];
+    if (host.shops.length >= 3 || host.shops.some(x => x.type === s.type)) continue;
+    host.shops.push({ type: s.type, sign: funnySign(s.type, s.id) });
+    n++;
+  }
+  return n;
+}
+// ======================================================================
+// v13: what the game (brisbane-kart) will build, so a scan can be checked before it is played.
+// These copy the game's own numbers (game/scripts/kartmap.gd and kartmap_scenery.gd); if the
+// game changes them, change them here too.
+// ======================================================================
+const GAME = { step: 3, minSmooth: 12, clear: 1.5, near: 50, propClear: 1, kartSpeed: 30 };
+// The line the game drives: the scanner's centerline (else the raw points), closed into a loop,
+// every 3 m, corners rounded by averaging over at least 12 m each side, twice. [x, y, h] each.
+function gameLine(out) {
+  const r = out.route || {}, cl = r.centerline && Array.isArray(r.centerline.points) && r.centerline.points.length >= 3 ? r.centerline : null;
+  const src = cl ? cl.points : (r.points || []), hs = cl ? cl.elevation : r.elevation;
+  const width = r.width || 12;
+  let pts = [];
+  src.forEach((p, i) => {
+    const v = [p[0], p[1], Array.isArray(hs) && hs.length === src.length ? hs[i] : 0];
+    if (!pts.length || Math.hypot(v[0] - pts[pts.length - 1][0], v[1] - pts[pts.length - 1][1]) > 0.5) pts.push(v);
+  });
+  if (pts.length > 2 && Math.hypot(pts[0][0] - pts[pts.length - 1][0], pts[0][1] - pts[pts.length - 1][1]) < 0.5) pts.pop();
+  if (pts.length < 3) return { pts, width, step: GAME.step };
+  const resample = (p, step) => {
+    const n = p.length; let total = 0;
+    for (let i = 0; i < n; i++) total += Math.hypot(p[(i + 1) % n][0] - p[i][0], p[(i + 1) % n][1] - p[i][1]);
+    const count = Math.max(3, Math.round(total / step)), spacing = total / count, o = [];
+    let seg = 0, segStart = 0, segLen = Math.hypot(p[1 % n][0] - p[0][0], p[1 % n][1] - p[0][1]);
+    for (let k = 0; k < count; k++) {
+      const s = k * spacing;
+      while (s > segStart + segLen && seg < n - 1) { segStart += segLen; seg++; segLen = Math.hypot(p[(seg + 1) % n][0] - p[seg][0], p[(seg + 1) % n][1] - p[seg][1]); }
+      const t = segLen < 1e-4 ? 0 : Math.max(0, Math.min(1, (s - segStart) / segLen)), a = p[seg], b = p[(seg + 1) % n];
+      o.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]);
+    }
+    return o;
+  };
+  const average = (p, reach) => p.map((_, i) => {
+    const s = [0, 0, 0];
+    for (let k = -reach; k <= reach; k++) { const q = p[((i + k) % p.length + p.length) % p.length]; s[0] += q[0]; s[1] += q[1]; s[2] += q[2]; }
+    return s.map(v => v / (2 * reach + 1));
+  });
+  let even = resample(pts, GAME.step);
+  const reach = Math.ceil(Math.max(GAME.minSmooth, width) / GAME.step);
+  for (let k = 0; k < 2; k++) even = average(even, reach);
+  return { pts: resample(even, GAME.step), width, step: GAME.step };
+}
+// Distance (m) from p to the game's road edge (negative = on the road). `g` from gameLine.
+function gameEdgeDistance(g, p) {
+  let best = Infinity;
+  const n = g.pts.length;
+  for (let i = 0; i < n; i++) { const d = distPointSeg(p, g.pts[i], g.pts[(i + 1) % n]); if (d < best) best = d; }
+  return best - g.width / 2;
+}
+function gamePolygonEdgeDistance(g, ring, reach = Infinity) {
+  const n = g.pts.length;
+  let best = Infinity;
+  const lo = [Infinity, Infinity], hi = [-Infinity, -Infinity];
+  for (const q of ring) { lo[0] = Math.min(lo[0], q[0]); lo[1] = Math.min(lo[1], q[1]); hi[0] = Math.max(hi[0], q[0]); hi[1] = Math.max(hi[1], q[1]); }
+  const grow = Math.min(reach, 1e6) + g.width;
+  for (let i = 0; i < n; i++) {
+    const c = g.pts[i];
+    if (c[0] < lo[0] - grow || c[0] > hi[0] + grow || c[1] < lo[1] - grow || c[1] > hi[1] + grow) continue;
+    if (pointInRing(c, ring)) return -g.width / 2 - 1;
+    for (let e = 0; e < ring.length - 1; e++) { const d = distPointSeg(c, ring[e], ring[e + 1]); if (d < best) best = d; }
+  }
+  return best - g.width / 2;
+}
+function pointInRing(p, ring) {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const a = ring[i], b = ring[j];
+    if ((a[1] > p[1]) !== (b[1] > p[1]) && p[0] < (b[0] - a[0]) * (p[1] - a[1]) / ((b[1] - a[1]) || 1e-9) + a[0]) inside = !inside;
+  }
+  return inside;
+}
+// What the game leaves out or simplifies, by id: buildings within 1.5 m of its road edge,
+// trees and props standing on the road, street furniture more than 50 m out; far buildings
+// (over 50 m from the road) are plain boxes with no windows or collision.
+function gameDrops(out, g) {
+  g = g || gameLine(out);
+  const buildings = new Set(), points = new Set(), far = new Set();
+  const lo = [Infinity, Infinity], hi = [-Infinity, -Infinity];
+  for (const p of g.pts) { lo[0] = Math.min(lo[0], p[0]); lo[1] = Math.min(lo[1], p[1]); hi[0] = Math.max(hi[0], p[0]); hi[1] = Math.max(hi[1], p[1]); }
+  const reach = GAME.near + g.width;
+  const nearBox = q => q[0] > lo[0] - reach && q[0] < hi[0] + reach && q[1] > lo[1] - reach && q[1] < hi[1] + reach;
+  for (const b of out.buildings || []) {
+    if (b.hasParts || !Array.isArray(b.footprint) || b.footprint.length < 3) continue;
+    if (/^(roof|canopy|carport|shelter|pergola)$/.test(b.kind || '') && !b.part) continue;   // roofs on posts: karts drive under
+    const c = centroid(b.footprint);
+    if (!nearBox(c)) { far.add(b.id); continue; }
+    const d = gamePolygonEdgeDistance(g, b.footprint, GAME.near + 5);
+    if (d < GAME.clear) buildings.add(b.id); else if (d > GAME.near) far.add(b.id);
+  }
+  for (const p of out.points || []) {
+    if (!Array.isArray(p.pos)) continue;
+    if (!nearBox(p.pos)) { if (p.kind !== 'tree') points.add(p.id); continue; }
+    const d = gameEdgeDistance(g, p.pos);
+    if (d < GAME.propClear || (p.kind !== 'tree' && d > GAME.near)) points.add(p.id);
+  }
+  return { buildings, points, far };
+}
+// "Will it race well?": problems the game will have with this route, worst first.
+// Each: { level: 'red' | 'amber', label, xy, at } (at = metres along the game's lap).
+// Suggested item boxes and boost pads, in metres along the game's line (gameLength says how long
+// that line was, so the game can scale if its own comes out a little different). Boost pads go
+// just out of the corner before the longest straights, so they launch karts down them; item box
+// rows sit on straight bits near evenly spaced spots (about one row per 250 m), away from the
+// start line, the pads and steep bits.
+function gameSpots(out, g) {
+  g = g || gameLine(out);
+  const p = g.pts, n = p.length, step = g.step;
+  if (n < 60) return {};
+  const length = n * step, turn = new Array(n), bent = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const a = p[(i - 1 + n) % n], b = p[i], c = p[(i + 1) % n];
+    let d = Math.atan2(c[1] - b[1], c[0] - b[0]) - Math.atan2(b[1] - a[1], b[0] - a[0]);
+    while (d > Math.PI) d -= 2 * Math.PI; while (d < -Math.PI) d += 2 * Math.PI;
+    turn[i] = Math.abs(d);
+  }
+  for (let i = 0; i < n; i++) { let t = 0; for (let k = -5; k <= 5; k++) t += turn[(i + k + n) % n]; bent[i] = t > 0.35; }   // over 20° within 15 m either side
+  const grade = i => { const a = p[i], b = p[(i + 7) % n]; return Math.abs(b[2] - a[2]) / 21; };
+  const okS = s => s > 50 && s < length - 30;   // the game's own rule: not on the start line
+  // straight runs (going round the loop once, starting from a bend so none is split)
+  const first = bent.indexOf(true), runs = [];
+  if (first < 0) runs.push({ from: 0, len: n });
+  else for (let k = 0, from = -1; k <= n; k++) {
+    const i = (first + k) % n, straight = k < n && !bent[i];
+    if (straight && from < 0) from = i;
+    if (!straight && from >= 0) { runs.push({ from, len: (i - from + n) % n || n }); from = -1; }
+  }
+  const pads = [];
+  for (const r of runs.slice().sort((x, y) => y.len - x.len)) {
+    if (pads.length >= 2 || r.len * step < 60) break;
+    for (let k = 5; k < r.len / 3; k++) {   // just out of the corner (later if that is the start line)
+      const s = Math.round(((r.from + k) % n) * step);
+      if (!okS(s)) continue;
+      if (pads.every(q => Math.min(Math.abs(q.s - s), length - Math.abs(q.s - s)) > 150)) pads.push({ s, lateral: 0 });
+      break;
+    }
+  }
+  const rows = Math.max(3, Math.min(6, Math.round(length / 250))), count = (g.width || 12) >= 10 ? 4 : 3, boxes = [];
+  for (let r = 0; r < rows; r++) {
+    const ideal = length * (0.15 + 0.8 * r / rows);
+    let best = null;
+    for (let s = ideal - 60; s <= ideal + 60; s += step) {
+      const ss = ((s % length) + length) % length, i = Math.round(ss / step) % n;
+      if (!okS(ss) || pads.some(q => Math.abs(q.s - ss) < 25) || boxes.some(b => Math.abs(b.s - ss) < 80)) continue;
+      const score = (bent[i] ? 0 : 2) - (grade(i) > 0.08 ? 1 : 0) - Math.abs(s - ideal) / 60;
+      if (!best || score > best.score) best = { s: Math.round(ss), score };
+    }
+    if (best) boxes.push({ s: best.s, count });
+  }
+  return { itemBoxes: boxes.sort((a, b) => a.s - b.s), boostPads: pads.sort((a, b) => a.s - b.s), gameLength: Math.round(length) };
+}
+function raceCheck(out, g) {
+  g = g || gameLine(out);
+  const pts = g.pts, n = pts.length, step = g.step, w = g.width, probs = [];
+  if (n < 10) return { problems: [{ level: 'red', label: 'The route is too short to race', xy: (out.route.points || [[0, 0]])[0], at: 0 }], lap: 0, minRadius: null };
+  const lap = n * step;
+  const at = i => Math.round(i * step);
+  // 1. tight bends: radius through samples 4 apart (24 m of road), so a wobble in the line
+  // doesn't count, only real turns (more than 45 degrees over those 24 m)
+  const radius = i => {
+    const a = pts[(i - 4 + n) % n], b = pts[i], c = pts[(i + 4) % n];
+    const turn = Math.abs(Math.atan2((b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0]), (b[0] - a[0]) * (c[0] - b[0]) + (b[1] - a[1]) * (c[1] - b[1])));
+    if (turn < Math.PI / 4) return Infinity;
+    const ab = Math.hypot(b[0] - a[0], b[1] - a[1]), bc = Math.hypot(c[0] - b[0], c[1] - b[1]), ca = Math.hypot(a[0] - c[0], a[1] - c[1]);
+    const cross = Math.abs((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]));
+    return cross < 1e-6 ? Infinity : ab * bc * ca / (2 * cross);
+  };
+  const radii = pts.map((_, i) => radius(i));
+  const runs = (flag, minLen) => {   // runs of consecutive flagged samples around the loop: [start, length]
+    const res = []; let first = flag.findIndex(f => !f);
+    if (first < 0) return flag.length ? [[0, n]] : [];
+    for (let k = 0; k < n;) {
+      const i = (first + k) % n;
+      if (!flag[i]) { k++; continue; }
+      let len = 0; while (len < n && flag[(first + k + len) % n]) len++;
+      if (len >= (minLen || 1)) res.push([i, len]);
+      k += len;
+    }
+    return res;
+  };
+  const minR = Math.min(...radii);
+  for (const [s, len] of runs(radii.map(r => r < 10), 1)) {
+    let worst = s; for (let k = 0; k < len; k++) if (radii[(s + k) % n] < radii[worst]) worst = (s + k) % n;
+    const r = radii[worst];
+    probs.push({ level: r < 6 ? 'red' : 'amber', label: `${r < 6 ? 'Hairpin too tight to drive' : 'Very tight bend'} (radius ${Math.round(r)} m${r < 6 ? '' : ', karts slow right down'})`, xy: pts[worst].slice(0, 2), at: at(worst) });
+  }
+  // 2. corners the game rounds off the street: its road runs well away from the scanner's line
+  const src = out.route.centerline && out.route.centerline.points && out.route.centerline.points.length > 2 ? out.route.centerline.points : out.route.points;
+  const off = pts.map(p => { let b = Infinity; for (let i = 0; i < src.length - 1; i++) b = Math.min(b, distPointSeg(p, src[i], src[i + 1])); return b; });
+  for (const [s, len] of runs(off.map(d => d > w / 2 + 1), 2)) {
+    let worst = s; for (let k = 0; k < len; k++) if (off[(s + k) % n] > off[worst]) worst = (s + k) % n;
+    probs.push({ level: 'amber', label: `The game rounds this corner, so its road cuts ${Math.round(off[worst])} m off the street (buildings there are left out)`, xy: pts[worst].slice(0, 2), at: at(worst) });
+  }
+  // 3. crossings and doubling back at street level
+  const gap = Math.ceil((w * 2 + 30) / step);
+  const loopGap = (i, j) => { const d = Math.abs(i - j); return Math.min(d, n - d); };
+  const segX = (a, b, c, d) => {
+    const d1 = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]), d2 = (b[0] - a[0]) * (d[1] - a[1]) - (b[1] - a[1]) * (d[0] - a[0]);
+    const d3 = (d[0] - c[0]) * (a[1] - c[1]) - (d[1] - c[1]) * (a[0] - c[0]), d4 = (d[0] - c[0]) * (b[1] - c[1]) - (d[1] - c[1]) * (b[0] - c[0]);
+    return d1 * d2 < 0 && d3 * d4 < 0;
+  };
+  const crossings = [], close = new Array(n).fill(false);
+  const cell = Math.max(w * 2, 20), grid = new Map(), key = (x, y) => Math.floor(x / cell) + ',' + Math.floor(y / cell);
+  pts.forEach((p, i) => { const k = key(p[0], p[1]); if (!grid.has(k)) grid.set(k, []); grid.get(k).push(i); });
+  for (let i = 0; i < n; i++) {
+    const p = pts[i], cx = Math.floor(p[0] / cell), cy = Math.floor(p[1] / cell);
+    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (const j of grid.get((cx + dx) + ',' + (cy + dy)) || []) {
+      if (j <= i || loopGap(i, j) < gap) continue;
+      const q = pts[j];
+      if (Math.abs(p[2] - q[2]) >= 5) continue;   // one passes over the other (a bridge): fine
+      if (segX(p, pts[(i + 1) % n], q, pts[(j + 1) % n])) crossings.push(i, j);
+      else if (Math.hypot(p[0] - q[0], p[1] - q[1]) < w + 2) close[i] = true;   // flagged on the first pass along the street only
+    }
+  }
+  const crossAt = [];
+  for (let c = 0; c < crossings.length; c += 2) if (!crossAt.some(k => loopGap(crossings[c], k) < gap)) crossAt.push(crossings[c]);
+  for (const i of crossAt) probs.push({ level: 'red', label: 'The route crosses itself here at street level: the game puts walls across the crossing', xy: pts[i].slice(0, 2), at: at(i) });
+  for (const [s, len] of runs(close, Math.ceil(15 / step))) {
+    const mid = (s + Math.floor(len / 2)) % n;
+    let nearCrossing = false;
+    for (let k = 0; k < len && !nearCrossing; k++) nearCrossing = crossings.some(c => loopGap((s + k) % n, c) < gap);
+    if (nearCrossing) continue;
+    probs.push({ level: 'red', label: `The route runs back along the same street for ${Math.round(len * step)} m: both directions' walls overlap`, xy: pts[mid].slice(0, 2), at: at(mid) });
+  }
+  // 4. hills too steep for karts (grade over 20 m)
+  const k20 = Math.max(1, Math.round(20 / step));
+  let steep = { grade: 0, i: 0 };
+  for (let i = 0; i < n; i++) { const gr = (pts[(i + k20) % n][2] - pts[i][2]) / (k20 * step) * 100; if (Math.abs(gr) > Math.abs(steep.grade)) steep = { grade: gr, i }; }
+  if (Math.abs(steep.grade) > 12) probs.push({ level: Math.abs(steep.grade) > 20 ? 'red' : 'amber', label: `Steep ${steep.grade > 0 ? 'climb' : 'drop'}: ${Math.round(Math.abs(steep.grade))}% (the game's own hill tracks stay under 12%; lower its height_scale if karts struggle)`, xy: pts[steep.i].slice(0, 2), at: at(steep.i) });
+  // 5. width, lap length, open routes
+  if (w < 6) probs.push({ level: 'amber', label: `Narrow track (${w} m): six karts will bump a lot; 8 m or more races better`, xy: pts[0].slice(0, 2), at: 0 });
+  const secs = Math.round(lap / GAME.kartSpeed);
+  if (lap < 450) probs.push({ level: 'amber', label: `Short lap: ${Math.round(lap)} m (about ${secs} s a lap)`, xy: pts[0].slice(0, 2), at: 0 });
+  if (lap > 4000) probs.push({ level: 'amber', label: `Long lap: ${(lap / 1000).toFixed(1)} km (about ${Math.round(secs / 60)} min a lap)`, xy: pts[0].slice(0, 2), at: 0 });
+  const rp = out.route.points || [];
+  if (!out.route.closed && rp.length > 1) {
+    const back = Math.hypot(rp[0][0] - rp[rp.length - 1][0], rp[0][1] - rp[rp.length - 1][1]);
+    if (back > 30) probs.push({ level: 'amber', label: `Open route: the game joins the end back to the start with a ${Math.round(back)} m straight line, which may cut through buildings. Tick Loop to plan the way back`, xy: rp[rp.length - 1], at: Math.round(lap - back) });
+  }
+  probs.sort((a, b) => (a.level === b.level ? a.at - b.at : a.level === 'red' ? -1 : 1));
+  return { problems: probs, lap: Math.round(lap), seconds: secs, minRadius: Math.round(minR), steepest: Math.round(steep.grade * 10) / 10 };
+}
+// ======================================================================
 // PURE-END
 // ======================================================================
 
@@ -2032,6 +2583,7 @@ const routeLine = L.polyline([], { color: '#e63946', weight: 5, interactive: fal
 const wpLayer = L.layerGroup().addTo(map);
 
 function setStatus(msg, kind) {
+  if (kind === 'err') logError(kind, msg, '');   // v13: keep errors in the error log
   els.status.textContent = msg;
   els.status.className = kind || '';
   // v9b: on a phone the status box is often scrolled out of sight, so show it over the map too.
@@ -2090,7 +2642,7 @@ function invalidateScan() {
   els.exportBtn.disabled = true;
   els.sampleBtn.disabled = els.photosBtn.disabled = els.groundBtn.disabled = true;
   $('view3dBtn').disabled = true;
-  $('minimapBtn').disabled = $('cardBtn').disabled = true;
+  $('minimapBtn').disabled = $('cardBtn').disabled = $('gameZipBtn').disabled = true;
   $('heightsBtn').disabled = $('terrainBtn').disabled = true;
   demGrids = null;
   els.stats.textContent = 'Route or settings changed. Scan again to export.';
@@ -2452,7 +3004,7 @@ async function scan() {
   els.sampleBtn.disabled = els.groundBtn.disabled = false;
   els.photosBtn.disabled = !out.landmarks.length;
   $('view3dBtn').disabled = false;
-  $('minimapBtn').disabled = $('cardBtn').disabled = false;
+  $('minimapBtn').disabled = $('cardBtn').disabled = $('gameZipBtn').disabled = false;
   demGrids = null; $('heightsBtn').disabled = false; $('terrainBtn').disabled = true;
   const partial = data.remark && /error|timed out|out of memory/i.test(data.remark);
   const contract = loaderContractProblems(out);   // v8.2: would the game's loader choke on this file?
@@ -2694,6 +3246,8 @@ function showStats() {
     ['Railway lines', c.railways || 0],
     ['Road markings', c.markings || 0],
     ['Corners / checkpoints', `${(out.route.corners || []).length} / ${out.race ? out.race.checkpoints.length : 0}`],
+    ['Shop signs / street signs', `${out.buildings.reduce((n, b) => n + (b.shops ? b.shops.length : 0), 0)} / ${(out.streetSigns || []).length}`],   // v13
+    ['Item box rows / boost pads', out.race && out.race.itemBoxes ? `${out.race.itemBoxes.length} / ${out.race.boostPads.length}` : '–'],   // v13
     ['Shortcuts found', c.shortcuts || 0],
     ...(out.meta.elevation ? [['Hills (climb / highest)', `${Math.round(out.meta.elevation.climb)} m / ${out.meta.elevation.trackHighest} m`]] : []),
     ['File size', (size / 1024).toFixed(0) + ' KB']
@@ -2706,11 +3260,23 @@ function showStats() {
   const qHtml = q ? `<details open style="margin-top:6px"><summary>Quality report</summary>` +
     `<div class="hint" style="margin-top:4px">Heights: ${q.heights.measured}% measured, ${q.heights.estimated}% estimated, ${q.heights.default}% default guess. Roofs: ${q.roofShapes.mapped}% mapped.</div>` +
     (q.notes.length ? `<ul style="margin:4px 0 0;padding-left:18px">${q.notes.map(n => `<li>${esc(n)}</li>`).join('')}</ul>` : '') + `</details>` : '';
-  const probs = problemSpots(scanPreview);
+  const probs = allProblems(out);
   const probHtml = probs.length ? `<button id="nextProblemBtn" style="width:100%;margin-top:6px">Show problem on the map (${probs.length})</button>` : '';
-  els.stats.innerHTML = rows.map(([k, v]) => `<div><span>${k}</span><b>${v}</b></div>`).join('') + profileHtml(out) + qHtml + probHtml +
+  els.stats.innerHTML = rows.map(([k, v]) => `<div><span>${k}</span><b>${v}</b></div>`).join('') + profileHtml(out) + raceHtml(out, esc) + qHtml + probHtml +
     (lm.length ? `<details style="margin-top:6px"><summary>Landmarks to model by hand (${lm.length})</summary>` +
       `<ul style="margin:4px 0 0;padding-left:18px">${lm.map(l => `<li>${esc(l.name)} <span class="hint">(${esc(l.kind)})</span>${photoHtml(l, esc)}</li>`).join('')}</ul></details>` : '');
+}
+// v13: "Will it race well?" in the game: the race check, red first. Green when nothing is wrong.
+function raceHtml(out, esc) {
+  const rc = raceCheck(out);
+  const head = `Race check: ${(rc.lap / 1000).toFixed(2)} km lap in the game, about ${rc.seconds} s`;
+  if (!rc.problems.length) return `<details open style="margin-top:6px" class="race"><summary>${head}</summary><div class="good" style="margin-top:4px">✓ Races well: no tight hairpins, crossings or steep bits.</div></details>`;
+  return `<details open style="margin-top:6px" class="race"><summary>${head} · ${rc.problems.length} to look at</summary><ul style="margin:4px 0 0;padding-left:18px">` +
+    rc.problems.map(p => `<li class="${p.level}">${p.level === 'red' ? '⛔' : '⚠'} ${esc(p.label)} <span class="hint">(${p.at} m)</span></li>`).join('') + '</ul></details>';
+}
+// Everything "Show problem" steps through: things standing on the track, then the race check's spots.
+function allProblems(out) {
+  return problemSpots(scanPreview).concat(raceCheck(out).problems.map(p => ({ cat: 'race', xy: p.xy, label: p.label })));
 }
 // v8.3: small reference photos under a landmark, each linking to its Commons page (author + licence there).
 function photoHtml(l, esc) {
@@ -2948,14 +3514,14 @@ let problemIdx = -1;
 const problemMarker = L.circleMarker([0, 0], { radius: 18, color: '#ffbe0b', weight: 3, fill: false, interactive: false });
 els.stats.addEventListener('click', e => {
   if (!e.target.closest('#nextProblemBtn') || !scanResult) return;
-  const probs = problemSpots(scanPreview);
+  const probs = allProblems(withManualExtras(scanResult, trees, manualBuildings));
   if (!probs.length) return;
   problemIdx = (problemIdx + 1) % probs.length;
   const pr = probs[problemIdx];
   const ll = makeUnprojector(scanResult.meta.origin.lat, scanResult.meta.origin.lon)(pr.xy);
   map.setView(ll, Math.max(map.getZoom(), 18));
   problemMarker.setLatLng(ll).addTo(map);
-  setStatus(`Problem ${problemIdx + 1} of ${probs.length}: ${pr.label}. Nudge the route, or leave it for the game to remove.`, 'warn');
+  setStatus(`Problem ${problemIdx + 1} of ${probs.length}: ${pr.label}. ${pr.cat === 'race' ? 'Redraw the route here if you can.' : 'Nudge the route, or leave it for the game to remove.'}`, 'warn');
   e.target.textContent = `Next problem (${problemIdx + 1} of ${probs.length})`;
 });
 
@@ -3003,6 +3569,7 @@ async function open3D() {
   ui.id = 'view3d';
   ui.innerHTML = `<div id="v3dBar"><button id="v3dClose">✕ Close</button><button id="v3dFly">▶ Fly the lap</button>
     <label class="inline" style="margin:0"><input id="v3dRetro" type="checkbox"> Retro pixels</label>
+    <label class="inline" style="margin:0" title="What the game will build: its rounded road, and without what it leaves out"><input id="v3dGame" type="checkbox"> Game view</label>
     <button id="v3dGlb">⬇ .glb</button><span id="v3dInfo" class="hint grow"></span></div>
     <div id="v3dHost"><div id="v3dHelp">Drag to turn · scroll or pinch to zoom · right-drag or two fingers to move</div></div>`;
   document.body.appendChild(ui);
@@ -3073,6 +3640,23 @@ async function open3D() {
   }
   const tgeo = new THREE.BufferGeometry(); tgeo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); tgeo.computeVertexNormals();
   const track = new THREE.Mesh(tgeo, new THREE.MeshLambertMaterial({ color: '#3d3d48', side: THREE.DoubleSide })); track.name = 'track'; scene.add(track);
+  // v13: the game's road (its own rounded line, with walls), shown in Game view instead
+  let gameTrack = null;
+  if (plan.game) {
+    const gt = plan.game.track, gp = [], wp = [];
+    for (let i = 0; i < gt.line.length - 1; i++) {
+      const e0 = gt.elev[i] + 0.1, e1 = gt.elev[i + 1] + 0.1;
+      const a = P(...gt.left[i], e0), b2 = P(...gt.right[i], e0), c = P(...gt.left[i + 1], e1), d = P(...gt.right[i + 1], e1);
+      gp.push(a.x, a.y, a.z, b2.x, b2.y, b2.z, c.x, c.y, c.z, b2.x, b2.y, b2.z, d.x, d.y, d.z, c.x, c.y, c.z);
+      for (const [u, v] of [[a, c], [b2, d]]) { const up = 1.2; wp.push(u.x, u.y, u.z, v.x, v.y, v.z, v.x, v.y + up, v.z, u.x, u.y, u.z, v.x, v.y + up, v.z, u.x, u.y + up, u.z); }
+    }
+    const ggeo2 = new THREE.BufferGeometry(); ggeo2.setAttribute('position', new THREE.Float32BufferAttribute(gp, 3)); ggeo2.computeVertexNormals();
+    const wgeo = new THREE.BufferGeometry(); wgeo.setAttribute('position', new THREE.Float32BufferAttribute(wp, 3)); wgeo.computeVertexNormals();
+    gameTrack = new THREE.Group(); gameTrack.name = 'game track'; gameTrack.visible = false;
+    gameTrack.add(new THREE.Mesh(ggeo2, new THREE.MeshLambertMaterial({ color: '#4a4a52', side: THREE.DoubleSide })));
+    gameTrack.add(new THREE.Mesh(wgeo, new THREE.MeshLambertMaterial({ color: '#9a9a96', side: THREE.DoubleSide })));
+    scene.add(gameTrack);
+  }
   if (plan.start) {
     const s = new THREE.Mesh(new THREE.BoxGeometry(plan.start.width || t.width, 0.05, 1.2), mat('#ffffff'));
     s.position.copy(P(plan.start.pos[0], plan.start.pos[1], plan.start.g + 0.12));
@@ -3092,10 +3676,23 @@ async function open3D() {
     list.forEach((it, i) => { place(it); dummy.updateMatrix(); m.setMatrixAt(i, dummy.matrix); });
     m.name = name; scene.add(m); return m;
   };
-  instanced(new THREE.CylinderGeometry(0.25, 0.35, 1, 5), mat('#6b4f2a'), plan.trees, tr => { dummy.position.copy(P(tr.x, tr.y, tr.g + tr.h * 0.3)); dummy.scale.set(1, tr.h * 0.6, 1); }, 'tree trunks');
-  instanced(new THREE.IcosahedronGeometry(1, 0), mat('#3f7d3a', { flatShading: true }), plan.trees.filter(tr => tr.type !== 'palm'), tr => { dummy.position.copy(P(tr.x, tr.y, tr.g + tr.h * 0.65)); dummy.scale.set(tr.r, tr.h * 0.4, tr.r); }, 'tree tops');
-  instanced(new THREE.ConeGeometry(1, 0.5, 6), mat('#4f8f3a', { flatShading: true }), plan.trees.filter(tr => tr.type === 'palm'), tr => { dummy.position.copy(P(tr.x, tr.y, tr.g + tr.h * 0.95)); dummy.scale.set(tr.r, tr.r * 0.5, tr.r); }, 'palm tops');
-  instanced(new THREE.BoxGeometry(0.7, 0.9, 0.7), mat('#ffb703'), plan.props, pr => { dummy.position.copy(P(pr.x, pr.y, pr.g + 0.45)); dummy.scale.set(1, 1, 1); }, 'props');
+  // v13: in Game view the trees and props the game leaves out shrink to nothing
+  const goneTrees = new Set(plan.game ? plan.game.droppedTrees.map(i => plan.trees[i]) : []), goneProps = new Set(plan.game ? plan.game.droppedProps.map(i => plan.props[i]) : []);
+  const shrink = it => { if (v3d && v3d.game && (goneTrees.has(it) || goneProps.has(it))) dummy.scale.set(0, 0, 0); };
+  const plantAll = () => {
+    for (const m of v3d.instanced) { m.list.forEach((it, i) => { m.place(it); shrink(it); dummy.updateMatrix(); m.mesh.setMatrixAt(i, dummy.matrix); }); m.mesh.instanceMatrix.needsUpdate = true; }
+  };
+  const inst = [];
+  const keep = (mesh, list, place) => { if (mesh) inst.push({ mesh, list, place }); };
+  const placeTrunk = tr => { dummy.position.copy(P(tr.x, tr.y, tr.g + tr.h * 0.3)); dummy.scale.set(1, tr.h * 0.6, 1); };
+  const placeTop = tr => { dummy.position.copy(P(tr.x, tr.y, tr.g + tr.h * 0.65)); dummy.scale.set(tr.r, tr.h * 0.4, tr.r); };
+  const placePalm = tr => { dummy.position.copy(P(tr.x, tr.y, tr.g + tr.h * 0.95)); dummy.scale.set(tr.r, tr.r * 0.5, tr.r); };
+  const placeProp = pr => { dummy.position.copy(P(pr.x, pr.y, pr.g + 0.45)); dummy.scale.set(1, 1, 1); };
+  const tops = plan.trees.filter(tr => tr.type !== 'palm'), palms = plan.trees.filter(tr => tr.type === 'palm');
+  keep(instanced(new THREE.CylinderGeometry(0.25, 0.35, 1, 5), mat('#6b4f2a'), plan.trees, placeTrunk, 'tree trunks'), plan.trees, placeTrunk);
+  keep(instanced(new THREE.IcosahedronGeometry(1, 0), mat('#3f7d3a', { flatShading: true }), tops, placeTop, 'tree tops'), tops, placeTop);
+  keep(instanced(new THREE.ConeGeometry(1, 0.5, 6), mat('#4f8f3a', { flatShading: true }), palms, placePalm, 'palm tops'), palms, placePalm);
+  keep(instanced(new THREE.BoxGeometry(0.7, 0.9, 0.7), mat('#ffb703'), plan.props, placeProp, 'props'), plan.props, placeProp);
   for (const l of plan.landmarks) {
     const pin = new THREE.Mesh(new THREE.OctahedronGeometry(2, 0), mat('#e63946'));
     pin.position.copy(P(l.x, l.y, l.g + 30)); pin.name = 'landmark ' + l.name; scene.add(pin);
@@ -3106,7 +3703,7 @@ async function open3D() {
   camera.position.copy(centre).add(new THREE.Vector3(diag * 0.25, diag * 0.35, diag * 0.45));
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.target.copy(centre); controls.maxPolarAngle = Math.PI * 0.49; controls.update();
-  v3d = { THREE, renderer, scene, camera, controls, ui, host, fly: null, raf: 0, retro: false, gtex };
+  v3d = { THREE, renderer, scene, camera, controls, ui, host, fly: null, raf: 0, retro: false, gtex, game: false, instanced: inst };
   const resize = () => {
     const w = host.clientWidth, hh = host.clientHeight;
     renderer.setPixelRatio(v3d.retro ? 0.33 : Math.min(devicePixelRatio, 2));
@@ -3115,8 +3712,9 @@ async function open3D() {
   v3d.resize = resize; resize();
   window.addEventListener('resize', resize);
   const len = out.route.centerline ? out.route.centerline.length : out.route.length;
-  $('v3dInfo').textContent = `${plan.buildings.length - bad} buildings · ${plan.trees.length} trees · ${plan.props.length} props · ${plan.landmarks.length} landmarks · ${(len / 1000).toFixed(2)} km track` +
+  const info = `${plan.buildings.length - bad} buildings · ${plan.trees.length} trees · ${plan.props.length} props · ${plan.landmarks.length} landmarks · ${(len / 1000).toFixed(2)} km track` +
     (bad ? ` · ${bad} shapes couldn't be drawn` : '') + '. Red = blocks the track, orange = drawn by you.';
+  $('v3dInfo').textContent = info;
   let last = performance.now();
   const frame = now => {
     const dt = Math.min(0.1, (now - last) / 1000); last = now;
@@ -3126,8 +3724,24 @@ async function open3D() {
   };
   v3d.raf = requestAnimationFrame(frame);
   $('v3dClose').onclick = close3D;
-  $('v3dFly').onclick = () => toggleFly(plan.track);
+  $('v3dFly').onclick = () => toggleFly(v3d.game && plan.game ? plan.game.track : plan.track);
   $('v3dRetro').onchange = e => { v3d.retro = e.target.checked; host.classList.toggle('retro', v3d.retro); resize(); };
+  // v13: Game view swaps in the game's road and hides what it leaves out; far buildings go plain grey
+  const dropped = new Set(plan.game ? plan.game.droppedBuildings : []), farIds = new Set(plan.game ? plan.game.farBuildings : []);
+  const farMat = mat('#a8a8a4');
+  $('v3dGame').disabled = !plan.game;
+  $('v3dGame').onchange = e => {
+    v3d.game = e.target.checked;
+    track.visible = !v3d.game; if (gameTrack) gameTrack.visible = v3d.game;
+    for (const m of bgroup.children) {
+      if (dropped.has(m.name)) m.visible = !v3d.game;
+      if (farIds.has(m.name)) { if (!m.userData.mats) m.userData.mats = m.material; m.material = v3d.game ? farMat : m.userData.mats; }
+    }
+    plantAll();
+    const g = plan.game;
+    $('v3dInfo').textContent = v3d.game ? `Game view: the game's rounded road with its walls. It leaves out ${g.droppedBuildings.length} buildings next to the road and ${g.droppedTrees.length + g.droppedProps.length} trees and props on it; ${g.farBuildings.length} far buildings are plain boxes (grey).` : info;
+    if (v3d.fly) toggleFly(plan.track);
+  };
   $('v3dGlb').onclick = () => download3D(out);
   setStatus(`3D preview open. ${bad ? bad + " shapes couldn't be drawn (odd outlines in OSM). " : ''}Close it to get back to the map.`, bad ? 'warn' : 'ok');
 }
@@ -3374,6 +3988,56 @@ function exportMinimap() {
   scanResult.meta.minimap = { file, size, metresPerPixel: mp.mpp, minX: mp.minX, maxY: mp.maxY, note: 'Kart at (x, y) is at pixel ((x - minX) / metresPerPixel, (maxY - y) / metresPerPixel). North is up. Transparent background.' };
   savePng(cv, file, () => setStatus(`Minimap saved (${size}×${size}, ${mp.mpp} m per pixel). Export JSON again so the file says how to place karts on it.`, 'ok'));
 }
+// v13: the error log: every error and warning shown, plus any bug the page hits, in plain words.
+function logError(kind, message, detail) {
+  const errorEntries = errLogEntries();
+  const same = errorEntries.find(e => e.message === message && e.detail === detail);
+  if (same) same.count++;
+  else {
+    const [what, tryIt] = explainError(message + ' ' + detail);
+    errorEntries.push({ time: new Date().toLocaleTimeString(), kind, what, tryIt, message, detail, count: 1 });
+    if (errorEntries.length > 100) errorEntries.shift();
+  }
+  const box = $('errLog'); if (!box) return;
+  box.hidden = false;
+  $('errCount').textContent = errorEntries.length;
+  const esc = t => String(t).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  $('errList').innerHTML = errorEntries.slice().reverse().map(e => `<div style="margin-bottom:6px"><b style="color:var(--${e.kind === 'warn' ? 'warn' : 'err'})">${esc(e.time)} ${esc(e.what)}</b>${e.count > 1 ? ` ×${e.count}` : ''}<br>Try: ${esc(e.tryIt)}<br><span style="opacity:.7">${esc(e.message)}${e.detail ? ' · ' + esc(e.detail) : ''}</span></div>`).join('');
+}
+function errLogEntries() { return logError.entries || (logError.entries = []); }   // works even before this line has run
+function errorLogFile() { return errorLogText(errLogEntries(), `${new Date().toISOString()}, ${navigator.userAgent}`); }
+window.addEventListener('error', e => { if (!/ResizeObserver/.test(e.message || '')) logError('err', 'The page hit a bug: ' + (e.message || 'unknown error'), `${(e.filename || '').split('/').pop()}:${e.lineno || 0}`); });
+window.addEventListener('unhandledrejection', e => { const r = e.reason || {}; logError('err', 'The page hit a bug: ' + (r.message || String(r)), (r.stack || '').split('\n')[1] || ''); });
+$('errCopy').onclick = async () => { try { await navigator.clipboard.writeText(errorLogFile()); $('errCopy').textContent = 'Copied'; } catch (e) { $('errCopy').textContent = 'Copy blocked: use Save'; } setTimeout(() => { $('errCopy').textContent = 'Copy log'; }, 2000); };
+$('errSave').onclick = () => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([errorLogFile()], { type: 'text/plain' })); a.download = 'kart-map-scanner-error-log.txt'; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000); };
+$('errClear').onclick = () => { errLogEntries().length = 0; $('errLog').hidden = true; $('errCount').textContent = 0; $('errList').innerHTML = ''; };
+// v13: everything the game reads, as one zip holding one track folder.
+async function exportForGame() {
+  if (!scanResult) return;
+  const out = withManualExtras(scanResult, trees, manualBuildings), folder = gameFolderName(out.meta.name);
+  const safe = (out.meta.name || 'route').replace(/[^a-z0-9_-]+/gi, '-').toLowerCase(), enc = new TextEncoder(), files = [];
+  // minimap picture for the HUD
+  const size = 256, mp = minimapPlan(out, size, 12), cv = document.createElement('canvas'); cv.width = cv.height = size;
+  drawTrackLine(cv.getContext('2d'), mp, 1, { width: 5, road: '#ffffff', edge: '#111111' });
+  const png = new Uint8Array(await (await new Promise(r => cv.toBlob(r, 'image/png'))).arrayBuffer());
+  const mmFile = `kartmap_${safe}_minimap.png`;
+  out.meta.minimap = scanResult.meta.minimap = { file: mmFile, size, metresPerPixel: mp.mpp, minX: mp.minX, maxY: mp.maxY, note: 'Kart at (x, y) is at pixel ((x - minX) / metresPerPixel, (maxY - y) / metresPerPixel). North is up. Transparent background.' };
+  files.push({ name: `${folder}/${mmFile}`, data: png });
+  // hills: the wider terrain file when heights were fetched (the level file already holds a 10 m grid)
+  if (demGrids && out.meta.elevation) {
+    const tf = terrainFile(out, demGrids, makeUnprojector, 4), tFile = `kartmap_${safe}_terrain.json`;
+    out.meta.elevation.terrainFile = scanResult.meta.elevation.terrainFile = tFile;
+    out.meta.elevation.terrainSpacing = scanResult.meta.elevation.terrainSpacing = tf.spacing;
+    files.push({ name: `${folder}/${tFile}`, data: enc.encode(JSON.stringify(tf)) });
+  }
+  files.unshift({ name: `${folder}/kartmap_${safe}_${new Date().toISOString().slice(0, 10)}.json`, data: enc.encode(prettyJSON(out)) });
+  files.push({ name: `${folder}/README.txt`, data: enc.encode(`${out.meta.name || 'Scanned track'}: a Kart Map Scanner track for Brisbane Kart.\r\n\r\nPut this whole folder (${folder}) into the game's game/tracks folder and start the game: it appears on CHOOSE TRACK.\r\nThe game writes gameplay.json here the first time; delete that file to start fresh after a new scan.\r\n\r\n${out.meta.attribution || ''}\r\n`) });
+  const zip = makeZip(files);
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([zip], { type: 'application/zip' }));
+  a.download = folder + '.zip'; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  setStatus(`Saved ${folder}.zip (${(zip.length / 1048576).toFixed(1)} MB): unzip it into the game's game/tracks folder.` + (out.meta.elevation ? '' : ' Tip: Get ground heights first for hills.'), 'ok');
+}
+$('gameZipBtn').onclick = exportForGame;
 function exportCard() {
   if (!scanResult) return;
   const out = withManualExtras(scanResult, trees, manualBuildings);
