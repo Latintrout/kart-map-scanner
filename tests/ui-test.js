@@ -379,6 +379,16 @@ const overpass = { elements: [
     const zpath = await zdl.path(), zbytes = require('fs').readFileSync(zpath);
     check('v13 Export for game downloads one zip named for the game folder, with the level file and minimap inside', /^scan_[a-z0-9_-]+\.zip$/.test(zdl.suggestedFilename()) && zbytes.readUInt32LE(0) === 0x04034b50 && /kartmap_[^/]+\.json/.test(zbytes.toString('latin1')) && /_minimap\.png/.test(zbytes.toString('latin1')) && /README\.txt/.test(zbytes.toString('latin1')), zdl.suggestedFilename());
     if (process.env.ZIPOUT) require('fs').copyFileSync(zpath, process.env.ZIPOUT);
+    check('v13 the bad backup loaded earlier is in the error log as a damaged file', /couldn't be read/.test(await page.textContent('#errList')), await page.textContent('#errList'));
+    await page.evaluate(() => document.getElementById('errClear').click());
+    check('v13 Clear empties and hides the error log', await page.isHidden('#errLog'));
+    await page.evaluate(() => setTimeout(() => { throw new Error('boom test'); }, 0)); await page.waitForTimeout(200);
+    const elt = await page.textContent('#errLog');
+    check('v13 a page bug shows in the error log in plain words, with the technical message', !(await page.isHidden('#errLog')) && /send it to Claude/.test(elt) && /boom test/.test(elt), elt.slice(0, 200));
+    const [edl] = await Promise.all([page.waitForEvent('download'), page.evaluate(() => { document.getElementById('errLog').open = true; }).then(() => page.click('#errSave'))]);
+    check('v13 error log saves as a text file', /error-log\.txt$/.test(edl.suggestedFilename()) && /boom test/.test(require('fs').readFileSync(await edl.path(), 'utf8')));
+    await page.click('#errClear');
+    errors.splice(errors.findIndex(e => /boom test/.test(e)), 1);
     check('v13 stats count shop signs, street signs, item box rows and boost pads', /Shop signs \/ street signs\s*\d+ \/ \d+/.test(st) && /Item box rows \/ boost pads\s*(\d+ \/ \d+|–)/.test(st), st.slice(0, 900));
     await page.click('#view3dBtn');
     await page.waitForFunction(() => /buildings/.test((document.getElementById('v3dInfo') || {}).textContent || ''), null, { timeout: 20000 });

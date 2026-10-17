@@ -31,6 +31,7 @@ Draw a route on a real map, scan the area along it from free OpenStreetMap data,
 - **Race check** (made for Brisbane Kart): the lap time in the game, and anything that won't race well (hairpins, narrow or very steep bits, a route that crosses itself or doubles back, a too short or too long lap). The 3D preview's *Game view* shows the road and town the way the game builds them.
 - **Ready for the game**: smarter height guesses by building type and neighbourhood, shop signs with made-up funny names (never real shop names), street name signs at side streets, and suggested item boxes and boost pads.
 - **🎮 Export for game**: one zip with the level file, minimap and terrain file in a folder ready to unzip into the game's `game/tracks`.
+- **Error log**: when something goes wrong, a ⚠ Error log under the status line says what happened in plain words and what to try, with the technical message underneath. Copy it or save it as a .txt to send to Claude.
 - **Export / Load** the level file. The format is documented in `docs/kartmap-format.md`.
 
 ## Tests

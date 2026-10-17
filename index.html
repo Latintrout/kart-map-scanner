@@ -195,6 +195,15 @@
     <label class="inline"><input id="useOverture" type="checkbox" checked> Fill building gaps from Overture (recommended)</label>
     <button id="scanBtn" class="primary" style="width:100%;margin-top:6px">Scan area</button>
     <div id="status">Hold and drag on the map to draw a route.</div>
+    <details id="errLog" hidden style="margin-top:6px;font-size:12px">
+      <summary>⚠ Error log (<span id="errCount">0</span>): what went wrong, in plain words</summary>
+      <div id="errList" class="hint" style="max-height:220px;overflow:auto;margin-top:4px"></div>
+      <div class="row" style="margin-top:4px">
+        <button id="errCopy" title="Copy the log to paste to Claude">Copy log</button>
+        <button id="errSave">Save log (.txt)</button>
+        <button id="errClear">Clear</button>
+      </div>
+    </details>
   </section>
 
   <section>
@@ -2113,6 +2122,31 @@ function makeZip(files, when) {
 }
 // The folder name the game lists the track under: lowercase, safe for any file system.
 function gameFolderName(name) { return 'scan_' + ((name || 'route').replace(/[^a-z0-9_-]+/gi, '_').replace(/^_+|_+$/g, '').toLowerCase() || 'route'); }
+// v13: the error log. What a technical message means in plain words: [what went wrong, what to try].
+const ERROR_EXPLAIN = [
+  [/Failed to fetch|NetworkError|Load failed|couldn't reach|offline|blocked/i, "Couldn't reach one of the free map servers (no internet, a blocker, or the server is down).", 'Check the internet connection, wait a minute and try again.'],
+  [/429|Too Many Requests|rate limit|busy|504|timeout|timed out|Gateway/i, 'The free map server is busy right now.', 'Wait a minute and try again, or scan a smaller radius.'],
+  [/QuotaExceeded|storage|quota/i, "The browser's storage for saved tracks is full.", 'Back up your saved tracks to a file, then delete some old ones.'],
+  [/WebGL|webgl|context lost|THREE/i, "The 3D preview can't run on this browser or graphics card.", 'Try another browser, or skip the 3D preview: exports still work.'],
+  [/JSON|Unexpected token|not a kartmap|not a track|backup|parse/i, "A file couldn't be read: it's damaged, not from the scanner, or was edited by hand with a typo.", 'Load a file exported by the scanner, or export it again.'],
+  [/memory|allocation|Maximum call stack|too large|Invalid array length/i, 'The scan was too big for the browser.', 'Use a smaller scan radius or a shorter route.'],
+  [/Draw a route|at least two|no route|too short/i, "There's no route to scan yet.", 'Draw the route on the map first (✎ Pen, hold and drag).'],
+  [/elevation|height|LiDAR|DEM/i, "Ground heights couldn't be fetched.", 'Try again later; the rest of the scan is fine without heights.'],
+  [/aerial|photo|imagery|colour/i, "The aerial photos couldn't be fetched.", 'Try again later; colours are optional.']
+];
+function explainError(text) {
+  for (const [re, what, tryIt] of ERROR_EXPLAIN) if (re.test(text)) return [what, tryIt];
+  return ['Something unexpected went wrong in the scanner.', 'Copy this log and send it to Claude so it can be fixed.'];
+}
+function errorLogText(entries, meta) {
+  const lines = ['Kart Map Scanner error log' + (meta ? ' (' + meta + ')' : ''), ''];
+  for (const e of entries) {
+    lines.push(`[${e.time}] ${e.kind === 'warn' ? 'WARNING' : 'ERROR'}: ${e.what}${e.count > 1 ? ` (x${e.count})` : ''}`, `    Try: ${e.tryIt}`, `    Message: ${e.message}`);
+    if (e.detail) lines.push(`    Detail: ${e.detail}`);
+    lines.push('');
+  }
+  return lines.join('\n');
+}
 function signNames() { return SIGN_NAMES; }
 function signHash(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; }
 function funnySign(type, seed) { const list = SIGN_NAMES[type] || SIGN_NAMES.shop; return list[signHash(String(seed)) % list.length]; }
@@ -2549,6 +2583,7 @@ const routeLine = L.polyline([], { color: '#e63946', weight: 5, interactive: fal
 const wpLayer = L.layerGroup().addTo(map);
 
 function setStatus(msg, kind) {
+  if (kind === 'err') logError(kind, msg, '');   // v13: keep errors in the error log
   els.status.textContent = msg;
   els.status.className = kind || '';
   // v9b: on a phone the status box is often scrolled out of sight, so show it over the map too.
@@ -3953,6 +3988,29 @@ function exportMinimap() {
   scanResult.meta.minimap = { file, size, metresPerPixel: mp.mpp, minX: mp.minX, maxY: mp.maxY, note: 'Kart at (x, y) is at pixel ((x - minX) / metresPerPixel, (maxY - y) / metresPerPixel). North is up. Transparent background.' };
   savePng(cv, file, () => setStatus(`Minimap saved (${size}×${size}, ${mp.mpp} m per pixel). Export JSON again so the file says how to place karts on it.`, 'ok'));
 }
+// v13: the error log: every error and warning shown, plus any bug the page hits, in plain words.
+function logError(kind, message, detail) {
+  const errorEntries = errLogEntries();
+  const same = errorEntries.find(e => e.message === message && e.detail === detail);
+  if (same) same.count++;
+  else {
+    const [what, tryIt] = explainError(message + ' ' + detail);
+    errorEntries.push({ time: new Date().toLocaleTimeString(), kind, what, tryIt, message, detail, count: 1 });
+    if (errorEntries.length > 100) errorEntries.shift();
+  }
+  const box = $('errLog'); if (!box) return;
+  box.hidden = false;
+  $('errCount').textContent = errorEntries.length;
+  const esc = t => String(t).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  $('errList').innerHTML = errorEntries.slice().reverse().map(e => `<div style="margin-bottom:6px"><b style="color:var(--${e.kind === 'warn' ? 'warn' : 'err'})">${esc(e.time)} ${esc(e.what)}</b>${e.count > 1 ? ` ×${e.count}` : ''}<br>Try: ${esc(e.tryIt)}<br><span style="opacity:.7">${esc(e.message)}${e.detail ? ' · ' + esc(e.detail) : ''}</span></div>`).join('');
+}
+function errLogEntries() { return logError.entries || (logError.entries = []); }   // works even before this line has run
+function errorLogFile() { return errorLogText(errLogEntries(), `${new Date().toISOString()}, ${navigator.userAgent}`); }
+window.addEventListener('error', e => { if (!/ResizeObserver/.test(e.message || '')) logError('err', 'The page hit a bug: ' + (e.message || 'unknown error'), `${(e.filename || '').split('/').pop()}:${e.lineno || 0}`); });
+window.addEventListener('unhandledrejection', e => { const r = e.reason || {}; logError('err', 'The page hit a bug: ' + (r.message || String(r)), (r.stack || '').split('\n')[1] || ''); });
+$('errCopy').onclick = async () => { try { await navigator.clipboard.writeText(errorLogFile()); $('errCopy').textContent = 'Copied'; } catch (e) { $('errCopy').textContent = 'Copy blocked: use Save'; } setTimeout(() => { $('errCopy').textContent = 'Copy log'; }, 2000); };
+$('errSave').onclick = () => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([errorLogFile()], { type: 'text/plain' })); a.download = 'kart-map-scanner-error-log.txt'; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000); };
+$('errClear').onclick = () => { errLogEntries().length = 0; $('errLog').hidden = true; $('errCount').textContent = 0; $('errList').innerHTML = ''; };
 // v13: everything the game reads, as one zip holding one track folder.
 async function exportForGame() {
   if (!scanResult) return;

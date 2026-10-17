@@ -553,6 +553,12 @@ function runV13(lib, check, same) {
   const gl2 = lib.gameLine(rect2);
   check('v13 item spots: two boost pads at the start of the two long straights', sp.boostPads.length === 2 && sp.boostPads.every(q => { const pt = gl2.pts[Math.round(q.s / 3)]; return Math.abs(pt[1]) < 3 || Math.abs(pt[1] - 150) < 3; }), JSON.stringify(sp.boostPads.map(q => gl2.pts[Math.round(q.s / 3)])));
   check('v13 item spots: a row of 4 item boxes per ~250 m, on straight bits, not on the start line', sp.itemBoxes.length === 6 && sp.itemBoxes.every(b => b.count === 4 && b.s > 50 && b.s < sp.gameLength - 30 && onStraight(b.s)) && sp.gameLength === gl2.pts.length * 3, JSON.stringify(sp));
+  // error log: plain words for technical messages
+  check('v13 error log explains: server unreachable, busy server, damaged file, unknown bug',
+    /Couldn't reach/.test(lib.explainError('Scan failed: TypeError: Failed to fetch')[0]) && /busy/.test(lib.explainError('Overpass replied 429 Too Many Requests')[0]) &&
+    /damaged/.test(lib.explainError('Could not load that file: Unexpected token o in JSON')[0]) && /send it to Claude/.test(lib.explainError('x is not a function')[1]));
+  const elog = lib.errorLogText([{ time: '10:00', kind: 'err', what: 'W', tryIt: 'T', message: 'M', detail: 'D', count: 2 }], 'test');
+  check('v13 error log file: what, try, message and detail per entry', /ERROR: W \(x2\)/.test(elog) && /Try: T/.test(elog) && /Message: M/.test(elog) && /Detail: D/.test(elog));
   // Export for game: a zip the game can unzip into its tracks folder
   const zenc = new TextEncoder(), zip = lib.makeZip([{ name: 'scan_x/a.json', data: zenc.encode('{"a":1}') }, { name: 'scan_x/b.png', data: new Uint8Array([1, 2, 3]) }], new Date(2026, 9, 17, 12, 0, 0));
   const zdv = new DataView(zip.buffer), zend = zip.length - 22;
