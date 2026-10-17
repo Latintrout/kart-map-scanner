@@ -1,4 +1,8 @@
-// Builds the same made-up South-Bank-like scan with v8.1 and v8.2 and writes both kartmap files.
+// Builds a made-up South-Bank-like scan with one or more scanner versions and writes a kartmap
+// track folder for each, ready for the game's loader (see README.md).
+//   node make_files.js <game>/game/tracks scan_ci=path/to/index.html [scan_old=older.html ...]
+// Each scanner's extras (Overture, colours, reverse/start, drawn buildings, heights, minimap...)
+// are used when that version has them, so one file exercises everything the version exports.
 const fs = require('fs');
 function lib(file) {
   const html = fs.readFileSync(file, 'utf8');
@@ -50,10 +54,13 @@ els.push(N(150, 0, { highway: 'crossing', crossing: 'zebra' }), N(300, 60, { hig
 for (let i = 0; i < 15; i++) els.push(N(15 + i * 18, 190, { natural: 'tree', ...(i % 3 === 0 ? { genus: 'Archontophoenix' } : i % 3 === 1 ? { genus: 'Jacaranda', species: 'Jacaranda mimosifolia', leaf_type: 'broadleaved' } : {}) }));
 els.push(N(150, 3, { natural: 'tree', genus: 'Ficus' }));   // a tree in the road
 const data = { elements: els.map(e => { if (e.tags) for (const k of Object.keys(e.tags)) if (e.tags[k] === undefined) delete e.tags[k]; return e; }) };
-for (const [ver, file] of [['v8.1', '/home/claude/kart-map-scanner-v8.1.html'], ['v8.2', '/home/claude/kart-map-scanner-v8.2.html'], ['v8.3', '/home/claude/kart-map-scanner-v8.3.html'], ['v9a', '/home/claude/kart-map-scanner-v9a.html'], ['v11', '/home/claude/kart-map-scanner-v11.html'], ['v12c', '/home/claude/kart-map-scanner-v12c.html']]) {
+const [tracksDir, ...jobs] = process.argv.slice(2);
+if (!tracksDir || !jobs.length) { console.error('usage: node make_files.js <tracks dir> <folder>=<scanner.html> ...'); process.exit(2); }
+for (const job of jobs) {
+  const [folder, file] = job.split('=');
   const L = lib(file);
   let input = data, overture;
-  if (ver === 'v8.3') {
+  if (L.mergeOverture) {
     // Overture: a height for an unmeasured house (OSM way 7), plus two buildings OSM doesn't have.
     const ring = (x, y, w, h) => rect(x, y, w, h).map(o => [o.lat, o.lon]);
     const m = L.mergeOverture(data, [
@@ -61,37 +68,38 @@ for (const [ver, file] of [['v8.1', '/home/claude/kart-map-scanner-v8.1.html'], 
       { id: 'b', osmId: null, height: 11, heightFrom: 'Microsoft ML Buildings', ring: ring(-60, 240, 18, 14) },
       { id: 'c', osmId: null, height: null, heightFrom: null, ring: ring(-90, 240, 10, 10) }]);
     input = m.data; overture = { release: '2026-09-23.1', ...m.stats };
-    console.log('overture stats', JSON.stringify(m.stats));
   }
   let raceRoute = route, raceExtra = {};
-  if (ver === 'v9a' || ver === 'v11' || ver === 'v12c') {   // reversed, start moved to the middle of the east side
+  if (L.orientRoute) {   // reversed, start moved to the middle of the east side
     raceRoute = L.orientRoute(route, { loop: true, reverse: true, start: ll(303, 100) });
     raceExtra = { reverse: true, start: raceRoute[0] };
   }
-  let { out } = L.buildOutput(input, { overture, ...raceExtra, route: raceRoute, waypoints: route.slice(0, 4), radius: 300, width: 8, loop: true, snapped: true, name: 'harness ' + ver, now: '2026-10-15T00:00:00Z' });
-  if (ver === 'v9a' || ver === 'v11' || ver === 'v12c') {
+  let { out } = L.buildOutput(input, { overture, ...raceExtra, route: raceRoute, waypoints: route.slice(0, 4), radius: 300, width: 8, loop: true, snapped: true, name: 'harness ' + folder, now: '2026-10-15T00:00:00Z' });
+  if (L.withManualExtras)
     out = L.withManualExtras(out, [{ lat: ll(10, 100)[0], lon: ll(10, 100)[1], canopy: 8 }], [{ ring: [ll(-40, 60), ll(-20, 60), ll(-20, 80), ll(-40, 80)], height: 9, name: 'Drawn kiosk' }]);
-    console.log('v9a start line', JSON.stringify(out.race.startLine.pos), 'dir', JSON.stringify(out.race.startLine.dir), 'contract', JSON.stringify(L.loaderContractProblems(out)));
-  }
-  if (ver === 'v12c') {
-    // ground heights from a fake terrain: 2 m per 100 m rise to the east
-    const W = 400, H = 400, d = new Float32Array(W * H);
-    for (let r = 0; r < H; r++) for (let c = 0; c < W; c++) d[r * W + c] = 5 + c * 0.04;
-    const e = L.applyElevation(out, [{ box: { south: la - 0.005, north: la + 0.005, west: lo - 0.005, east: lo + 0.005 }, width: W, height: H, data: d }], L.makeUnprojector, { metresPerSample: 2 });
-    out.meta.minimap = { file: 'x.png', size: 256, metresPerPixel: 2, minX: 0, maxY: 0 };
-    console.log('v12c elevation', JSON.stringify({ base: e.base, climb: e.climb, high: e.trackHighest }), 'contract', JSON.stringify(L.loaderContractProblems(out)));
-  }
-  if (ver === 'v8.3') {
+  if (L.applyColourSamples) {
     // aerial colours from a fake all-terracotta photo covering everything, plus a landmark photo
     const W = 2048, H = 2048, px = new Uint8ClampedArray(W * H * 4); for (let i = 0; i < px.length; i += 4) px.set([176, 58, 46, 255], i);
-    const n = L.applyColourSamples(out, [{ box: { south: la - 0.01, north: la + 0.01, west: lo - 0.01, east: lo + 0.01 }, image: { width: W, height: H, data: px } }], L.makeUnprojector, { metresPerPixel: 1 });
-    out.landmarks[0].photos = [{ file: 'File:x.jpg', thumb: 'https://upload.wikimedia.org/x.jpg', page: 'https://commons.wikimedia.org/wiki/File:x.jpg', licence: 'CC BY-SA 4.0', author: 'Someone' }];
-    out.landmarks[0].photosFrom = 'wikidata';
+    L.applyColourSamples(out, [{ box: { south: la - 0.01, north: la + 0.01, west: lo - 0.01, east: lo + 0.01 }, image: { width: W, height: H, data: px } }], L.makeUnprojector, { metresPerPixel: 1 });
+    if (out.landmarks[0]) { out.landmarks[0].photos = [{ file: 'File:x.jpg', thumb: 'https://upload.wikimedia.org/x.jpg', page: 'https://commons.wikimedia.org/wiki/File:x.jpg', licence: 'CC BY-SA 4.0', author: 'Someone' }]; out.landmarks[0].photosFrom = 'wikidata'; }
     out.meta.groundImage = { file: 'kartmap_harness_ground.png', ...L.groundImagePlan(out.meta.bbox, 1, 4096), colours: 'aerial (sampled)' };
-    console.log('sampled', JSON.stringify(n), 'contract problems', JSON.stringify(L.loaderContractProblems(out)));
   }
-  const dir = '/tmp/game/game/tracks/scan_' + ver.replace('.', '_');
+  let terrain = null;
+  if (L.applyElevation) {
+    // ground heights from a fake terrain: a 6 m rise to the east plus a 4 m dip (a "river") under the bridge on the west side
+    const W = 400, H = 400, d = new Float32Array(W * H);
+    for (let r = 0; r < H; r++) for (let c = 0; c < W; c++) { const x = (c - 200) * 2.5, y = (200 - r) * 2.5; d[r * W + c] = 5 + c * 0.04 - (Math.abs(x) < 15 && y > 40 && y < 160 ? 4 : 0); }
+    const grids = [{ box: { south: la - 0.0045, north: la + 0.0045, west: lo - 0.0057, east: lo + 0.0057 }, width: W, height: H, data: d }];
+    L.applyElevation(out, grids, L.makeUnprojector, { metresPerSample: 2 });
+    if (L.terrainFile) { terrain = L.terrainFile(out, grids, L.makeUnprojector, 4); out.meta.elevation.terrainFile = 'kartmap_harness_terrain.json'; out.meta.elevation.terrainSpacing = 4; }
+  }
+  if (L.minimapPlan) out.meta.minimap = { file: 'kartmap_harness_minimap.png', size: 256, metresPerPixel: 2, minX: 0, maxY: 0 };
+  const dir = tracksDir + '/' + folder;
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(dir + '/kartmap_harness_2026-10-15.json', L.prettyJSON(out));
-  console.log(ver, 'version', out.version, '| buildings', out.buildings.length, '| parts in buildings list', out.buildings.filter(b => b.part).length, '| separate buildingParts', (out.buildingParts || []).length, '| landmarks', out.landmarks.map(l => l.kind).join(','));
+  if (terrain) fs.writeFileSync(dir + '/kartmap_harness_terrain.json', JSON.stringify(terrain));
+  const problems = L.loaderContractProblems ? L.loaderContractProblems(out) : [];
+  console.log(folder, '|', out.meta.generator || 'scanner', '| version', out.version, '| buildings', out.buildings.length, '| landmarks', (out.landmarks || []).map(l => l.kind).join(','),
+    '| heights', out.meta.elevation ? 'yes' : 'no', '| contract problems', JSON.stringify(problems));
+  if (problems.length) process.exitCode = 1;
 }
