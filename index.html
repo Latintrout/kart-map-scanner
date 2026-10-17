@@ -95,6 +95,7 @@
   .profile svg { width: 100%; height: 90px; display: block; touch-action: pan-y; }
   .profile .readout { position: absolute; top: 18px; right: 4px; font-size: 11px; color: var(--text); background: #16161dcc; padding: 1px 5px; border-radius: 4px; pointer-events: none; }
   /* v13: race check */
+  #stats .xpick { display: block; margin-top: 6px; } #stats .xpick .row { display: flex; gap: 4px; justify-content: stretch; margin-top: 3px; } #stats .xpick button { padding: 4px 2px; font-size: 12px; } #stats .xpick button.on { background: var(--ok); border-color: var(--ok); color: #0b1a12; font-weight: 600; opacity: 1; }   /* v13: which road goes over */
   #stats .race li { margin: 2px 0; } #stats .race .red { color: var(--err); } #stats .race .amber { color: var(--warn); } #stats .race .good { color: var(--ok); }
 .lm-photos{display:flex;gap:4px;margin:3px 0 4px}.lm-photos img{width:64px;height:48px;object-fit:cover;border-radius:3px;border:1px solid #ccc}
 </style>
@@ -1378,11 +1379,8 @@ function buildOutput(data, o) {
   const onTrackB = res.buildings.filter(b => b.onTrack);
   const trees = res.points.filter(p => p.kind === 'tree');
   const notes = [];
-  if (onTrackB.length) notes.push(`${onTrackB.length} building${onTrackB.length > 1 ? 's block' : ' blocks'} the track: ${onTrackB.slice(0, 5).map(b => b.name || b.id).join(', ')}${onTrackB.length > 5 ? '…' : ''}. Nudge the route or let the game remove them.`);
   const barOn = res.barriers.filter(b => b.onTrack).length;
-  if (barOn) notes.push(`${barOn} fence${barOn > 1 ? 's/walls cross' : '/wall crosses'} the track.`);
   const propOn = res.points.filter(p => p.onTrack).length;
-  if (propOn) notes.push(`${propOn} prop${propOn > 1 ? 's stand' : ' stands'} on the track (benches, bins, trees…). The game should skip or move them.`);
   const guessed = nb - hMeasured;
   if (nb && guessed / nb > 0.5) notes.push(`${Math.round(100 * guessed / nb)}% of building heights are guesses (the Kart LiDAR Tool can measure them).`);
   if (trees.length) notes.push(`${Math.round(100 * trees.filter(t => t.treeType).length / trees.length)}% of trees have a known type (palm, gum, fig…).`);
@@ -1464,6 +1462,10 @@ function buildOutput(data, o) {
   };
   out.streetSigns = streetSigns(out);   // v13: street name signs at side streets
   if (race) Object.assign(race, gameSpots(out));   // v13: suggested item boxes and boost pads
+  // v13: what the game leaves off its road, listed first in the quality report
+  const cleared = gameCleared(out);
+  quality.leftOffTrack = { buildings: cleared.buildings.map(b => b.id), barriers: cleared.barriers.map(b => b.id), points: cleared.points.map(p => p.id) };
+  quality.notes.unshift(...clearedNotes(cleared));
   return { out, preview };
 }
 
@@ -1566,15 +1568,23 @@ function manualBuildingsFor(out, list) {
 }
 // Adds your hand-placed trees (v7) and hand-drawn buildings (v9a) to a scan result at export
 // time, so neither needs a re-scan. Returns a new object; the scan result is left untouched.
-function withManualExtras(out, trees, buildings) {
+function withManualExtras(out, trees, buildings, over) {
   const t = withManualTrees(out, trees);
   const mb = manualBuildingsFor(out, buildings);
-  return {
+  const res = {
     ...t,
     meta: { ...t.meta, counts: { ...t.meta.counts, manualBuildings: mb.length } },
     buildings: t.buildings.concat(mb),
     manualBuildings: (buildings || []).map(m => ({ ring: m.ring, height: m.height, ...(m.name ? { name: m.name } : {}) }))   // so Load JSON can bring them back
   };
+  // v13: street-level crossings and the pass picked to go over (`over`: see crossingPlan)
+  if (res.race) {
+    const { crossings, ...race } = res.race;
+    res.race = race;
+    const plan = crossingPlan(res, over);
+    if (plan.length) race.crossings = plan;
+  }
+  return res;
 }
 // ---- track library (saved in the browser) ----
 const LIBRARY_VERSION = 1;
@@ -1852,7 +1862,8 @@ function terrainGrid(out, grids, unprojFactory, base, spacing) {
 function trackForLink(t) {
   const r6 = n => Math.round(n * 1e6) / 1e6, pts = a => (a || []).map(p => [r6(p[0]), r6(p[1])]);
   const o = { v: 1, n: t.name || '', w: pts(t.waypoints), s: t.snap !== false ? 1 : 0, l: t.loop !== false ? 1 : 0, r: +t.radius || 100, k: +t.width || 8 };
-  if (t.race && (t.race.reverse || t.race.start)) o.rc = { rv: t.race.reverse ? 1 : 0, st: t.race.start ? pts([t.race.start])[0] : null };
+  const ov = t.race && Array.isArray(t.race.over) ? t.race.over.filter(w => w && Array.isArray(w.at) && Array.isArray(w.dir)) : [];
+  if (t.race && (t.race.reverse || t.race.start || ov.length)) o.rc = { rv: t.race.reverse ? 1 : 0, st: t.race.start ? pts([t.race.start])[0] : null, ...(ov.length ? { ov: ov.map(w => [r6(w.at[0]), r6(w.at[1]), w.dir[0], w.dir[1]]) } : {}) };
   if (t.trees && t.trees.length) o.tr = t.trees.map(x => [r6(x.lat), r6(x.lon), x.canopy]);
   if (t.manualBuildings && t.manualBuildings.length) o.mb = t.manualBuildings.map(m => ({ g: pts(m.ring), h: m.height, ...(m.name ? { n: m.name } : {}) }));
   return o;
@@ -1862,7 +1873,7 @@ function trackFromLink(o) {
   const ok = p => Array.isArray(p) && p.length === 2 && Math.abs(p[0]) <= 90 && Math.abs(p[1]) <= 180;
   if (!o.w.every(ok)) throw new Error('the track in this link is damaged');
   return { name: String(o.n || ''), waypoints: o.w, snap: o.s !== 0, loop: o.l !== 0, radius: Math.min(300, Math.max(25, +o.r || 100)), width: Math.min(30, Math.max(3, +o.k || 8)),
-    race: o.rc ? { reverse: !!o.rc.rv, start: ok(o.rc.st) ? o.rc.st : null } : { reverse: false, start: null },
+    race: o.rc ? { reverse: !!o.rc.rv, start: ok(o.rc.st) ? o.rc.st : null, over: (o.rc.ov || []).filter(x => Array.isArray(x) && x.length === 4 && ok([x[0], x[1]])).map(x => ({ at: [x[0], x[1]], dir: [+x[2], +x[3]] })) } : { reverse: false, start: null, over: [] },
     trees: (o.tr || []).filter(x => Array.isArray(x) && ok([x[0], x[1]])).map(x => ({ lat: x[0], lon: x[1], canopy: +x[2] || 10 })),
     manualBuildings: (o.mb || []).filter(m => Array.isArray(m.g) && m.g.length >= 3 && m.g.every(ok) && m.h > 0).map(m => ({ ring: m.g, height: m.h, ...(m.n ? { name: String(m.n) } : {}) })) };
 }
@@ -2335,8 +2346,60 @@ function gameDrops(out, g) {
   }
   return { buildings, points, far };
 }
+// v13: what the game leaves off its road: buildings and props by gameDrops' rules, and the
+// fences and walls with a 4 m piece whose middle is within 0.8 m of the road edge (the game
+// leaves out just those pieces).
+function gameCleared(out, g) {
+  g = g || gameLine(out);
+  if (g.pts.length < 3) return { buildings: [], barriers: [], points: [] };
+  const drops = gameDrops(out, g);
+  const lo = [Infinity, Infinity], hi = [-Infinity, -Infinity];
+  for (const p of g.pts) { lo[0] = Math.min(lo[0], p[0]); lo[1] = Math.min(lo[1], p[1]); hi[0] = Math.max(hi[0], p[0]); hi[1] = Math.max(hi[1], p[1]); }
+  const m = g.width + 5, near = q => q[0] > lo[0] - m && q[0] < hi[0] + m && q[1] > lo[1] - m && q[1] < hi[1] + m;
+  const pieceOnRoad = (a, b) => {
+    const pieces = Math.max(1, Math.ceil(Math.hypot(b[0] - a[0], b[1] - a[1]) / 4));
+    for (let k = 0; k < pieces; k++) {
+      const t = (k + 0.5) / pieces, q = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+      if (near(q) && gameEdgeDistance(g, q) < 0.8) return true;
+    }
+    return false;
+  };
+  return {
+    buildings: (out.buildings || []).filter(b => drops.buildings.has(b.id)),
+    barriers: (out.barriers || []).filter(b => Array.isArray(b.points) && b.points.some((q, k) => k > 0 && pieceOnRoad(b.points[k - 1], q))),
+    points: (out.points || []).filter(p => drops.points.has(p.id) && Array.isArray(p.pos) && near(p.pos) && gameEdgeDistance(g, p.pos) < GAME.propClear)
+  };
+}
+// The quality report's lines for gameCleared: what the game leaves out, by name or kind.
+function clearedNotes(c) {
+  const notes = [], plural = (n, one, many) => `${n} ${n > 1 ? many : one}`;
+  const kinds = list => {
+    const n = new Map();
+    for (const x of list) { const k = String(x.kind || 'other').replace(/_/g, ' '); n.set(k, (n.get(k) || 0) + 1); }
+    return [...n].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([k, v]) => `${v} ${k}${v > 1 && !/s$/.test(k) ? 's' : ''}`).join(', ');
+  };
+  if (c.buildings.length) notes.push(`The game leaves out ${plural(c.buildings.length, 'building', 'buildings')} on its road: ${c.buildings.slice(0, 5).map(b => b.name || b.id).join(', ')}${c.buildings.length > 5 ? '…' : ''}. Nudge the route to keep them.`);
+  if (c.barriers.length) notes.push(`The game leaves out the bits of ${plural(c.barriers.length, 'fence or wall', 'fences and walls')} that cross its road (${kinds(c.barriers)}).`);
+  if (c.points.length) notes.push(`The game leaves out ${plural(c.points.length, 'prop', 'props')} standing on its road (${kinds(c.points)}).`);
+  return notes;
+}
+// v13: the route's street-level crossings, each with the pass the game lifts over the other:
+// `wanted` is what was picked, [{ xy, dir }] (dir: the heading of the pass that goes over,
+// either way round). Each: { xy, s: [first, second] metres along the game's lap,
+// heading: [[dx, dy], [dx, dy]] (unit, the way the race runs), over: 0 | 1 | null (the game picks) }.
+function crossingPlan(out, wanted) {
+  const rc = raceCheck({ ...out, race: out.race ? { ...out.race, crossings: [] } : out.race });
+  return (rc.crossings || []).map(c => {
+    const w = (wanted || []).find(v => v && Array.isArray(v.xy) && Array.isArray(v.dir) && Math.hypot(v.xy[0] - c.xy[0], v.xy[1] - c.xy[1]) < 30);
+    if (!w) return { ...c, over: null };
+    const dots = c.heading.map(h => Math.abs(h[0] * w.dir[0] + h[1] * w.dir[1]));
+    return { ...c, over: dots[1] > dots[0] ? 1 : 0 };
+  });
+}
 // "Will it race well?": problems the game will have with this route, worst first.
 // Each: { level: 'red' | 'amber', label, xy, at } (at = metres along the game's lap).
+// Also returns the street-level crossings (see crossingPlan) and the stretches that run back
+// along the same street (doubled: lists of [x, y]).
 // Suggested item boxes and boost pads, in metres along the game's line (gameLength says how long
 // that line was, so the game can scale if its own comes out a little different). Boost pads go
 // just out of the corner before the longest straights, so they launch karts down them; item box
@@ -2452,14 +2515,27 @@ function raceCheck(out, g) {
     }
   }
   const crossAt = [];
-  for (let c = 0; c < crossings.length; c += 2) if (!crossAt.some(k => loopGap(crossings[c], k) < gap)) crossAt.push(crossings[c]);
-  for (const i of crossAt) probs.push({ level: 'red', label: 'The route crosses itself here at street level: the game puts walls across the crossing', xy: pts[i].slice(0, 2), at: at(i) });
+  for (let c = 0; c < crossings.length; c += 2) if (!crossAt.some(k => loopGap(crossings[c], k.i) < gap)) crossAt.push({ i: crossings[c], j: crossings[c + 1] });
+  // The game lifts one pass over the other on a flyover (Kartmap.flyovers): which one was picked?
+  const head = i => {
+    const a = pts[(i - 2 + n) % n], b = pts[(i + 2) % n], l = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+    return [Math.round((b[0] - a[0]) / l * 1000) / 1000, Math.round((b[1] - a[1]) / l * 1000) / 1000];
+  };
+  const picked = (out.race && Array.isArray(out.race.crossings)) ? out.race.crossings : [];
+  const crossList = crossAt.map(({ i, j }) => {
+    const xy = [round2((pts[i][0] + pts[j][0]) / 2), round2((pts[i][1] + pts[j][1]) / 2)];
+    const p = picked.find(c => Array.isArray(c.xy) && Math.hypot(c.xy[0] - xy[0], c.xy[1] - xy[1]) < 30);
+    return { xy, s: [at(i), at(j)], heading: [head(i), head(j)], over: p && (p.over === 0 || p.over === 1) ? p.over : null };
+  });
+  for (const c of crossList) probs.push({ level: 'amber', label: `The route crosses itself here at street level: the game lifts ${c.over === null ? 'one pass' : `the ${c.over ? 'second' : 'first'} pass (at ${c.s[c.over]} m)`} over the other on a flyover. Pick which road goes over below`, xy: c.xy, at: c.s[0] });
+  const doubled = [];
   for (const [s, len] of runs(close, Math.ceil(15 / step))) {
     const mid = (s + Math.floor(len / 2)) % n;
     let nearCrossing = false;
     for (let k = 0; k < len && !nearCrossing; k++) nearCrossing = crossings.some(c => loopGap((s + k) % n, c) < gap);
     if (nearCrossing) continue;
     probs.push({ level: 'red', label: `The route runs back along the same street for ${Math.round(len * step)} m: both directions' walls overlap`, xy: pts[mid].slice(0, 2), at: at(mid) });
+    doubled.push(Array.from({ length: len }, (_, k) => pts[(s + k) % n].slice(0, 2)));
   }
   // 4. hills too steep for karts (grade over 20 m)
   const k20 = Math.max(1, Math.round(20 / step));
@@ -2477,7 +2553,7 @@ function raceCheck(out, g) {
     if (back > 30) probs.push({ level: 'amber', label: `Open route: the game joins the end back to the start with a ${Math.round(back)} m straight line, which may cut through buildings. Tick Loop to plan the way back`, xy: rp[rp.length - 1], at: Math.round(lap - back) });
   }
   probs.sort((a, b) => (a.level === b.level ? a.at - b.at : a.level === 'red' ? -1 : 1));
-  return { problems: probs, lap: Math.round(lap), seconds: secs, minRadius: Math.round(minR), steepest: Math.round(steep.grade * 10) / 10 };
+  return { problems: probs, lap: Math.round(lap), seconds: secs, minRadius: Math.round(minR), steepest: Math.round(steep.grade * 10) / 10, crossings: crossList, doubled };
 }
 // ======================================================================
 // PURE-END
@@ -2551,7 +2627,13 @@ let trees = [];            // trees you placed: { lat, lon, canopy (metres acros
 let mode = 'pen';          // 'pen' | 'points' | 'trees' | 'build' | 'pan'
 let manualBuildings = [];  // v9a: buildings you drew: { ring: [[lat, lon]…], height, name? }
 let draft = null;          // v9a: corners of the building being drawn
-let raceOpts = { reverse: false, start: null };   // v9a: race direction and start point ([lat, lon], loops only)
+let raceOpts = { reverse: false, start: null, over: [] };   // v9a: race direction and start point ([lat, lon], loops only); v13: over = the passes picked to go over at crossings, [{ at: [lat, lon], dir: [dx, dy] }]
+// v13: the crossing picks in this scan's metres, for withManualExtras.
+function wantedOver() {
+  if (!scanResult || !Array.isArray(raceOpts.over)) return [];
+  const P = makeProjector(scanResult.meta.origin.lat, scanResult.meta.origin.lon);
+  return raceOpts.over.filter(w => w && Array.isArray(w.at) && Array.isArray(w.dir)).map(w => ({ xy: P(w.at[0], w.at[1]), dir: w.dir }));
+}
 let pickingStart = false;  // v9a: next map click sets the start
 let routeReq = 0;          // ignores old routing replies if you click faster than the server answers
 let history = [];          // earlier copies of { waypoints, trees }, so Undo can step back a whole action
@@ -2578,6 +2660,7 @@ try { savedBase = localStorage.getItem('kartmap-basemap'); } catch (e) {}
 L.control.layers(baseLayers, null, { position: 'topright' }).addTo(map);
 map.on('baselayerchange', e => { try { localStorage.setItem('kartmap-basemap', e.name); } catch (err) {} });
 const featureLayer = L.layerGroup().addTo(map);
+const crossLayer = L.layerGroup().addTo(map);   // v13: crossings and doubled-back streets, drawn by showStats
 const bufferLine = L.polyline([], { color: '#4ea8de', opacity: 0.18, lineCap: 'round', lineJoin: 'round', interactive: false }).addTo(map);
 const routeLine = L.polyline([], { color: '#e63946', weight: 5, interactive: false }).addTo(map);
 const wpLayer = L.layerGroup().addTo(map);
@@ -2638,7 +2721,7 @@ function afterFingerLifts(e, fn) {
 function invalidateScan() {
   if (!scanResult) return;
   scanResult = null;
-  featureLayer.clearLayers();
+  featureLayer.clearLayers(); crossLayer.clearLayers();
   els.exportBtn.disabled = true;
   els.sampleBtn.disabled = els.photosBtn.disabled = els.groundBtn.disabled = true;
   $('view3dBtn').disabled = true;
@@ -2857,7 +2940,8 @@ setMode('pen');
 
 function restoreState(prev) {
   const routeChanged = JSON.stringify(prev.waypoints) !== JSON.stringify(waypoints);
-  const raceChanged = JSON.stringify(prev.raceOpts || {}) !== JSON.stringify(raceOpts);
+  const layout = r => JSON.stringify({ reverse: !!(r && r.reverse), start: (r && r.start) || null });   // v13: crossing picks need no re-scan
+  const raceChanged = layout(prev.raceOpts) !== layout(raceOpts);
   waypoints = prev.waypoints;
   trees = prev.trees;
   if (prev.manualBuildings) manualBuildings = prev.manualBuildings;
@@ -2866,6 +2950,7 @@ function restoreState(prev) {
   renderManualBuildings();
   if (routeChanged) rebuildRoute();   // only a route change needs re-snapping (and a re-scan)
   else if (raceChanged) { invalidateScan(); renderRace(); save(); }
+  else if (scanResult) { showStats(); save(); }
   updateUndoButtons();
 }
 function updateUndoButtons() { if (els.redoBtn) els.redoBtn.disabled = !future.length; }
@@ -3224,7 +3309,8 @@ function drawPreview(preview) {
 }
 function showStats() {
   if (!scanResult) return;
-  const out = withManualExtras(scanResult, trees, manualBuildings);
+  const out = withManualExtras(scanResult, trees, manualBuildings, wantedOver());
+  drawCrossings(out);
   const c = out.meta.counts;
   const size = new Blob([prettyJSON(out)]).size;
   const osmTrees = out.points.filter(p => p.kind === 'tree' && p.source !== 'manual').length;
@@ -3271,8 +3357,27 @@ function raceHtml(out, esc) {
   const rc = raceCheck(out);
   const head = `Race check: ${(rc.lap / 1000).toFixed(2)} km lap in the game, about ${rc.seconds} s`;
   if (!rc.problems.length) return `<details open style="margin-top:6px" class="race"><summary>${head}</summary><div class="good" style="margin-top:4px">✓ Races well: no tight hairpins, crossings or steep bits.</div></details>`;
+  // v13: at each crossing, which road goes over (the orange one on the map)
+  const picker = rc.crossings.map((c, k) => `<div class="xpick"><b>Crossing ${k + 1}:</b> which road goes over? <span class="hint">(orange on the map)</span><div class="row">` +
+    [[0, `1st pass (${c.s[0]} m)`], [1, `2nd pass (${c.s[1]} m)`], [-1, 'Game picks']].map(([v, t]) =>
+      `<button class="xover${(c.over === null ? -1 : c.over) === v ? ' on' : ''}" data-cross="${k}" data-over="${v}">${t}</button>`).join('') + '</div></div>').join('');
   return `<details open style="margin-top:6px" class="race"><summary>${head} · ${rc.problems.length} to look at</summary><ul style="margin:4px 0 0;padding-left:18px">` +
-    rc.problems.map(p => `<li class="${p.level}">${p.level === 'red' ? '⛔' : '⚠'} ${esc(p.label)} <span class="hint">(${p.at} m)</span></li>`).join('') + '</ul></details>';
+    rc.problems.map(p => `<li class="${p.level}">${p.level === 'red' ? '⛔' : '⚠'} ${esc(p.label)} <span class="hint">(${p.at} m)</span></li>`).join('') + '</ul>' + picker + '</details>';
+}
+// v13: on the map, each crossing's two passes (orange goes over, dashed goes under; both
+// yellow while the game picks) and each stretch that runs back along the same street (red).
+function drawCrossings(out) {
+  crossLayer.clearLayers();
+  const rc = raceCheck(out), g = gameLine(out), n = g.pts.length;
+  if (n < 10) return;
+  const U = makeUnprojector(out.meta.origin.lat, out.meta.origin.lon);
+  const pass = s => { const i = Math.round(s / g.step), k = Math.round(25 / g.step), line = []; for (let d = -k; d <= k; d++) line.push(U(g.pts[((i + d) % n + n) % n])); return line; };
+  rc.crossings.forEach((c, k) => [0, 1].forEach(p => {
+    const style = c.over === null ? { color: '#ffbe0b', weight: 6, opacity: 0.9 } : c.over === p ? { color: '#fb8500', weight: 8, opacity: 0.95 } : { color: '#212529', weight: 4, opacity: 0.9, dashArray: '6 6' };
+    const what = c.over === null ? 'the game picks which goes over' : c.over === p ? 'goes over on a flyover' : 'goes under';
+    L.polyline(pass(c.s[p]), style).bindTooltip(`Crossing ${k + 1}, ${p ? '2nd' : '1st'} pass (${c.s[p]} m): ${what}`).addTo(crossLayer);
+  }));
+  for (const run of rc.doubled) L.polyline(run.map(U), { color: '#d00000', weight: 7, opacity: 0.6, dashArray: '10 8' }).bindTooltip("Runs back along the same street: both directions' walls overlap").addTo(crossLayer);
 }
 // Everything "Show problem" steps through: things standing on the track, then the race check's spots.
 function allProblems(out) {
@@ -3288,7 +3393,7 @@ function photoHtml(l, esc) {
 // ---- export / load ----
 els.exportBtn.onclick = () => {
   if (!scanResult) return;
-  const final = withManualExtras(scanResult, trees, manualBuildings);
+  const final = withManualExtras(scanResult, trees, manualBuildings, wantedOver());
   const safe = (final.meta.name || 'route').replace(/[^a-z0-9_-]+/gi, '-').toLowerCase();
   const blob = new Blob([prettyJSON(final)], { type: 'application/json' });
   const a = document.createElement('a');
@@ -3309,7 +3414,9 @@ els.loadFile.onchange = async () => {
     waypoints = j.route.waypoints;
     trees = Array.isArray(j.manualTrees) ? j.manualTrees.map(t => ({ lat: t.lat, lon: t.lon, canopy: t.canopy || 10 })) : [];
     manualBuildings = Array.isArray(j.manualBuildings) ? j.manualBuildings.filter(m => Array.isArray(m.ring) && m.height > 0) : [];
-    raceOpts = { reverse: !!j.route.reversed, start: Array.isArray(j.route.startPoint) ? j.route.startPoint : null };
+    const U = j.meta && j.meta.origin ? makeUnprojector(j.meta.origin.lat, j.meta.origin.lon) : null;
+    const over = U && j.race && Array.isArray(j.race.crossings) ? j.race.crossings.filter(c => (c.over === 0 || c.over === 1) && Array.isArray(c.xy) && Array.isArray(c.heading)).map(c => ({ at: U(c.xy), dir: c.heading[c.over] })) : [];
+    raceOpts = { reverse: !!j.route.reversed, start: Array.isArray(j.route.startPoint) ? j.route.startPoint : null, over };
     renderTrees();
     renderManualBuildings();
     els.loop.checked = !!j.route.closed;
@@ -3463,7 +3570,7 @@ els.libLoadBtn.onclick = async () => {
 async function applyTrack(t) {
   remember();
   waypoints = t.waypoints; trees = t.trees || []; manualBuildings = t.manualBuildings || [];
-  raceOpts = t.race || { reverse: false, start: null };
+  raceOpts = { reverse: false, start: null, over: [], ...(t.race || {}) };
   els.snap.checked = t.snap !== false; els.loop.checked = t.loop !== false;
   if (t.radius) { els.radius.value = t.radius; els.radiusVal.textContent = t.radius; }
   if (t.width) els.width.value = t.width;
@@ -3509,12 +3616,27 @@ els.libFile.onchange = async () => {
 renderLibrary();
 renderRace();
 
+// ---- v13: pick which road goes over at a crossing ----
+els.stats.addEventListener('click', e => {
+  const b = e.target.closest('.xover');
+  if (!b || !scanResult) return;
+  const c = raceCheck(withManualExtras(scanResult, trees, manualBuildings, wantedOver())).crossings[+b.dataset.cross];
+  if (!c) return;
+  const v = +b.dataset.over, P = makeProjector(scanResult.meta.origin.lat, scanResult.meta.origin.lon);
+  remember();
+  const keep = (raceOpts.over || []).filter(w => { const q = P(w.at[0], w.at[1]); return Math.hypot(q[0] - c.xy[0], q[1] - c.xy[1]) >= 30; });
+  if (v >= 0) keep.push({ at: makeUnprojector(scanResult.meta.origin.lat, scanResult.meta.origin.lon)(c.xy).map(round6), dir: c.heading[v] });
+  raceOpts = { ...raceOpts, over: keep };
+  save(); showStats();
+  setStatus(v < 0 ? 'The game picks which road goes over at this crossing.' : `The ${v ? '2nd' : '1st'} pass (at ${c.s[v]} m) goes over on a flyover (orange on the map). No re-scan needed.`, 'ok');
+});
+
 // ---- v9b: step through things on the track ----
 let problemIdx = -1;
 const problemMarker = L.circleMarker([0, 0], { radius: 18, color: '#ffbe0b', weight: 3, fill: false, interactive: false });
 els.stats.addEventListener('click', e => {
   if (!e.target.closest('#nextProblemBtn') || !scanResult) return;
-  const probs = allProblems(withManualExtras(scanResult, trees, manualBuildings));
+  const probs = allProblems(withManualExtras(scanResult, trees, manualBuildings, wantedOver()));
   if (!probs.length) return;
   problemIdx = (problemIdx + 1) % probs.length;
   const pr = probs[problemIdx];
@@ -3563,7 +3685,7 @@ async function open3D() {
     setStatus("Couldn't load the 3D viewer: three.js didn't download from unpkg.com (offline or blocked). The rest of the scanner still works.", 'err');
     return;
   }
-  const out = withManualExtras(scanResult, trees, manualBuildings);
+  const out = withManualExtras(scanResult, trees, manualBuildings, wantedOver());
   const plan = scene3dPlan(out);
   const ui = document.createElement('div');
   ui.id = 'view3d';
@@ -3980,7 +4102,7 @@ function drawTrackLine(g, mp, scale, opts) {
 }
 function exportMinimap() {
   if (!scanResult) return;
-  const out = withManualExtras(scanResult, trees, manualBuildings), size = 256;
+  const out = withManualExtras(scanResult, trees, manualBuildings, wantedOver()), size = 256;
   const mp = minimapPlan(out, size, 12);
   const cv = document.createElement('canvas'); cv.width = cv.height = size;
   drawTrackLine(cv.getContext('2d'), mp, 1, { width: 5, road: '#ffffff', edge: '#111111' });
@@ -4014,7 +4136,7 @@ $('errClear').onclick = () => { errLogEntries().length = 0; $('errLog').hidden =
 // v13: everything the game reads, as one zip holding one track folder.
 async function exportForGame() {
   if (!scanResult) return;
-  const out = withManualExtras(scanResult, trees, manualBuildings), folder = gameFolderName(out.meta.name);
+  const out = withManualExtras(scanResult, trees, manualBuildings, wantedOver()), folder = gameFolderName(out.meta.name);
   const safe = (out.meta.name || 'route').replace(/[^a-z0-9_-]+/gi, '-').toLowerCase(), enc = new TextEncoder(), files = [];
   // minimap picture for the HUD
   const size = 256, mp = minimapPlan(out, size, 12), cv = document.createElement('canvas'); cv.width = cv.height = size;
@@ -4040,7 +4162,7 @@ async function exportForGame() {
 $('gameZipBtn').onclick = exportForGame;
 function exportCard() {
   if (!scanResult) return;
-  const out = withManualExtras(scanResult, trees, manualBuildings);
+  const out = withManualExtras(scanResult, trees, manualBuildings, wantedOver());
   const W = 1200, H = 630, cv = document.createElement('canvas'); cv.width = W; cv.height = H;
   const g = cv.getContext('2d');
   g.fillStyle = '#16161d'; g.fillRect(0, 0, W, H);
@@ -4110,7 +4232,7 @@ function save() {
   if (s.canopy) { els.canopy.value = s.canopy; els.canopyVal.textContent = s.canopy; }
   if (Array.isArray(s.trees)) { trees = s.trees; renderTrees(); }
   if (Array.isArray(s.manualBuildings)) { manualBuildings = s.manualBuildings; renderManualBuildings(); }
-  if (s.race) raceOpts = { reverse: !!s.race.reverse, start: Array.isArray(s.race.start) ? s.race.start : null };
+  if (s.race) raceOpts = { reverse: !!s.race.reverse, start: Array.isArray(s.race.start) ? s.race.start : null, over: Array.isArray(s.race.over) ? s.race.over : [] };
   if (Array.isArray(s.waypoints) && s.waypoints.length) {
     waypoints = s.waypoints;
     map.fitBounds(waypoints, { padding: [40, 40], maxZoom: 17 });

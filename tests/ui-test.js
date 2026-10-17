@@ -500,6 +500,33 @@ const overpass = { elements: [
     check('reload brings back the last route', /^3 points/.test(await r.page.textContent('#routeInfo')) && r.errors.length === 0, await r.page.textContent('#routeInfo') + ' ' + r.errors.join('; '));
     await r.ctx.close();
   }
+  if (V >= 13 && /crossingPlan/.test(html)) {
+    // ---------- v13: a route that crosses itself: pick which road goes over ----------
+    const x = await openPage('ok');
+    const bow = [[-150, -100], [150, 100], [150, -100], [-150, 100]].map(([dx, dy]) => { const q = off(dx, dy); return [q.lat, q.lon]; });
+    await x.page.evaluate(w => localStorage.setItem('kartmap-v1', JSON.stringify({ waypoints: w, snap: false, loop: true, name: 'bowtie' })), bow);
+    await x.page.reload(); await x.page.waitForTimeout(1200);
+    await x.page.click('#scanBtn');
+    await x.page.waitForFunction(() => !document.getElementById('exportBtn').disabled, null, { timeout: 15000 });
+    const xs = await x.page.textContent('#stats');
+    check('v13 crossing: the race check lists it with a "which road goes over?" picker, the game picks at first', /Crossing 1/.test(xs) && /which road goes over/.test(xs) && /lifts one pass/.test(xs) && await x.page.$eval('.xover.on', b => b.dataset.over) === '-1', xs.slice(0, 300));
+    const lines = () => x.page.evaluate(() => { let o = 0, y = 0; for (const c of document.querySelectorAll('.leaflet-overlay-pane canvas')) { const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; for (let i = 0; i < d.length; i += 4) { if (d[i] > 240 && d[i + 1] > 120 && d[i + 1] < 140 && d[i + 2] < 10) o++; if (d[i] > 240 && d[i + 1] > 180 && d[i + 1] < 200 && d[i + 2] < 20) y++; } } return { o, y }; });
+    const before = await lines();
+    await x.page.click('.xover[data-over="1"]'); await x.page.waitForTimeout(200);
+    const after = await lines();
+    if (process.env.SHOT3) await x.page.screenshot({ path: process.env.SHOT3 });
+    check('v13 crossing: picking the 2nd pass marks it, says so, and draws it orange on the map (yellow before)', await x.page.$eval('.xover.on', b => b.dataset.over) === '1' && /2nd pass .* goes over/.test(await x.page.textContent('#status')) && before.y > 50 && after.o > 50, JSON.stringify([before, after]));
+    const [xd] = await Promise.all([x.page.waitForEvent('download'), x.page.click('#exportBtn')]);
+    const xj = JSON.parse(fs.readFileSync(await xd.path(), 'utf8'));
+    const xc = xj.race && xj.race.crossings;
+    check('v13 crossing: the export says which pass goes over, with both headings', xc && xc.length === 1 && xc[0].over === 1 && xc[0].heading.length === 2 && xc[0].s[0] < xc[0].s[1], JSON.stringify(xc));
+    const saved = await x.page.evaluate(() => JSON.parse(localStorage.getItem('kartmap-v1')).race.over);
+    check('v13 crossing: the pick is remembered with the route', Array.isArray(saved) && saved.length === 1, JSON.stringify(saved));
+    await x.page.keyboard.press('Control+z'); await x.page.waitForTimeout(200);
+    check('v13 crossing: Undo takes the pick back without a re-scan', !(await x.page.isDisabled('#exportBtn')) && await x.page.$eval('.xover.on', b => b.dataset.over) === '-1');
+    check('v13 crossing: no script errors', x.errors.length === 0, x.errors.join('; '));
+    await x.ctx.close();
+  }
   await browser.close();
   const failed = results.filter(r => !r.ok).length;
   console.log(`\n${results.length - failed} passed, ${failed} failed`);
