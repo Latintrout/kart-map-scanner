@@ -1,8 +1,8 @@
 # kartmap file format (version 2)
 
-_Last updated for scanner v13 (2026-10-17). v9b, v11 and v12b made no format changes (v11's `.glb` is a separate preview model). **(v12a)** adds ground heights, **(v12c)** `meta.minimap`, **(v13)** the bare ground under bridges, a height grid inside the file, shop signs, street signs, labelled height guesses and suggested item boxes / boost pads._ Fields marked **(v8)**, **(v8.1)**, **(v8.2)**, **(v8.3)** or **(v9a)** are newer than version 1. All are optional, so readers of version 1 files still work. Files say `"version": 2` from scanner v8.2 on, matching the "kartmap v2" the game's loader (brisbane-kart, `kartmap.gd`) was written for. That loader accepts versions 1 and 2 and **rejects anything higher**, so a future version 3 needs a loader update first._
+_Last updated for scanner v14 (2026-10-29). **(v14)** adds more free detail: speed limits, bridge kinds, level crossings, stations, place names, water and sport types, year built and heritage, Overture shop signs, and landmark facts from Wikipedia and Wikidata. Earlier: v9b, v11 and v12b made no format changes (v11's `.glb` is a separate preview model). **(v12a)** adds ground heights, **(v12c)** `meta.minimap`, **(v13)** the bare ground under bridges, a height grid inside the file, shop signs, street signs, labelled height guesses and suggested item boxes / boost pads._ Fields marked **(v8)**, **(v8.1)**, **(v8.2)**, **(v8.3)** or **(v9a)** are newer than version 1. All are optional, so readers of version 1 files still work. Files say `"version": 2` from scanner v8.2 on, matching the "kartmap v2" the game's loader (brisbane-kart, `kartmap.gd`) was written for. That loader accepts versions 1 and 2 and **rejects anything higher**, so a future version 3 needs a loader update first._
 
-**Guesses are always marked.** Any field ending in `Source` (`heightSource`, `widthSource`, `roofShapeSource`) says where a value came from. The values `default`, `estimated`, `guess` and **(v8.3)** `ml-estimate` mean it's a guess: later data (LiDAR, hand edits) may replace guesses freely, but must never replace real values (`osm`, `levels`, `lanes`, `lidar`, **(v8.3)** `overture`, **(v9a)** `manual`).
+**Guesses are always marked.** Any field ending in `Source` (`heightSource`, `widthSource`, `roofShapeSource`) says where a value came from. The values `default`, `estimated`, `guess` and **(v8.3)** `ml-estimate` mean it's a guess: later data (LiDAR, hand edits) may replace guesses freely, but must never replace real values (`osm`, `levels`, `lanes`, `lidar`, **(v8.3)** `overture`, **(v9a)** `manual`, **(v14)** `wikidata`).
 
 Files ending in `.json` named `kartmap_<name>_<date>.json` come from Brandon's Kart Map Scanner
 (https://latintrout.github.io/kart-map-scanner/). The scanner reads free OpenStreetMap (OSM) data
@@ -52,8 +52,10 @@ into a level in the Godot kart game.
 | `elevation` | **(v12a)** `null`, or ground heights from the Queensland LiDAR terrain model: `{ source, service, licence: "CC BY-SA", attribution, base, units, groundOnly, metresPerSample, trackLowest, trackHighest, climb, descent, steepest: { grade, at }, bridgedPoints, counts, grid, terrainFile?, terrainSpacing? }`. `base` = metres above sea level (AHD) of the track's lowest point; every other height is metres above `base`. `grade` is % over 20 m (+ uphill in race direction), `at` = metres along the centerline. **(v13)** `grid`: the ground every 10 m over `bbox`, `{ minX, maxY, spacing, width, height, encoding, missing, data }`, encoded like the terrain file below, so the game's ground can follow the hills without the separate terrain file |
 | `generator` | **(v8)** Which scanner version made the file, e.g. `"kart-map-scanner v8.1"` |
 | `quality` | **(v8.1)** Report card: `heights` (% measured / estimated / default), `roofShapes` (% mapped / guessed), `buildingsOnTrack` (ids), `barriersOnTrack`, `propsOnTrack`, `treesTyped` (%), and `notes` (plain-English warnings). **(v13)** `leftOffTrack`: `{ buildings, barriers, points }` (ids) that the game leaves off its road by its own rules (buildings within 1.5 m of its road edge, trees and props on it, fences and walls whose 4 m pieces cross it); the notes list them by name and kind |
-| `attribution` | "© OpenStreetMap contributors, ODbL", plus **(v8.3)** Overture and Queensland imagery credits when those were used. Must appear in the game's credits |
-| `overture` | **(v8.3)** `{ release, heightsFilled, added }` when Overture Maps filled gaps (ODbL, same as OSM) |
+| `attribution` | "© OpenStreetMap contributors, ODbL", plus **(v8.3)** Overture and Queensland imagery credits when those were used, and **(v14)** Overture places (CDLA Permissive 2.0), Wikidata (CC0) and Wikipedia (CC BY-SA). Must appear in the game's credits |
+| `overture` | **(v8.3)** `{ release, heightsFilled, added }` when Overture Maps filled gaps (ODbL, same as OSM). **(v14)** `placesAdded`: shops added from Overture Places (CDLA Permissive 2.0) |
+| `places` | **(v14)** Where the track is: `{ suburb?, city?, state?, nearby }`. `suburb`, `city` and `state` are the OSM council areas the start point is inside (admin levels 9-10, 5-8 and 3-4); without them `suburb` is the nearest suburb label. `nearby`: up to 8 place names within 2 km, nearest first. Names only, for the track card and menus |
+| `landmarkFacts` | **(v14)** Set after "📚 Landmark facts": `{ wikipedia, wikidata, placesAdded, heightsFilled, checked }` (how many landmarks Wikipedia matched or added, how many got Wikidata facts, how many building heights became real, and the date) |
 | `imagery` | **(v8.3)** Set after "Sample colours": `{ source, service, licence: "CC BY-SA", attribution, vintage, noWarranty, metresPerPixel, sampled: {buildings, areas} }`. The photos are 2022 or older |
 | `groundImage` | **(v8.3)** Set after "Export ground image": `{ file, minX, minY, maxX, maxY, width, height, metresPerPixel, colours }`. **(v11)** `width × metresPerPixel` now always covers the area exactly (rounding fix). A top-down PNG for the ground texture. Top-left pixel = (`minX`, `maxY`), north is up |
 
@@ -90,6 +92,8 @@ Each: `{ id, kind, name?, width, widthSource, points, bridge?, tunnel?, layer?, 
 - **(v8.1)** `crossing`: on crossing paths, how it's painted: `zebra`, `marked`, `signals`, `unmarked` or `crossing`.
 - **(v8.2)** `lit: true`: street lighting. Piers and breakwaters mapped as lines also come in as roads (`kind: "pier"`, 4 m wide unless mapped).
 - **(v8.1)** `incline`: `up` / `down` (relative to the drawing direction; common on `steps`, good ramp/jump candidates), or a slope in percent.
+- **(v14)** `speedLimit`: the posted limit in km/h when mapped as a number (mph is converted). Codes like `AU:urban` are left out. Handy for AI kart speeds or speed signs.
+- **(v14)** On bridges: `bridgeStructure` (`truss`, `arch`, `suspension`, `cable-stayed`, `beam`, `girder`…), `bridgeType` (`viaduct`, `boardwalk`, `movable`, `cantilever`…: OSM's `bridge=` value when it isn't just `yes`) and `bridgeName`, so a famous bridge can get the right model. Railways keep the same three fields.
 
 ## buildings
 
@@ -108,7 +112,9 @@ Each: `{ id, kind, name?, height, heightSource, footprint, holes?, roofShape?, r
 - **(v12a)** `ground`: height of the lowest ground under the outline (m above `meta.elevation.base`), so the building starts there and doesn't float on a slope. `height` and `minHeight` are still measured from the building's own ground.
 - `holes` (optional) lists courtyards to cut out, each its own polygon.
 - **(v13)** `heightSource: "guess"` with `heightGuess` saying why: `shop` (7 m, 8 m if large), `similar buildings nearby` (median of 4+ measured buildings of similar size within 100 m), `house`, `industrial area`, `commercial area` / `retail area`, or `size`. Replaces most `default` heights. Still a guess: anything measured may replace it.
-- **(v13)** `shops`: `[{ type, sign }]`, up to 3 shops in or right beside this building. `type` is what it sells (`cafe`, `chicken`, `pizza`, `pub`, `hairdresser`, `supermarket`, `bank`… or plain `shop`); `sign` is a **made-up, jokey name** for that kind of shop ("Chicken BBQ", "Bean There", "Curl Up & Dye"), the same every scan. **Real shop and brand names are never in the file:** shops' `name` is replaced by their sign name, and branded buildings, malls and shopping strips have no `name`. Street, park and river names are kept.
+- **(v13)** `shops`: `[{ type, sign }]`, up to 3 shops in or right beside this building. **(v14)** Shops OSM is missing can come from Overture Places (same types, same made-up signs; only the kind of shop is read). `type` is what it sells (`cafe`, `chicken`, `pizza`, `pub`, `hairdresser`, `supermarket`, `bank`… or plain `shop`); `sign` is a **made-up, jokey name** for that kind of shop ("Chicken BBQ", "Bean There", "Curl Up & Dye"), the same every scan. **Real shop and brand names are never in the file:** shops' `name` is replaced by their sign name, and branded buildings, malls and shopping strips have no `name`. Street, park and river names are kept.
+- **(v14)** `built`: the year it was built (OSM `start_date`, or Wikidata after "Landmark facts"). `heritage: true`: heritage listed.
+- **(v14)** `heightSource: "wikidata"`: a landmark building whose height was only a guess took its real height from Wikidata after "📚 Landmark facts" (`heightNote: "floors × 3 m"` when Wikidata only had the number of floors). Treat it as measured. OSM, Overture and typed-in heights are never replaced.
 - **(v8) Looks, when OSM has them (all optional):**
   - `roofShape`: `flat`, `gabled`, `hipped`, `pyramidal`, `skillion`, `dome`…
   - `roofColour` and `colour` (walls): a colour name (`red`) or hex (`#ffffff`).
@@ -123,6 +129,7 @@ Each: `{ id, kind, name?, polygon, holes?, surface? }`
 - `kind` is the OSM type. Common ones: `water`, `swimming_pool`, `beach`, `park`, `garden`, `grass`, `wood`, `scrub`, `parking`, `pedestrian` (paved plaza), `playground`, `residential` / `commercial` / `industrial` (whole-district zoning: use as faint ground tint at most).
 - `holes` (optional) are cut-outs, e.g. the island in the Streets Beach lagoon.
 - **(v8.3)** `sampledColour`: hex colour read from the aerial photo, after "Sample colours". Never set on zoning areas (a whole suburb has no single colour).
+- **(v14)** `waterType` on water: `lake`, `pond`, `river`, `reservoir`, `lagoon`, `canal`… `sport` on pitches and courts: `soccer`, `tennis`, `cricket`, `basketball`… Railway stations mapped as areas have kind `station`.
 - Areas can overlap: a pool sits inside a park, which sits inside a residential zone. Draw large or zoning areas first, then smaller specific ones on top.
 - Very large areas were trimmed to `meta.areasTrimmedTo`, so a trimmed edge may run in a straight line along that box.
 
@@ -136,7 +143,7 @@ Each: `{ id, kind, name?, points, bridge?, tunnel?, layer?, electrified?, trackD
 
 ## markings (v8.1)
 
-Each: `{ id, kind, style?, pos }`. `kind`: `crossing` (with `style`: `zebra`, `marked`, `signals`, `unmarked`), `stop_line`, `give_way_line`. Paint them on the nearest road.
+Each: `{ id, kind, style?, pos }`. `kind`: `crossing` (with `style`: `zebra`, `marked`, `signals`, `unmarked`), `stop_line`, `give_way_line`. Paint them on the nearest road. **(v14)** `level_crossing`: a road or path over a railway, `style` `gates` (boom gates), `lights`, `footpath` (a path crossing) or `plain`.
 
 ## barriers (v8)
 
@@ -158,6 +165,7 @@ Each: `{ id, kind, group, source, pos, name?, canopy? }`
 - **(v8.1)** `trackDist` and `onTrack` as for buildings. Crossings moved from props to `markings`.
 - Shops and offices are **not** props. **(v8.2)** Cafés, restaurants, bars, ice-cream places, toilets, parking meters and playgrounds **are** (the game draws outdoor tables, toilet blocks and so on). They're never landmarks.
 - **(v8.2)** `artworkType` on artworks (`statue`, `sculpture`, `mural`…).
+- **(v14)** `height` in metres on any prop that has one mapped (flagpoles, masts, towers). Group `railway`: `station`, `halt`, `tram_stop`, `signal`, `buffer_stop`, `subway_entrance`.
 - `source`: `osm` (mapped individually), `osm-tree_row` (generated every 8 m along a mapped row of trees) or `manual` (placed by hand in the scanner).
 - `canopy`: tree crown diameter in metres, only on `manual` trees. For others, pick a default (about 6 m).
 
@@ -171,6 +179,11 @@ Each: `{ id, name, kind, pos, ref?, wikidata?, wikipedia? }`
 - `ref` points to the building, area or prop in this file that it belongs to, so the game can swap that generic piece for a hand-made model. No `ref` means it's only a named spot.
 - `wikidata` and `wikipedia` (when present) help find reference photos.
 - **(v8.3)** `photos`: up to 3 reference photos from Wikimedia Commons, `[{ file, thumb, page, licence, author }]`, after "Find landmark photos". `photosFrom` is `wikidata` (the landmark's own photo) or `nearby` (Commons photos geotagged within 100 m, ones naming the landmark first: may show a neighbour). For modelling reference only; if a photo is used in the game itself, credit the author and follow its licence (`page` has the details).
+- **(v14)** `built` and `heritage` as for buildings. Named railway stations are landmarks (kind `station`). Suburb and town names never are.
+- **(v14) After "📚 Landmark facts":**
+  - `description`: one line saying what it is ("art museum in Brisbane"), from Wikipedia or Wikidata.
+  - `facts`: from Wikidata, `{ description?, height?, floors?, built?, opened?, type? }`. `height` in metres (to the top, so it may include a spire or mast), `floors` above ground, `built` / `opened` years, `type` what Wikidata says it is ("church building, heritage-listed site").
+  - `source: "wikipedia"`: a notable place OSM doesn't flag, found on Wikipedia within the scan radius of the track. `kind` is a best guess from its description (`bridge`, `station`, `museum`, `memorial`, `park`, `stadium`, `theatre`, `place_of_worship`, `building` or `notable`), `ref` is the building it stands in when there is one. Suburbs, streets, rivers, events, companies, shops, eateries and hotels are left out, so no business names come in this way.
 - Unnamed things are never landmarks.
 
 ## race (v8.1)
@@ -190,7 +203,7 @@ Suggestions only (`suggested: true`). The game or a later editor may move them.
 
 ## IDs
 
-`w123` = OSM way, `n123` = OSM node, `r123` = OSM multipolygon (`r123-2` = its second piece), `m1` = manual tree, `w123-4` = 4th tree generated from tree row `w123`, `L1` = landmark, **(v8.3)** `ov-<overture id>` = building added from Overture, **(v9a)** `mb1` = building drawn by hand. IDs are unique within a file.
+`w123` = OSM way, `n123` = OSM node, `r123` = OSM multipolygon (`r123-2` = its second piece), `m1` = manual tree, `w123-4` = 4th tree generated from tree row `w123`, `L1` = landmark, **(v8.3)** `ov-<overture id>` = building added from Overture, **(v9a)** `mb1` = building drawn by hand, **(v14)** landmarks found on Wikipedia continue the `L` numbers. IDs are unique within a file.
 
 ## Level-building rules (agreed decisions)
 

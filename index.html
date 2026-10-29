@@ -194,6 +194,7 @@
       <input id="radius" type="range" min="25" max="300" step="5" value="100"></label>
     <label>Track width (m) <input id="width" type="number" min="3" max="30" step="0.5" value="8"></label>
     <label class="inline"><input id="useOverture" type="checkbox" checked> Fill building gaps from Overture (recommended)</label>
+    <label class="inline"><input id="usePlaces" type="checkbox" checked> Add shops OSM is missing from Overture Places (more shop signs, made-up names)</label>
     <button id="scanBtn" class="primary" style="width:100%;margin-top:6px">Scan area</button>
     <div id="status">Hold and drag on the map to draw a route.</div>
     <details id="errLog" hidden style="margin-top:6px;font-size:12px">
@@ -229,6 +230,7 @@
   <section>
     <h2>5. Extras (optional)</h2>
     <button id="sampleBtn" style="width:100%" disabled>Sample colours from aerial photo</button>
+    <button id="factsBtn" style="width:100%;margin-top:6px" disabled title="Finds notable places along the track on Wikipedia, and real heights and build years for famous buildings on Wikidata (free, no login)">📚 Landmark facts (Wikipedia + Wikidata)</button>
     <button id="photosBtn" style="width:100%;margin-top:6px" disabled>Find landmark photos</button>
     <button id="groundBtn" style="width:100%;margin-top:6px" disabled>Export ground image (PNG)</button>
     <button id="heightsBtn" style="width:100%;margin-top:6px" disabled>⛰ Get ground heights (QLD LiDAR)</button>
@@ -331,7 +333,8 @@ const PROP_TAGS = {
   barrier: /^(bollard|gate|lift_gate|block|cycle_barrier|stile|turnstile|planter|swing_gate)$/,
   power: /^(pole|tower)$/,
   emergency: /^(fire_hydrant|phone|defibrillator)$/,
-  advertising: /./
+  advertising: /./,
+  railway: /^(station|halt|tram_stop|signal|buffer_stop|subway_entrance)$/   // v14: stations, signals, buffers
 };
 // Returns { group, kind } for a prop, or null if this node isn't one.
 function propKind(t) {
@@ -355,11 +358,12 @@ const LANDMARK_TAGS = {
   historic: /./,
   man_made: /^(tower|obelisk|lighthouse|water_tower|windmill)$/,
   amenity: /^(fountain|theatre|arts_centre|place_of_worship|townhall|library|planetarium|events_venue|conference_centre|cinema|clock)$/,
-  leisure: /^(stadium|water_park|marina|bandstand)$/
+  leisure: /^(stadium|water_park|marina|bandstand)$/,
+  railway: /^station$/   // v14: named stations are easy to recognise
 };
 // Returns the landmark "kind" if this element is a landmark, else null. Unnamed things never are.
 function extractLandmark(t) {
-  if (!t.name) return null;
+  if (!t.name || t.place) return null;   // v14: suburb and town names are places, not things to model
   // Most specific first (v8.2): the game builds a Ferris wheel for big_wheel, sculptures for statue/sculpture…
   if (t.attraction) return t.attraction;
   if (t.tourism === 'artwork' && t.artwork_type) return t.artwork_type;
@@ -374,6 +378,7 @@ function extractLandmark(t) {
 
 function areaKind(t) {
   if (t.railway === 'platform' || t.public_transport === 'platform') return 'platform';
+  if (t.railway === 'station') return 'station';   // v14
   return t.leisure || t.landuse || t.natural || t.amenity || t.man_made || t.tourism || t.historic ||
     (t.highway ? 'pedestrian' : null) || 'area';
 }
@@ -391,6 +396,13 @@ function buildingLooks(t) {
   const mh = parseNum(t.min_height); if (mh) out.minHeight = mh;   // e.g. a walkway raised off the ground
   const ml = parseNum(t['building:min_level']); if (!mh && ml) out.minHeight = round2(ml * 3);   // starts at this floor
   return out;
+}
+// v14: an OSM maxspeed as km/h ("60", "40 mph"), or null for codes like "AU:urban" and "signals".
+function speedLimit(v) {
+  const m = /^\s*(\d+(?:\.\d+)?)\s*(mph|km\/h|kmh|kph)?\s*$/i.exec(String(v || ''));
+  if (!m) return null;
+  const n = parseFloat(m[1]) * (/mph/i.test(m[2] || '') ? 1.609344 : 1);
+  return n > 0 && n <= 200 ? Math.round(n) : null;
 }
 // Extra road details: bridges, tunnels, which level they're on, surface.
 function roadExtras(t) {
@@ -410,6 +422,13 @@ function roadExtras(t) {
      ((t['sidewalk:right'] && t['sidewalk:right'] !== 'no') ? 'right' : null));
   if (sw) out.sidewalk = sw;
   if (t.footway === 'crossing' || t.cycleway === 'crossing' || t.path === 'crossing') out.crossing = crossingStyle(t);
+  // v14: speed limit and what kind of bridge it is (arch, suspension, truss…), for models and signs
+  const sl = speedLimit(t.maxspeed); if (sl) out.speedLimit = sl;
+  if (out.bridge) {
+    if (t['bridge:structure']) out.bridgeStructure = t['bridge:structure'];
+    if (!/^(yes|1|true)$/.test(t.bridge)) out.bridgeType = t.bridge;   // viaduct, boardwalk, movable, cantilever…
+    if (t['bridge:name']) out.bridgeName = t['bridge:name'];
+  }
   if (t.incline) {
     if (/^(up|down)$/.test(t.incline)) out.incline = t.incline;     // relative to the direction the line is drawn
     else { const n = parseFloat(String(t.incline).replace('%', '')); if (isFinite(n)) out.incline = n; }   // percent slope
@@ -431,6 +450,7 @@ function serverBudget(routeLengthM, radius) {
 
 function buildQuery(routeLatLngs, radius) {
   const poly = downsample(routeLatLngs, 20).map(p => p[0].toFixed(6) + ',' + p[1].toFixed(6)).join(',');
+  const at = routeLatLngs[0][0].toFixed(6) + ',' + routeLatLngs[0][1].toFixed(6);   // v14: where the track starts
   const b = serverBudget(routeLength(routeLatLngs), radius);
   // Grab the ways (.w) and nodes (.n) near the route once each, then filter those sets by tag.
   // [timeout] and [maxsize] are RESERVATIONS: Overpass queues requests by how much they ask for
@@ -479,8 +499,15 @@ rel(bw.w)["type"="multipolygon"]->.r;
   node.n["advertising"];
   node.n["shop"];
   node.n["cuisine"];
+  node.n["railway"];
+  node(around:2000,${at})["place"~"^(suburb|quarter|neighbourhood|town|village|city)$"]["name"];
 );
-out geom;`;
+out geom;
+is_in(${at})->.inside;
+area.inside["boundary"="administrative"]["admin_level"]["name"];
+out tags;`;
+  // v14: the last three lines name the suburb, city and state the track starts in (cheap: tags only).
+  // Place names within 2 km are for the track card; they are never drawn.
 }
 
 // Turns a list of failed tries into a plain explanation.
@@ -582,6 +609,35 @@ function pointsAlong(xy, step) {
     carry = d - len;
   }
   return out;
+}
+
+// v14: when it was built and whether it's heritage listed (OSM start_date, heritage). Year only.
+function ageTags(t) {
+  const out = {};
+  const y = /^~?(\d{4})/.exec(String(t.start_date || t['construction_date'] || ''));
+  if (y) out.built = +y[1];
+  if ((t.heritage && t.heritage !== 'no') || t['heritage:operator'] || t['ref:qhr'] || t.historic === 'building') out.heritage = true;
+  return out;
+}
+// v14: how a road or path crosses a railway: 'gates' (boom gates), 'lights', 'footpath' or 'plain'.
+function levelCrossingStyle(t) {
+  if (t.railway === 'crossing') return 'footpath';
+  const b = t['crossing:barrier'];
+  if (b && b !== 'no') return 'gates';
+  if (t['crossing:light'] === 'yes' || t['crossing:bell'] === 'yes') return 'lights';
+  return 'plain';
+}
+// v14: names for where the track is. `admin` = [{ name, level }] council areas the start is
+// inside (OSM admin_level: 10 suburb, 9 locality group, 6-8 city/council, 4 state); `nodes` =
+// place labels within 2 km. Returns { suburb?, city?, state?, nearby } or null.
+function placesSummary(admin, nodes) {
+  const pick = test => { const a = (admin || []).filter(x => test(x.level)).sort((p, q) => q.level - p.level)[0]; return a ? a.name : undefined; };
+  const near = (nodes || []).map(n => ({ ...n, d: Math.hypot(n.pos[0], n.pos[1]) })).sort((a, b) => a.d - b.d);
+  const out = { suburb: pick(l => l >= 9), city: pick(l => l >= 5 && l <= 8), state: pick(l => l === 4 || l === 3) };
+  if (!out.suburb) { const s = near.find(n => /^(suburb|quarter|neighbourhood|village|town)$/.test(n.kind)); if (s) out.suburb = s.name; }
+  out.nearby = [...new Set(near.map(n => n.name))].slice(0, 8);
+  for (const k of Object.keys(out)) if (out[k] === undefined) delete out[k];
+  return out.suburb || out.city || out.nearby.length ? out : null;
 }
 
 // Average of a shape's corners: good enough to place a landmark marker.
@@ -934,6 +990,9 @@ function attributionFor(used) {
   const parts = ['© OpenStreetMap contributors, ODbL'];
   if (used && used.overture) parts.push('Overture Maps Foundation (ODbL), including Microsoft ML Buildings');
   if (used && used.imagery) parts.push('Includes material © State of Queensland (DNRMMRRD), CC BY-SA; © Planet Labs Netherlands');
+  if (used && used.places) parts.push('Overture Maps Foundation places (CDLA Permissive 2.0)');   // v14
+  if (used && used.wikidata) parts.push('Landmark facts: Wikidata (CC0)');   // v14
+  if (used && used.wikipedia) parts.push('Place descriptions: Wikipedia (CC BY-SA)');   // v14
   if (used && used.elevation) parts.push('Ground heights: Includes material © State of Queensland (DNRMMRRD); © Commonwealth of Australia (Geoscience Australia, The Australian Hydrographic Office); © www.deepreef.org 2025, CC BY-SA');
   return parts.join('; ');
 }
@@ -1063,7 +1122,7 @@ function applyColourSamples(out, tiles, unprojFactory, info) {
     vintage: '2022 or older (urban areas mostly 2021)', noWarranty: 'The State of Queensland makes no warranty about this data.',
     metresPerPixel: (info && info.metresPerPixel) || null, sampled: counts
   };
-  out.meta.attribution = attributionFor({ overture: !!out.meta.overture, imagery: true, elevation: !!out.meta.elevation });
+  out.meta.attribution = creditsFor(out.meta, { imagery: true });
   return counts;
 }
 
@@ -1135,7 +1194,7 @@ function buildOutput(data, o) {
   const noteLandmark = (t, ref, pos, priority) => {
     const kind = extractLandmark(t);
     if (!kind) return;
-    const l = { name: t.name, kind, ref, pos };
+    const l = { name: t.name, kind, ref, pos, ...ageTags(t) };   // v14: year built, heritage listed
     if (t.wikidata) l.wikidata = t.wikidata;
     if (t.wikipedia) l.wikipedia = t.wikipedia;
     landmarkCands.push({ l, priority });
@@ -1163,6 +1222,8 @@ function buildOutput(data, o) {
     const a = { id, kind, name, polygon };
     if (h.length) a.holes = h;
     if (t.surface) a.surface = t.surface;
+    if (t.water) a.waterType = t.water;   // v14: lake, pond, river, reservoir, lagoon…
+    if (t.sport) a.sport = t.sport;       // v14: what a pitch or court is for (soccer, tennis, cricket…)
     res.areas.push(a);
     polygon.forEach(grow);
     preview.push({ cat: 'area', id, kind, xy: [polygon, ...h] });
@@ -1174,7 +1235,7 @@ function buildOutput(data, o) {
     const sk = shopKind(t);
     if (sk) shopSpots.push({ id, type: sk, pos: centroid(footprint), building: id });
     guessHints.set(id, { shop: !!sk, addr: !!t['addr:housenumber'] });
-    const b = { id, kind: t.building, name, height, heightSource, footprint, ...buildingLooks(t) };
+    const b = { id, kind: t.building, name, height, heightSource, footprint, ...buildingLooks(t), ...ageTags(t) };
     if (t['overture:added']) b.source = 'overture';   // v8.3: not in OSM, added from Overture
     if (holes && holes.length) b.holes = holes;
     res.buildings.push(b);
@@ -1203,13 +1264,25 @@ function buildOutput(data, o) {
     });
   };
 
+  const admin = [], placeNodes = [];   // v14: which suburb / city the track is in
   for (const el of (data.elements || [])) {
     const t = el.tags || {};
     const name = safeName(t, (el.type === 'node' ? 'n' : el.type === 'relation' ? 'r' : 'w') + el.id);   // v13: no real shop or brand names
 
+    if (el.type === 'area') {   // v14: from is_in: the council areas the start is inside
+      const lv = parseInt(t.admin_level, 10);
+      if (t.name && isFinite(lv)) admin.push({ name: t.name, level: lv });
+      continue;
+    }
     if (el.type === 'node') {
       if (el.lat == null) continue;
       const pos = P(el.lat, el.lon);
+      if (t.place) { if (t.name) placeNodes.push({ name: t.name, kind: t.place, pos }); continue; }   // v14: names only, never drawn
+      if (t['overture:place']) {   // v14: an Overture shop: only its sign (no prop, no name)
+        const sk = shopKind(t);
+        if (sk) shopSpots.push({ id: String(el.id), type: sk, pos });
+        continue;
+      }
       const prop = propKind(t);
       if (prop) {
         grow(pos);
@@ -1217,13 +1290,15 @@ function buildOutput(data, o) {
         if (name) pt.name = name;
         if (prop.kind === 'tree') Object.assign(pt, treeInfo(t));
         if (t.artwork_type) pt.artworkType = t.artwork_type;
+        const ph = parseNum(t.height); if (ph && prop.kind !== 'tree') pt.height = ph;   // v14: flagpoles, masts, towers
         res.points.push(pt);
         const pv = { cat: 'point', kind: prop.kind, xy: pos };
         preview.push(pv); previewOf.set(pt.id, pv);
       }
       // Road markings (v8.1): crossings, stop and give-way lines.
       const mk = t.highway === 'crossing' ? { kind: 'crossing', style: crossingStyle(t) }
-        : t.highway === 'stop' ? { kind: 'stop_line' } : t.highway === 'give_way' ? { kind: 'give_way_line' } : null;
+        : t.highway === 'stop' ? { kind: 'stop_line' } : t.highway === 'give_way' ? { kind: 'give_way_line' }
+        : /^(level_crossing|crossing)$/.test(t.railway || '') ? { kind: 'level_crossing', style: levelCrossingStyle(t) } : null;   // v14: road or path over a railway
       if (mk) { res.markings.push({ id: 'n' + el.id, ...mk, pos }); grow(pos); preview.push({ cat: 'marking', kind: mk.kind, xy: pos }); }
       noteLandmark(t, prop ? 'n' + el.id : null, pos, 0);
       const sk = shopKind(t);   // v13: shops get a sign on their building
@@ -1272,7 +1347,7 @@ function buildOutput(data, o) {
       const ex = roadExtras(t);
       const rail = { id, kind: t.railway, points: xy };
       if (name) rail.name = name;
-      for (const k of ['bridge', 'tunnel', 'layer', 'lit']) if (ex[k] !== undefined) rail[k] = ex[k];
+      for (const k of ['bridge', 'tunnel', 'layer', 'lit', 'bridgeStructure', 'bridgeType', 'bridgeName']) if (ex[k] !== undefined) rail[k] = ex[k];   // v14: bridge kinds
       if (t.electrified && t.electrified !== 'no') rail.electrified = true;
       res.railways.push(rail);
       xy.forEach(grow);
@@ -1325,7 +1400,7 @@ function buildOutput(data, o) {
   }
   // Smarter height guesses: an unmeasured building takes the typical (median) height of at least
   // 3 measured buildings of the same type within 150 m. Measured heights are never changed.
-  const measured = h => h === 'osm' || h === 'levels' || h === 'lidar' || h === 'overture';
+  const measured = h => h === 'osm' || h === 'levels' || h === 'lidar' || h === 'overture' || h === 'wikidata';   // v14: + wikidata
   res.buildings.forEach((b, i) => {
     if (b.part || b.heightSource !== 'default') return;
     const near = [];
@@ -1382,7 +1457,7 @@ function buildOutput(data, o) {
   const barOn = res.barriers.filter(b => b.onTrack).length;
   const propOn = res.points.filter(p => p.onTrack).length;
   const guessed = nb - hMeasured;
-  if (nb && guessed / nb > 0.5) notes.push(`${Math.round(100 * guessed / nb)}% of building heights are guesses (the Kart LiDAR Tool can measure them).`);
+  if (nb && guessed / nb > 0.5) notes.push(`${Math.round(100 * guessed / nb)}% of building heights are guesses (📚 Landmark facts can fill in famous ones from Wikidata).`);
   if (trees.length) notes.push(`${Math.round(100 * trees.filter(t => t.treeType).length / trees.length)}% of trees have a known type (palm, gum, fig…).`);
   if (skipped) notes.push(`${skipped} shape${skipped > 1 ? 's were' : ' was'} incomplete in OSM and skipped.`);
   if (!o.snapped) {
@@ -1415,7 +1490,7 @@ function buildOutput(data, o) {
     meta: {
       name: o.name || 'route',
       generated: o.now || new Date().toISOString(),
-      generator: 'kart-map-scanner v13',
+      generator: 'kart-map-scanner v14',
       origin: { lat: origin[0], lon: origin[1] },
       units: 'metres',
       axes: 'x = east, y = north. In Godot: Vector3(x, 0, -y)',
@@ -1423,7 +1498,8 @@ function buildOutput(data, o) {
       bbox: { minX: round2(bb.minX), minY: round2(bb.minY), maxX: round2(bb.maxX), maxY: round2(bb.maxY) },
       areasTrimmedTo: { minX: round2(clipBox.minX), minY: round2(clipBox.minY), maxX: round2(clipBox.maxX), maxY: round2(clipBox.maxY) },
       elevation: null,
-      attribution: attributionFor({ overture: !!o.overture }),
+      attribution: attributionFor({ overture: !!o.overture, places: !!(o.overture && o.overture.placesAdded) }),
+      places: placesSummary(admin, placeNodes) || undefined,   // v14: suburb, city, state
       overture: o.overture || undefined,   // v8.3: { release, heightsFilled, added }
       counts: {
         roads: res.roads.length, buildings: wholes.length,
@@ -1799,7 +1875,7 @@ function applyElevation(out, grids, unprojFactory, info) {
     climb: Math.round(climb * 10) / 10, descent: Math.round(descent * 10) / 10, steepest: steep,
     bridgedPoints: bridged, bridgedNote: bridged ? 'Track points on bridges/in tunnels use a straight line between the two ends (the terrain model has no bridges).' : undefined,
     counts: grounds, grid: terrainGrid(out, grids, unprojFactory, base, 10) };
-  out.meta.attribution = attributionFor({ overture: !!out.meta.overture, imagery: !!out.meta.imagery, elevation: true });
+  out.meta.attribution = creditsFor(out.meta, { elevation: true });
   const q = out.meta.quality;
   if (q && Array.isArray(q.notes)) {
     q.notes = q.notes.filter(n => !/^Hills:/.test(n));
@@ -2202,7 +2278,7 @@ function streetSigns(out) {
 // heightSource "guess" with heightGuess saying why, so the game uses them (it re-guesses only
 // "default"). A little variety per building keeps a street from being one flat line.
 function guessHeights(res, hints) {
-  const measured = h => h === 'osm' || h === 'levels' || h === 'lidar' || h === 'overture';
+  const measured = h => h === 'osm' || h === 'levels' || h === 'lidar' || h === 'overture' || h === 'wikidata';   // v14: + wikidata
   const zones = (res.areas || []).filter(a => /^(residential|commercial|retail|industrial)$/.test(a.kind));
   const zoneAt = c => { for (const z of zones) if (pointInPoly(c, z.polygon) && !(z.holes || []).some(h => pointInPoly(c, h))) return z.kind; return null; };
   const known = res.buildings.filter(b => !b.part && measured(b.heightSource)).map(b => ({ c: centroid(b.footprint), a: Math.abs(polygonArea(b.footprint)), h: b.height }));
@@ -2556,6 +2632,230 @@ function raceCheck(out, g) {
   return { problems: probs, lap: Math.round(lap), seconds: secs, minRadius: Math.round(minR), steepest: Math.round(steep.grade * 10) / 10, crossings: crossList, doubled };
 }
 // ======================================================================
+// ======================================================================
+// v14: landmark facts from Wikipedia and Wikidata (both free, no key or login)
+// Wikipedia "nearby" finds notable places along the track that OSM doesn't flag as landmarks;
+// Wikidata gives real heights, floors and the year built for famous buildings (so the most
+// recognisable buildings stop being guesses). Wikidata is CC0; Wikipedia text is CC BY-SA.
+// ======================================================================
+// Circles that cover the scan corridor for Wikipedia's geosearch (it searches circles of at most
+// 10 km): one every `radius` metres along the route, each 1.5 × radius wide. At most `max`.
+function wikiCircles(latlngs, radius, max) {
+  const step = Math.max(50, radius);
+  let pts = [latlngs[0]];
+  for (let i = 1; i < latlngs.length; i++) {   // a point every `step` metres, along long straight bits too
+    const a = latlngs[i - 1], b = latlngs[i], n = Math.max(1, Math.round(dist(a, b) / step));
+    for (let k = 1; k <= n; k++) pts.push([a[0] + (b[0] - a[0]) * k / n, a[1] + (b[1] - a[1]) * k / n]);
+  }
+  pts = downsample(pts, step * 0.75);
+  const cap = max || 25;
+  if (pts.length > cap) pts = Array.from({ length: cap }, (_, i) => pts[Math.round(i * (pts.length - 1) / (cap - 1))]);
+  return pts.map(p => ({ lat: +p[0].toFixed(6), lon: +p[1].toFixed(6), r: Math.min(10000, Math.max(50, Math.round(radius * 1.5))) }));
+}
+// Wikipedia pages that aren't a thing you could drive past and model: suburbs, councils, events,
+// companies, streets, rivers, lists, and shops/eateries/hotels (real business names stay out).
+const WIKI_SKIP = /\b(suburb|locality|electoral|division|district|ward|parish|county|region|municipality|council|company|corporation|business|brand|chain|retailer|franchise|restaurant|caf[eé]|pub|hotel|bar|shop|store|shopping|mall|supermarket|event|festival|incident|disaster|flood|fire|massacre|battle|murder|crash|shooting|protest|election|newspaper|radio|television|tv|band|album|song|film|sports team|club|road|street|lane|highway|motorway|freeway|route|railway line|bus|river|creek|stream)\b/i;
+// What a Wikipedia place probably is, from its short description (the game picks a model by kind).
+function wikiKind(desc) {
+  const d = String(desc || '').toLowerCase();
+  const k = [['bridge', /bridge/], ['station', /station/], ['place_of_worship', /church|cathedral|chapel|temple|mosque|synagogue/], ['museum', /museum|gallery/],
+    ['memorial', /memorial|monument|statue|sculpture|cenotaph/], ['park', /park|garden|reserve/], ['stadium', /stadium|arena|ground|oval/],
+    ['theatre', /theatre|theater|concert|cinema/], ['building', /building|tower|house|hall|office|centre|center|library|school|hospital|university|college/]];
+  for (const [kind, re] of k) if (re.test(d)) return kind;
+  return 'notable';
+}
+// Adds Wikipedia's notable places to out.landmarks (changes `out`). `pages`: [{ pageid, title, lat,
+// lon, description?, wikidata? }]. A page that matches a landmark already in the file (same
+// Wikidata item, same name within 300 m, or the same building) only adds its description and link.
+// Others within the scan radius of the track become new landmarks with source: 'wikipedia'.
+function addWikiPlaces(out, pages, P) {
+  const route = out.route.points, R = out.meta.scanRadius || 100;
+  const trackDist = p => { let d = Infinity; for (let i = 1; i < route.length; i++) d = Math.min(d, distPointSeg(p, route[i - 1], route[i])); return route.length === 1 ? Math.hypot(p[0] - route[0][0], p[1] - route[0][1]) : d; };
+  const places = out.meta.places || {};
+  const placeNames = new Set([places.suburb, places.city, places.state, ...(places.nearby || [])].filter(Boolean).map(s => s.toLowerCase()));
+  const wholes = out.buildings.filter(b => !b.part);
+  const lms = out.landmarks;
+  let n = lms.reduce((m, l) => Math.max(m, parseInt(String(l.id).slice(1), 10) || 0), 0);
+  const stats = { matched: 0, added: 0, skipped: 0 };
+  const seen = new Set(), fresh = [];
+  for (const pg of pages || []) {
+    if (!pg || seen.has(pg.pageid) || pg.lat == null) continue;
+    seen.add(pg.pageid);
+    const pos = P(pg.lat, pg.lon), title = String(pg.title || ''), desc = pg.description ? String(pg.description) : '';
+    const plain = title.replace(/\s*\(.*\)$/, '');
+    const host = wholes.find(b => pointInPoly(pos, b.footprint));
+    const same = lms.find(l => (pg.wikidata && l.wikidata === pg.wikidata) || (l.name && l.name.toLowerCase() === plain.toLowerCase() && Math.hypot(l.pos[0] - pos[0], l.pos[1] - pos[1]) < 300) || (host && l.ref === host.id));
+    if (same) {
+      if (!same.wikipedia) same.wikipedia = 'en:' + title;
+      if (!same.wikidata && pg.wikidata) same.wikidata = pg.wikidata;
+      if (desc && !same.description) same.description = desc;
+      stats.matched++; continue;
+    }
+    if (/^list of /i.test(title) || WIKI_SKIP.test(desc) || placeNames.has(plain.toLowerCase()) || trackDist(pos) > R) { stats.skipped++; continue; }
+    const l = { name: plain, kind: wikiKind(desc), pos, source: 'wikipedia', wikipedia: 'en:' + title };
+    if (host) l.ref = host.id;
+    if (pg.wikidata) l.wikidata = pg.wikidata;
+    if (desc) l.description = desc;
+    fresh.push({ l, d: trackDist(pos) });
+  }
+  for (const { l } of fresh.sort((a, b) => a.d - b.d).slice(0, 40)) { l.id = 'L' + (++n); lms.push(l); stats.added++; }
+  out.meta.counts.landmarks = lms.length;
+  return stats;
+}
+// The best statement for a Wikidata property (preferred rank first, never deprecated).
+function wdBest(claims, prop) {
+  const list = ((claims || {})[prop] || []).filter(c => c && c.rank !== 'deprecated' && c.mainsnak && c.mainsnak.datavalue);
+  return list.find(c => c.rank === 'preferred') || list[0] || null;
+}
+const WD_UNITS = { Q11573: 1, Q3710: 0.3048, Q174728: 0.01, Q828224: 1000 };   // metre, foot, centimetre, kilometre
+function wdAmount(claims, prop, plain) {
+  const c = wdBest(claims, prop); if (!c) return null;
+  const v = c.mainsnak.datavalue.value || {}, unit = String(v.unit || '1').split('/').pop();
+  const k = plain ? (unit === '1' ? 1 : null) : WD_UNITS[unit];
+  const n = parseFloat(v.amount);
+  return k && isFinite(n) ? round2(n * k) : null;
+}
+function wdYear(claims, prop) {
+  const c = wdBest(claims, prop); if (!c) return null;
+  const m = /^([+-]?\d+)-/.exec((c.mainsnak.datavalue.value || {}).time || '');
+  return m ? parseInt(m[1], 10) : null;
+}
+// The facts the game can use from one Wikidata item: { description, height, floors, built, opened, types }.
+function wikidataFacts(entity) {
+  const cl = (entity && entity.claims) || {};
+  const f = {
+    description: entity && entity.descriptions && entity.descriptions.en ? entity.descriptions.en.value : undefined,
+    height: wdAmount(cl, 'P2048'),            // height (metres)
+    floors: wdAmount(cl, 'P1101', true),      // floors above ground
+    built: wdYear(cl, 'P571'),                // inception
+    opened: wdYear(cl, 'P1619'),              // official opening
+    types: (cl.P31 || []).filter(c => c.rank !== 'deprecated' && c.mainsnak && c.mainsnak.datavalue).map(c => c.mainsnak.datavalue.value.id).slice(0, 3)
+  };
+  for (const k of Object.keys(f)) if (f[k] == null || (Array.isArray(f[k]) && !f[k].length)) delete f[k];
+  return f;
+}
+// Height statistics for the quality report (parts are pieces of buildings, so left out).
+function heightQuality(buildings) {
+  const measured = h => h === 'osm' || h === 'levels' || h === 'lidar' || h === 'overture' || h === 'wikidata';
+  const wholes = buildings.filter(b => !b.part && b.source !== 'manual'), nb = wholes.length;   // same buildings as the scan's report
+  const pct = n => nb ? Math.round(1000 * n / nb) / 10 : 0;
+  const m = wholes.filter(b => measured(b.heightSource)).length;
+  const e = wholes.filter(b => /^(estimated|ml-estimate|guess)$/.test(b.heightSource)).length;
+  return { real: m, heights: { measured: pct(m), estimated: pct(e), default: Math.round((100 - pct(m) - pct(e)) * 10) / 10 } };
+}
+// Puts Wikidata facts on the landmarks (changes `out`). `entities` = { Q123: <Wikidata entity> },
+// `labels` = { Q456: 'church' } for the "instance of" types. A landmark's building whose height is
+// only a guess takes Wikidata's real height (or floors × 3 m), labelled heightSource 'wikidata'.
+// Real heights (OSM, floors, Overture, typed in) are never replaced.
+function applyLandmarkFacts(out, entities, labels) {
+  const stats = { facts: 0, heights: 0 };
+  const guess = h => /^(default|estimated|guess|ml-estimate)$/.test(h || '');
+  for (const l of out.landmarks || []) {
+    const e = l.wikidata && entities && entities[l.wikidata];
+    if (!e) continue;
+    const f = wikidataFacts(e);
+    const facts = {};
+    if (f.description) facts.description = f.description;
+    if (f.height && f.height >= 2 && f.height <= 1000) facts.height = f.height;
+    if (f.floors && f.floors >= 1 && f.floors <= 200) facts.floors = f.floors;
+    if (f.built) facts.built = f.built;
+    if (f.opened) facts.opened = f.opened;
+    const types = (f.types || []).map(q => labels && labels[q]).filter(Boolean);
+    if (types.length) facts.type = types.join(', ');
+    if (!Object.keys(facts).length) continue;
+    l.facts = facts; stats.facts++;
+    if (!l.description && facts.description) l.description = facts.description;
+    if (!l.built && (facts.built || facts.opened)) l.built = facts.built || facts.opened;
+    const b = l.ref && out.buildings.find(x => x.id === l.ref);
+    if (!b || b.part || b.hasParts || !guess(b.heightSource) || !(facts.height || facts.floors)) continue;
+    b.height = facts.height || round2(facts.floors * 3); b.heightSource = 'wikidata';
+    if (facts.height) delete b.heightNote; else b.heightNote = 'floors × 3 m';
+    delete b.heightGuess;
+    if (b.roofShapeSource === 'guess') b.roofShape = guessRoof(b.kind, polygonArea(b.footprint), b.height);
+    if (!b.built && l.built) b.built = l.built;
+    stats.heights++;
+  }
+  const q = heightQuality(out.buildings);
+  if (out.meta.quality) out.meta.quality.heights = q.heights;
+  if (out.meta.counts) out.meta.counts.buildingsWithRealHeight = q.real;
+  return stats;
+}
+// Credits for a file, from what its meta says was used.
+function creditsFor(meta, extra) {
+  const lf = meta.landmarkFacts || {};
+  return attributionFor({ overture: !!meta.overture, places: !!(meta.overture && meta.overture.placesAdded), imagery: !!meta.imagery, elevation: !!meta.elevation,
+    wikidata: !!lf.wikidata, wikipedia: !!lf.wikipedia, ...(extra || {}) });
+}
+// ======================================================================
+// v14: Overture Places: shops and cafés OSM is missing, for more shop signs. Free (CDLA
+// Permissive 2.0), read from the same kind of PMTiles file as the Overture buildings, no key.
+// Only the kind of shop is used: real names and brands never reach the file (each shop gets
+// a made-up sign name, like OSM shops do).
+// ======================================================================
+// One Overture place from a vector-tile feature: { id, category, confidence, lat, lon }.
+function overturePlace(props, coords) {
+  let cat = props['@category'] || props.basic_category || null;
+  if (!cat && props.categories) {
+    try { const c = typeof props.categories === 'string' ? JSON.parse(props.categories) : props.categories; cat = c && c.primary; } catch (e) { /* no category */ }
+  }
+  let c = coords;
+  while (Array.isArray(c) && Array.isArray(c[0])) c = c[0];   // MultiPoint: its first point
+  const conf = parseFloat(props.confidence);
+  return { id: String(props.id || ''), category: cat ? String(cat).toLowerCase() : null, confidence: isFinite(conf) ? conf : null, lat: c ? c[1] : null, lon: c ? c[0] : null };
+}
+// Overture categories → the OSM tags shopKind() understands (so the sign types stay the same).
+const OVERTURE_PLACE_TAGS = {
+  cafe: { amenity: 'cafe' }, coffee_shop: { amenity: 'cafe' }, coffee_roastery: { amenity: 'cafe' }, tea_room: { amenity: 'cafe' },
+  restaurant: { amenity: 'restaurant' }, fast_food_restaurant: { amenity: 'fast_food' }, food_court: { amenity: 'food_court' },
+  bar: { amenity: 'bar' }, cocktail_bar: { amenity: 'bar' }, wine_bar: { amenity: 'bar' }, sports_bar: { amenity: 'bar' }, pub: { amenity: 'pub' }, brewery: { amenity: 'pub' },
+  bakery: { shop: 'bakery' }, ice_cream_shop: { amenity: 'ice_cream' }, frozen_yoghurt_shop: { amenity: 'ice_cream' }, dessert_shop: { shop: 'confectionery' },
+  chocolatier: { shop: 'chocolate' }, candy_store: { shop: 'confectionery' }, donuts: { amenity: 'cafe', cuisine: 'donut' }, bubble_tea: { shop: 'tea' },
+  juice_bar: { amenity: 'cafe', cuisine: 'juice' }, smoothie_juice_bar: { amenity: 'cafe', cuisine: 'juice' },
+  supermarket: { shop: 'supermarket' }, grocery_store: { shop: 'supermarket' }, convenience_store: { shop: 'convenience' }, liquor_store: { shop: 'alcohol' },
+  butcher_shop: { shop: 'butcher' }, clothing_store: { shop: 'clothes' }, fashion: { shop: 'clothes' }, womens_clothing_store: { shop: 'clothes' }, mens_clothing_store: { shop: 'clothes' },
+  shoe_store: { shop: 'shoes' }, hair_salon: { shop: 'hairdresser' }, barber: { shop: 'hairdresser' }, beauty_salon: { shop: 'beauty' }, nail_salon: { shop: 'beauty' }, cosmetic_and_beauty_supply: { shop: 'beauty' },
+  pharmacy: { amenity: 'pharmacy' }, drugstore: { amenity: 'pharmacy' }, bookstore: { shop: 'books' }, newsstand: { shop: 'newsagent' },
+  electronics: { shop: 'electronics' }, mobile_phone_store: { shop: 'mobile_phone' }, computer_store: { shop: 'computer' }, jewelry_store: { shop: 'jewelry' },
+  florist: { shop: 'florist' }, flowers_and_gifts_shop: { shop: 'florist' }, hardware_store: { shop: 'hardware' }, pet_store: { shop: 'pet' },
+  optometrist: { shop: 'optician' }, eyewear_and_optician: { shop: 'optician' }, automotive_repair: { shop: 'car_repair' }, car_dealer: { shop: 'car' }, tire_shop: { shop: 'tyres' },
+  laundromat: { shop: 'laundry' }, dry_cleaning: { shop: 'dry_cleaning' }, toy_store: { shop: 'toys' }, sporting_goods: { shop: 'sports' }, bicycle_shop: { shop: 'bicycle' },
+  music_store: { shop: 'music' }, furniture_store: { shop: 'furniture' }, home_decor: { shop: 'interior_decoration' }, travel_agents: { shop: 'travel_agency' },
+  tattoo: { shop: 'tattoo' }, tattoo_and_piercing: { shop: 'tattoo' }, real_estate_agent: { shop: 'estate_agent' }, real_estate: { shop: 'estate_agent' },
+  bank_credit_union: { amenity: 'bank' }, bank: { amenity: 'bank' }, post_office: { amenity: 'post_office' }, gas_station: { amenity: 'fuel' },
+  dentist: { amenity: 'dentist' }, general_dentistry: { amenity: 'dentist' }, doctor: { amenity: 'doctors' }, medical_center: { amenity: 'clinic' },
+  gym: { leisure: 'fitness_centre' }, fitness_trainer: { leisure: 'fitness_centre' }
+};
+function placeTags(category) {
+  const c = String(category || '').toLowerCase();
+  if (!c) return null;
+  if (OVERTURE_PLACE_TAGS[c]) return { ...OVERTURE_PLACE_TAGS[c] };
+  const r = /^(.+)_restaurant$/.exec(c);   // pizza_restaurant, chinese_restaurant… → the cuisine picks the sign
+  if (r) return { amenity: 'restaurant', cuisine: r[1] };
+  if (/_(store|shop)$/.test(c)) return { shop: 'yes' };   // any other shop: a generic sign
+  return null;
+}
+// Adds Overture places as shop nodes to the raw scan data, returning a NEW copy. Skipped: places
+// with no shop type, low confidence (Overture's own score, 0-1), and ones within 25 m of an
+// OSM shop of the same sign type or within 8 m of any OSM shop (OSM always wins).
+function mergeOverturePlaces(data, places, minConfidence) {
+  const min = minConfidence == null ? 0.5 : minConfidence;
+  const els = (data.elements || []).slice();
+  const osm = els.filter(e => e.type === 'node' && e.tags && e.lat != null).map(e => ({ ll: [e.lat, e.lon], kind: shopKind(e.tags) })).filter(s => s.kind);
+  const stats = { placesAdded: 0, placesSkipped: 0 };
+  const seen = new Set();
+  for (const p of places || []) {
+    const tags = p && p.lat != null ? placeTags(p.category) : null;
+    const kind = tags && shopKind(tags);
+    if (!kind || (p.confidence != null && p.confidence < min) || seen.has(p.id)) { stats.placesSkipped++; continue; }
+    const ll = [p.lat, p.lon];
+    if (osm.some(s => { const d = dist(s.ll, ll); return d < 8 || (d < 25 && s.kind === kind); })) { stats.placesSkipped++; continue; }
+    seen.add(p.id);
+    osm.push({ ll, kind });
+    els.push({ type: 'node', id: 'ovp-' + (p.id ? p.id.slice(0, 12) : stats.placesAdded), lat: p.lat, lon: p.lon, tags: { ...tags, 'overture:place': 'yes' } });
+    stats.placesAdded++;
+  }
+  return { data: { ...data, elements: els }, stats };
+}
 // PURE-END
 // ======================================================================
 
@@ -2724,6 +3024,7 @@ function invalidateScan() {
   featureLayer.clearLayers(); crossLayer.clearLayers();
   els.exportBtn.disabled = true;
   els.sampleBtn.disabled = els.photosBtn.disabled = els.groundBtn.disabled = true;
+  $('factsBtn').disabled = true;
   $('view3dBtn').disabled = true;
   $('minimapBtn').disabled = $('cardBtn').disabled = $('gameZipBtn').disabled = true;
   $('heightsBtn').disabled = $('terrainBtn').disabled = true;
@@ -3073,6 +3374,19 @@ async function scan() {
       overtureNote = ` (Overture skipped: ${e instanceof TypeError ? "couldn't reach it" : e.message})`;
     }
   }
+  // v14: shops OSM is missing, from Overture Places. If it fails, the scan carries on without them.
+  if ($('usePlaces').checked) {
+    setStatus('Adding shops from Overture Places…');
+    try {
+      const places = await Promise.race([fetchOverturePlaces(scanBox(routeLatLngs, radius)),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('no answer after 45 s')), 45000))]);
+      const m = mergeOverturePlaces(data, places);
+      data = m.data;
+      overture = { ...(overture || { release: CONFIG.overture.release }), placesAdded: m.stats.placesAdded };
+    } catch (e) {
+      overtureNote += ` (Overture places skipped: ${e instanceof TypeError ? "couldn't reach it" : e.message})`;
+    }
+  }
   els.scanBtn.disabled = false;
 
   const isLoop = els.loop.checked && waypoints.length >= 3;
@@ -3088,6 +3402,7 @@ async function scan() {
   els.exportBtn.disabled = false;
   els.sampleBtn.disabled = els.groundBtn.disabled = false;
   els.photosBtn.disabled = !out.landmarks.length;
+  $('factsBtn').disabled = false;
   $('view3dBtn').disabled = false;
   $('minimapBtn').disabled = $('cardBtn').disabled = $('gameZipBtn').disabled = false;
   demGrids = null; $('heightsBtn').disabled = false; $('terrainBtn').disabled = true;
@@ -3095,7 +3410,7 @@ async function scan() {
   const contract = loaderContractProblems(out);   // v8.2: would the game's loader choke on this file?
   if (partial) setStatus('Scan finished but the server warned the data may be incomplete: ' + data.remark, 'warn');
   else if (contract.length) setStatus(`Scan done, but ${contract.length} thing(s) in this file won't work in the game: ${contract.slice(0, 3).join('; ')}${contract.length > 3 ? '…' : ''}`, 'warn');
-  else setStatus('Scan done. Check the preview, then Export JSON.' + (overture ? ` Overture added ${overture.added} buildings and ${overture.heightsFilled} heights.` : '') + overtureNote, overtureNote ? 'warn' : 'ok');
+  else setStatus('Scan done. Check the preview, then Export JSON.' + (overture && overture.added != null ? ` Overture added ${overture.added} buildings and ${overture.heightsFilled} heights.` : '') + (overture && overture.placesAdded ? ` ${overture.placesAdded} shops added from Overture Places.` : '') + overtureNote, overtureNote ? 'warn' : 'ok');
 }
 els.scanBtn.onclick = scan;
 // ======================================================================
@@ -3127,6 +3442,31 @@ async function fetchOvertureBuildings(box) {
       const c = exactCentroid(feat.ring);
       if (c[0] < box.south || c[0] > box.north || c[1] < box.west || c[1] > box.east) continue;
       seen.set(feat.id || (x + '/' + y + '/' + i), feat);   // a building cut by a tile edge appears in both tiles
+    }
+  }
+  return [...seen.values()];
+}
+// v14: Overture places (shops, cafés) in the box. Tests replace it with window.__overturePlacesFetch.
+async function fetchOverturePlaces(box) {
+  if (window.__overturePlacesFetch) return window.__overturePlacesFetch(box);
+  const [{ PMTiles }, { VectorTile }, pbfMod] = await Promise.all(CONFIG.overture.libs.map(u => import(u)));
+  const Pbf = pbfMod.default || pbfMod;
+  const pm = new PMTiles(CONFIG.overture.base + CONFIG.overture.release + '/places.pmtiles');
+  const z = Math.min(14, (await pm.getHeader()).maxZoom || 14);
+  const tx = lon => Math.floor((lon + 180) / 360 * 2 ** z);
+  const ty = lat => { const r = lat * Math.PI / 180; return Math.floor((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * 2 ** z); };
+  const jobs = [], seen = new Map();
+  for (let x = tx(box.west); x <= tx(box.east); x++) for (let y = ty(box.north); y <= ty(box.south); y++) jobs.push([x, y]);
+  if (jobs.length > 64) throw new Error(`area too big for Overture places (${jobs.length} tiles)`);
+  for (const [x, y] of jobs) {
+    const t = await pm.getZxy(z, x, y);
+    if (!t) continue;
+    const layer = new VectorTile(new Pbf(new Uint8Array(t.data))).layers.place;
+    if (!layer) continue;
+    for (let i = 0; i < layer.length; i++) {
+      const f = layer.feature(i), p = overturePlace(f.properties, f.toGeoJSON(x, y, z).geometry.coordinates);
+      if (p.lat == null || p.lat < box.south || p.lat > box.north || p.lon < box.west || p.lon > box.east) continue;
+      seen.set(p.id || (x + '/' + y + '/' + i), p);
     }
   }
   return [...seen.values()];
@@ -3248,6 +3588,63 @@ async function findLandmarkPhotos() {
 
 els.sampleBtn.onclick = sampleColours;
 els.photosBtn.onclick = findLandmarkPhotos;
+
+// ---- v14: landmark facts (Wikipedia nearby + Wikidata) ----
+// Both are free MediaWiki APIs that allow browser requests with origin=*; no key or login.
+async function landmarkFacts() {
+  if (!scanResult) return;
+  const out = scanResult, btn = $('factsBtn');
+  const api = (base, params) => fetch(base + '?' + new URLSearchParams({ format: 'json', origin: '*', ...params })).then(r => { if (!r.ok) throw new Error('replied ' + r.status); return r.json(); });
+  const WP = 'https://en.wikipedia.org/w/api.php', WD = 'https://www.wikidata.org/w/api.php';
+  const chunks = (list, n) => { const c = []; for (let i = 0; i < list.length; i += n) c.push(list.slice(i, i + n)); return c; };
+  btn.disabled = true;
+  try {
+    // 1. Wikipedia pages geotagged along the track
+    const circles = wikiCircles(routeLatLngs.length >= 2 ? routeLatLngs : [[out.meta.origin.lat, out.meta.origin.lon]], out.meta.scanRadius || 100);
+    const hits = new Map();
+    for (let i = 0; i < circles.length; i++) {
+      setStatus(`Looking for notable places on Wikipedia… ${i + 1} of ${circles.length}`);
+      const c = circles[i];
+      const j = await api(WP, { action: 'query', list: 'geosearch', gscoord: c.lat + '|' + c.lon, gsradius: c.r, gslimit: 100 });
+      for (const g of (j.query && j.query.geosearch) || []) hits.set(g.pageid, { pageid: g.pageid, title: g.title, lat: g.lat, lon: g.lon });
+    }
+    for (const ids of chunks([...hits.keys()], 50)) {
+      const j = await api(WP, { action: 'query', prop: 'description|pageprops', ppprop: 'wikibase_item', pageids: ids.join('|') });
+      for (const pg of Object.values((j.query && j.query.pages) || {})) {
+        const h = hits.get(pg.pageid); if (!h) continue;
+        if (pg.description) h.description = pg.description;
+        if (pg.pageprops && pg.pageprops.wikibase_item) h.wikidata = pg.pageprops.wikibase_item;
+      }
+    }
+    // 2. Wikidata facts for every landmark and Wikipedia place with a Wikidata item
+    const qids = [...new Set([...out.landmarks.map(l => l.wikidata), ...[...hits.values()].map(h => h.wikidata)].filter(q => /^Q\d+$/.test(q || '')))];
+    const entities = {}, labels = {};
+    for (const ids of chunks(qids, 50)) {
+      setStatus(`Reading landmark facts from Wikidata… ${Object.keys(entities).length} of ${qids.length}`);
+      const j = await api(WD, { action: 'wbgetentities', ids: ids.join('|'), props: 'claims|descriptions', languages: 'en' });
+      Object.assign(entities, j.entities || {});
+    }
+    const typeIds = [...new Set(Object.values(entities).flatMap(e => wikidataFacts(e).types || []))];
+    for (const ids of chunks(typeIds, 50)) {
+      const j = await api(WD, { action: 'wbgetentities', ids: ids.join('|'), props: 'labels', languages: 'en' });
+      for (const [q, e] of Object.entries(j.entities || {})) if (e.labels && e.labels.en) labels[q] = e.labels.en.value;
+    }
+    // Everything is downloaded: only now change the scan, so a failure part-way leaves it as it was.
+    const before = new Set(out.landmarks.map(l => l.id));
+    const wp = addWikiPlaces(out, [...hits.values()], makeProjector(out.meta.origin.lat, out.meta.origin.lon));
+    const wd = applyLandmarkFacts(out, entities, labels);
+    out.meta.landmarkFacts = { wikipedia: wp.added + wp.matched, wikidata: wd.facts, placesAdded: wp.added, heightsFilled: wd.heights, checked: new Date().toISOString().slice(0, 10) };
+    out.meta.attribution = creditsFor(out.meta);
+    for (const l of out.landmarks) if (!before.has(l.id)) scanPreview.push({ cat: 'landmark', name: l.name, kind: l.kind, xy: l.pos });
+    drawPreview(scanPreview); showStats();
+    els.photosBtn.disabled = !out.landmarks.length;
+    setStatus(`Landmark facts: ${wp.added} notable places added from Wikipedia, ${wd.facts} landmarks got facts from Wikidata, ${wd.heights} building heights are now real. Export JSON to save them.`, 'ok');
+  } catch (e) {
+    const why = e instanceof TypeError ? "couldn't reach Wikipedia or Wikidata (offline or blocked)" : e.message;
+    setStatus('Landmark facts failed: ' + why + '. Your scan is unchanged.', 'err');
+  } finally { btn.disabled = false; }
+}
+$('factsBtn').onclick = landmarkFacts;
 els.groundBtn.onclick = exportGroundImage;
 
 // Preview colours by area type. Anything not listed is drawn as generic green.
@@ -3350,7 +3747,17 @@ function showStats() {
   const probHtml = probs.length ? `<button id="nextProblemBtn" style="width:100%;margin-top:6px">Show problem on the map (${probs.length})</button>` : '';
   els.stats.innerHTML = rows.map(([k, v]) => `<div><span>${k}</span><b>${v}</b></div>`).join('') + profileHtml(out) + raceHtml(out, esc) + qHtml + probHtml +
     (lm.length ? `<details style="margin-top:6px"><summary>Landmarks to model by hand (${lm.length})</summary>` +
-      `<ul style="margin:4px 0 0;padding-left:18px">${lm.map(l => `<li>${esc(l.name)} <span class="hint">(${esc(l.kind)})</span>${photoHtml(l, esc)}</li>`).join('')}</ul></details>` : '');
+      `<ul style="margin:4px 0 0;padding-left:18px">${lm.map(l => `<li>${esc(l.name)} <span class="hint">(${esc(l.kind)})</span>${factsHtml(l, esc)}${photoHtml(l, esc)}</li>`).join('')}</ul></details>` : '');
+}
+// v14: a landmark's description, height and year, after "Landmark facts".
+function factsHtml(l, esc) {
+  const f = l.facts || {}, bits = [];
+  if (f.height) bits.push(f.height + ' m tall'); else if (f.floors) bits.push(f.floors + ' floors');
+  if (l.built) bits.push('built ' + l.built);
+  if (l.heritage) bits.push('heritage');
+  const d = l.description || f.description;
+  if (!d && !bits.length) return '';
+  return `<div class="hint">${d ? esc(d) : ''}${d && bits.length ? ' · ' : ''}${esc(bits.join(', '))}${l.source === 'wikipedia' ? ' · from Wikipedia' : ''}</div>`;
 }
 // v13: "Will it race well?" in the game: the race check, red first. Green when nothing is wrong.
 function raceHtml(out, esc) {
@@ -4183,7 +4590,7 @@ function exportCard() {
   let name = out.meta.name || 'Untitled track';
   while (g.measureText(name).width > 530 && name.length > 4) name = name.slice(0, -2) + '…';
   g.fillText(name, 635, 125);
-  g.fillStyle = '#9a9ab0'; g.font = font(400, 18); g.fillText('Real streets, scanned from open map data', 635, 155);
+  g.fillStyle = '#9a9ab0'; g.font = font(400, 18); g.fillText(out.meta.places && out.meta.places.suburb ? `Real streets in ${out.meta.places.suburb}, scanned from open map data` : 'Real streets, scanned from open map data', 635, 155);   // v14
   const c = out.meta.counts, e = out.meta.elevation;
   const stats = [['Length', (out.route.length / 1000).toFixed(2) + ' km'], ['Corners', (out.route.corners || []).length], ['Checkpoints', out.race ? out.race.checkpoints.length : 0],
     ['Shortcuts', c.shortcuts || 0], ['Buildings', c.buildings + (c.manualBuildings || 0)], ['Trees', out.points.filter(p => p.kind === 'tree').length],

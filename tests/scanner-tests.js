@@ -132,6 +132,8 @@ function runScannerTests(lib) {
   else check('v12c functions present', false, 'minimapPlan not found (running against v12b?)');
   if (has('terrainGrid')) runV13(lib, check, same);
   else check('v13 functions present', false, 'terrainGrid not found (running against v12c?)');
+  if (has('placesSummary')) runV14(lib, check, same);
+  else check('v14 functions present', false, 'placesSummary not found (running against v13?)');
 
   return results;
 }
@@ -830,4 +832,146 @@ function runV12c(lib, check, same) {
   check('v12c profile: long tracks are thinned to ~400 corners', g.d.split('L').length <= 402);
   out.route.centerline.elevation = out.route.centerline.points.map(() => 0.3);
   check('v12c profile: a flat track is drawn at least 2 m tall (no fake drama)', lib.profileGeometry(out, 300, 90, 6).top === 2);
+}
+
+// v14: more free detail: extra OSM tags, place names, Wikipedia/Wikidata landmark facts, Overture places
+function runV14(lib, check, same) {
+  const la = -27.4705, lo = 153.0235, mLon = 111320 * Math.cos(la * Math.PI / 180);
+  const off = (dx, dy) => ({ lat: la + dy / 111320, lon: lo + dx / mLon });
+  const llOff = (dx, dy) => { const o = off(dx, dy); return [o.lat, o.lon]; };
+  const sq = (x, y, w, h) => [off(x, y), off(x + w, y), off(x + w, y + h), off(x, y + h), off(x, y)];
+  const route = [llOff(0, 0), llOff(400, 0)];
+  const els = [
+    { type: 'way', id: 1, tags: { highway: 'primary', name: 'Main Road', maxspeed: '60' }, geometry: [off(0, 0), off(150, 0)] },
+    { type: 'way', id: 2, tags: { highway: 'primary', bridge: 'yes', 'bridge:structure': 'truss', 'bridge:name': 'Big Steel Bridge', maxspeed: '40 mph', layer: '1' }, geometry: [off(150, 0), off(250, 0)] },
+    { type: 'way', id: 3, tags: { highway: 'footway', bridge: 'boardwalk' }, geometry: [off(0, 20), off(80, 20)] },
+    { type: 'way', id: 4, tags: { highway: 'residential', maxspeed: 'AU:urban' }, geometry: [off(250, 0), off(400, 0)] },
+    { type: 'way', id: 5, tags: { railway: 'rail', bridge: 'yes', 'bridge:structure': 'arch' }, geometry: [off(0, 60), off(400, 60)] },
+    { type: 'way', id: 6, tags: { natural: 'water', water: 'pond', name: 'Duck Pond' }, geometry: sq(20, -80, 30, 30) },
+    { type: 'way', id: 7, tags: { leisure: 'pitch', sport: 'cricket' }, geometry: sq(100, -90, 40, 40) },
+    { type: 'way', id: 8, tags: { building: 'church', name: 'Old Stone Church', start_date: '1885', heritage: '2', amenity: 'place_of_worship' }, geometry: sq(300, 10, 20, 20) },
+    { type: 'way', id: 9, tags: { railway: 'station', name: 'Southside Station', public_transport: 'station' }, geometry: sq(200, 70, 40, 15) },
+    { type: 'node', id: 20, lat: off(120, 60).lat, lon: off(120, 60).lon, tags: { railway: 'level_crossing', 'crossing:barrier': 'full' } },
+    { type: 'node', id: 21, lat: off(300, 60).lat, lon: off(300, 60).lon, tags: { railway: 'crossing' } },
+    { type: 'node', id: 22, lat: off(210, 75).lat, lon: off(210, 75).lon, tags: { railway: 'signal' } },
+    { type: 'node', id: 23, lat: off(30, 5).lat, lon: off(30, 5).lon, tags: { man_made: 'flagpole', height: '12' } },
+    { type: 'node', id: 24, lat: off(-900, 400).lat, lon: off(-900, 400).lon, tags: { place: 'suburb', name: 'West End', wikidata: 'Q1' } },
+    { type: 'node', id: 25, lat: off(600, -300).lat, lon: off(600, -300).lon, tags: { place: 'suburb', name: 'Woolloongabba' } },
+    { type: 'area', id: 3600000001, tags: { boundary: 'administrative', admin_level: '10', name: 'South Brisbane' } },
+    { type: 'area', id: 3600000002, tags: { boundary: 'administrative', admin_level: '6', name: 'Brisbane City' } },
+    { type: 'area', id: 3600000003, tags: { boundary: 'administrative', admin_level: '4', name: 'Queensland' } }
+  ];
+  const { out } = lib.buildOutput({ elements: els }, { route, waypoints: route, radius: 120, width: 8, loop: false, snapped: false, name: 'v14', now: 'X' });
+  const R = id => out.roads.find(r => r.id === id) || {};
+  check('v14 speed limits: 60 → 60 km/h, 40 mph → 64 km/h, codes like AU:urban left out', R('w1').speedLimit === 60 && R('w2').speedLimit === 64 && R('w4').speedLimit === undefined, JSON.stringify([R('w1').speedLimit, R('w2').speedLimit, R('w4').speedLimit]));
+  check('v14 bridges say what kind they are: truss with its name, boardwalk', R('w2').bridgeStructure === 'truss' && R('w2').bridgeName === 'Big Steel Bridge' && R('w3').bridgeType === 'boardwalk' && R('w3').bridge === true, JSON.stringify([R('w2'), R('w3')]));
+  check('v14 a plain road gets none of the bridge fields', R('w1').bridgeStructure === undefined && R('w1').bridgeType === undefined);
+  check('v14 railway bridges keep their structure too', out.railways[0].bridgeStructure === 'arch');
+  const lc = out.markings.filter(m => m.kind === 'level_crossing');
+  check('v14 level crossings: boom gates on the road one, footpath style on the path one', lc.length === 2 && lc.some(m => m.style === 'gates') && lc.some(m => m.style === 'footpath'), JSON.stringify(lc));
+  check('v14 railway signal is a prop (group railway)', out.points.some(p => p.kind === 'signal' && p.group === 'railway'));
+  check('v14 props keep a mapped height (12 m flagpole)', (out.points.find(p => p.kind === 'flagpole') || {}).height === 12);
+  const A = id => out.areas.find(a => a.id === id) || {};
+  check('v14 water areas say what kind of water, pitches say which sport', A('w6').waterType === 'pond' && A('w7').sport === 'cricket', JSON.stringify([A('w6'), A('w7')]));
+  const ch = out.buildings.find(b => b.id === 'w8');
+  check('v14 buildings: year built and heritage listed', ch.built === 1885 && ch.heritage === true, JSON.stringify(ch));
+  const lm = n => out.landmarks.find(l => l.name === n);
+  check('v14 landmarks carry year built and heritage', lm('Old Stone Church') && lm('Old Stone Church').built === 1885 && lm('Old Stone Church').heritage === true);
+  check('v14 a named station is a landmark (station area kind)', lm('Southside Station') && lm('Southside Station').kind === 'station' && A('w9').kind === 'station', JSON.stringify(lm('Southside Station')));
+  check('v14 suburb names are never landmarks or props, and don\'t stretch the map box', !lm('West End') && !out.points.some(p => p.name === 'West End') && out.meta.bbox.minX > -300, JSON.stringify(out.meta.bbox));
+  const pl = out.meta.places;
+  check('v14 places: suburb, city and state from the areas the start is in, nearest place labels listed', pl && pl.suburb === 'South Brisbane' && pl.city === 'Brisbane City' && pl.state === 'Queensland' && same(pl.nearby, ['Woolloongabba', 'West End']), JSON.stringify(pl));
+  check('v14 places: without council areas, the nearest suburb label is used', lib.placesSummary([], [{ name: 'Far', kind: 'suburb', pos: [3000, 0] }, { name: 'Near', kind: 'suburb', pos: [100, 0] }]).suburb === 'Near');
+  check('v14 places: nothing found → no places field', lib.placesSummary([], []) === null && lib.buildOutput({ elements: [] }, { route, waypoints: route, radius: 50, width: 8, name: 'x', now: 'X' }).out.meta.places === undefined);
+  const q = lib.buildQuery(route, 100);
+  check('v14 query asks for railway nodes, place names near the start and the council areas it is in', /node\.n\["railway"\]/.test(q) && /\["place"~/.test(q) && /is_in\(-27\.4705/.test(q) && /out tags;/.test(q));
+  check('v14 file with the new fields still passes the game-loader check', lib.loaderContractProblems(out).length === 0, JSON.stringify(lib.loaderContractProblems(out)));
+  check('v14 generator says v14', out.meta.generator === 'kart-map-scanner v14');
+  if (has14(lib, 'applyLandmarkFacts')) runV14Facts(lib, check, same, out, off, llOff);
+  else check('v14 landmark facts functions present', false, 'applyLandmarkFacts not found');
+  if (has14(lib, 'mergeOverturePlaces')) runV14Places(lib, check, same, off, llOff, sq);
+  else check('v14 Overture places functions present', false, 'mergeOverturePlaces not found');
+}
+function has14(lib, k) { return typeof lib[k] === 'function'; }
+function runV14Facts(lib, check, same, base, off, llOff) {
+  const out = JSON.parse(JSON.stringify(base));
+  const P = lib.makeProjector(out.meta.origin.lat, out.meta.origin.lon);
+  const church = out.landmarks.find(l => l.name === 'Old Stone Church');
+  church.wikidata = 'Q100';
+  const before = out.buildings.find(b => b.id === 'w8');
+  const pages = [
+    { pageid: 1, title: 'Old Stone Church', ...off(310, 20), wikidata: 'Q100', description: 'church in Brisbane, Queensland, Australia' },
+    { pageid: 2, title: 'Clock Tower (Southside)', ...off(100, 30), wikidata: 'Q200', description: 'heritage-listed clock tower in Brisbane, Australia' },
+    { pageid: 3, title: 'South Brisbane', ...off(50, 40), description: 'suburb of Brisbane, Queensland, Australia' },
+    { pageid: 4, title: 'Some Burger Co', ...off(60, 10), description: 'fast food restaurant chain' },
+    { pageid: 5, title: 'Far Monument', ...off(100, 2000), description: 'monument' },
+    { pageid: 6, title: 'List of places in Southside', ...off(10, 10) },
+    { pageid: 7, title: 'Grey Street, Brisbane', ...off(20, 10), description: 'street in Brisbane' }
+  ];
+  const st = lib.addWikiPlaces(out, pages, P);
+  const tower = out.landmarks.find(l => l.name === 'Clock Tower');
+  check('v14 Wikipedia: the church page only adds its link and description to the landmark already there', st.matched === 1 && church.wikipedia === 'en:Old Stone Church' && /church in Brisbane/.test(church.description) && out.landmarks.filter(l => /Old Stone Church/.test(l.name)).length === 1, JSON.stringify(church));
+  check('v14 Wikipedia: a notable place OSM missed becomes a landmark (name without the bracket, source wikipedia)', st.added === 1 && tower && tower.source === 'wikipedia' && tower.wikidata === 'Q200' && tower.kind === 'building' && /^L\d+$/.test(tower.id) && out.meta.counts.landmarks === out.landmarks.length, JSON.stringify(tower));
+  check('v14 Wikipedia: suburbs, chains, far places, lists and streets are left out', !out.landmarks.some(l => /South Brisbane|Burger|Far Monument|List of|Grey Street/.test(l.name)) && st.skipped === 5, JSON.stringify(st));
+  check('v14 Wikipedia: ids stay unique', new Set(out.landmarks.map(l => l.id)).size === out.landmarks.length);
+  const metre = 'http://www.wikidata.org/entity/Q11573';
+  const claim = (v, rank) => ({ rank: rank || 'normal', mainsnak: { datavalue: { value: v } } });
+  const entities = {
+    Q100: { descriptions: { en: { value: 'heritage-listed church in Brisbane' } }, claims: {
+      P2048: [claim({ amount: '+99', unit: metre }, 'deprecated'), claim({ amount: '+31.5', unit: metre })],
+      P571: [claim({ time: '+1885-00-00T00:00:00Z' })], P31: [claim({ id: 'Q16970' })] } },
+    Q200: { claims: { P1101: [claim({ amount: '+4', unit: '1' })], P2048: [claim({ amount: '+120', unit: 'http://www.wikidata.org/entity/Q3710' }, 'preferred'), claim({ amount: '+10', unit: metre })] } }
+  };
+  const f200 = lib.wikidataFacts(entities.Q200);
+  check('v14 Wikidata: preferred value wins, feet turned into metres, floors read', f200.height === 36.58 && f200.floors === 4, JSON.stringify(f200));
+  const guessed = !/^(osm|levels|overture|lidar)$/.test(before.heightSource);
+  const wd = lib.applyLandmarkFacts(out, entities, { Q16970: 'church building' });
+  const b8 = out.buildings.find(b => b.id === 'w8');
+  check('v14 Wikidata: the church gets its facts (deprecated height ignored) and type label', church.facts && church.facts.height === 31.5 && church.facts.built === 1885 && church.facts.type === 'church building' && church.facts.description === 'heritage-listed church in Brisbane', JSON.stringify(church.facts));
+  check('v14 Wikidata: a guessed building height becomes the real one, labelled wikidata', guessed && b8.height === 31.5 && b8.heightSource === 'wikidata' && b8.heightGuess === undefined && wd.heights === 1, JSON.stringify([before.height, before.heightSource, b8.height, b8.heightSource]));
+  check('v14 Wikidata: the quality report counts it as measured', out.meta.counts.buildingsWithRealHeight === base.meta.counts.buildingsWithRealHeight + 1 && out.meta.quality.heights.measured > base.meta.quality.heights.measured);
+  check('v14 Wikidata: a landmark with no building still keeps its facts (floors)', tower.facts && tower.facts.floors === 4 && tower.facts.height === 36.58);
+  const out2 = JSON.parse(JSON.stringify(base)); const l2 = out2.landmarks.find(l => l.name === 'Old Stone Church'); l2.wikidata = 'Q100';
+  const b2 = out2.buildings.find(b => b.id === 'w8'); b2.height = 18; b2.heightSource = 'osm';
+  lib.applyLandmarkFacts(out2, entities, {});
+  check('v14 Wikidata: a real OSM height is never replaced', b2.height === 18 && b2.heightSource === 'osm' && l2.facts.height === 31.5);
+  check('v14 Wikidata: a wrong or missing item is skipped quietly', lib.applyLandmarkFacts(JSON.parse(JSON.stringify(base)), {}, {}).facts === 0);
+  check('v14 credits name Wikidata and Wikipedia once used', /Wikidata \(CC0\)/.test(lib.creditsFor({ landmarkFacts: { wikidata: 1, wikipedia: 2 } })) && /Wikipedia \(CC BY-SA\)/.test(lib.creditsFor({ landmarkFacts: { wikidata: 1, wikipedia: 2 } })) && !/Wiki/.test(lib.creditsFor({})));
+  const circ = lib.wikiCircles([llOff(0, 0), llOff(1000, 0)], 100);
+  const long = lib.wikiCircles(Array.from({ length: 200 }, (_, i) => llOff(i * 100, 0)), 100);
+  check('v14 Wikipedia search circles cover the corridor (every 100 m, 150 m wide) and are capped', circ.length >= 10 && circ.length <= 12 && circ.every(c => c.r === 150) && long.length === 25, circ.length + ' / ' + long.length);
+  check('v14 file with landmark facts still passes the game-loader check', lib.loaderContractProblems(out).length === 0, JSON.stringify(lib.loaderContractProblems(out)));
+}
+function runV14Places(lib, check, same, off, llOff, sq) {
+  const pt = (dx, dy) => { const o = off(dx, dy); return [o.lon, o.lat]; };
+  const op = lib.overturePlace({ id: 'abc123456789xyz', '@category': 'Pizza_Restaurant', '@name': 'Real Pizza Brand', confidence: 0.9 }, pt(10, 10));
+  check('v14 Overture place: id, category (lowercase), confidence, position; the name is not kept', op.category === 'pizza_restaurant' && op.confidence === 0.9 && Math.abs(op.lat - off(10, 10).lat) < 1e-9 && !('name' in op), JSON.stringify(op));
+  check('v14 Overture place: category read from a categories JSON string too', lib.overturePlace({ categories: '{"primary":"coffee_shop","alternate":["cafe"]}' }, [pt(0, 0)]).category === 'coffee_shop');
+  check('v14 Overture categories map to the same sign types as OSM shops',
+    lib.shopKind(lib.placeTags('pizza_restaurant')) === 'pizza' && lib.shopKind(lib.placeTags('coffee_shop')) === 'cafe' && lib.shopKind(lib.placeTags('hair_salon')) === 'hairdresser' &&
+    lib.shopKind(lib.placeTags('vintage_record_store')) === 'shop' && lib.placeTags('park') === null && lib.placeTags('') === null);
+  const data = { elements: [
+    { type: 'way', id: 1, tags: { highway: 'residential' }, geometry: [off(0, 0), off(300, 0)] },
+    { type: 'way', id: 2, tags: { building: 'yes' }, geometry: sq(20, 8, 20, 15) },
+    { type: 'way', id: 3, tags: { building: 'yes' }, geometry: sq(100, 8, 20, 15) },
+    { type: 'way', id: 4, tags: { building: 'yes' }, geometry: sq(200, 8, 20, 15) },
+    { type: 'node', id: 10, ...off(110, 15), tags: { amenity: 'cafe', name: 'Real OSM Cafe' } }
+  ] };
+  const places = [
+    { id: 'p1', category: 'pizza_restaurant', confidence: 0.9, ...off(30, 15) },   // new: building w2
+    { id: 'p2', category: 'coffee_shop', confidence: 0.9, ...off(112, 16) },       // same type as the OSM cafe beside it: skip
+    { id: 'p3', category: 'hair_salon', confidence: 0.2, ...off(210, 15) },        // low confidence: skip
+    { id: 'p4', category: 'park', confidence: 0.99, ...off(210, 14) },             // not a shop: skip
+    { id: 'p5', category: 'bookstore', confidence: 0.8, ...off(205, 12) },         // new: building w4
+    { id: 'p5', category: 'bookstore', confidence: 0.8, ...off(205, 12) }          // same place twice (two tiles): once
+  ].map(p => ({ ...p, lat: p.lat, lon: p.lon }));
+  const m = lib.mergeOverturePlaces(data, places);
+  check('v14 Overture places: 2 new shops, OSM duplicates, low confidence, non-shops and repeats skipped; original untouched', m.stats.placesAdded === 2 && m.stats.placesSkipped === 4 && data.elements.length === 5, JSON.stringify(m.stats));
+  const route = [llOff(0, 0), llOff(300, 0)];
+  const { out } = lib.buildOutput(m.data, { route, waypoints: route, radius: 80, width: 8, loop: false, snapped: false, name: 'shops', now: 'X', overture: { release: 'r', placesAdded: 2 } });
+  const B = id => out.buildings.find(b => b.id === id) || {};
+  check('v14 Overture shops become made-up signs on their buildings', (B('w2').shops || [])[0] && B('w2').shops[0].type === 'pizza' && lib.signNames().pizza.includes(B('w2').shops[0].sign) && (B('w4').shops || [])[0].type === 'books', JSON.stringify([B('w2').shops, B('w4').shops]));
+  check('v14 Overture shops are not props and add no names', !out.points.some(p => /^ovp/.test(p.id)) && !/Real Pizza|Real OSM Cafe/.test(JSON.stringify(out)));
+  check('v14 credits name Overture places when shops were added', /CDLA Permissive 2\.0/.test(out.meta.attribution) && out.meta.overture.placesAdded === 2);
+  check('v14 file with Overture shops still passes the game-loader check', lib.loaderContractProblems(out).length === 0);
 }

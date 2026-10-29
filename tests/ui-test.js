@@ -49,6 +49,11 @@ const overpass = { elements: [
         { id: 'ovGoma', osmId: 'w4', height: 20, heightFrom: 'OpenStreetMap', cls: null, isUnderground: false, ring: sq(50, 10, 30) },
         { id: 'ovNew', osmId: null, height: 7.5, heightFrom: 'Microsoft ML Buildings', cls: null, isUnderground: false, ring: sq(10, 40, 12) }]; };
     }, { la, lo });
+    // v14: one Overture café inside GOMA (its real-looking name must never reach the file)
+    await ctx.addInitScript(({ la, lo }) => {
+      window.__placesCalls = 0;
+      window.__overturePlacesFetch = async () => { window.__placesCalls++; return [{ id: 'pl1', category: 'coffee_shop', confidence: 0.9, lat: la + 25 / 111320, lon: lo + 65 / (111320 * Math.cos(la * Math.PI / 180)) }]; };
+    }, { la, lo });
     if (mode === 'ovfail') await ctx.addInitScript(() => { window.__overtureFetch = async () => { throw new Error('test failure'); }; });
     const errors = [];
     page.on('pageerror', e => errors.push(e.message));
@@ -63,7 +68,12 @@ const overpass = { elements: [
       if (u.includes('/interpreter')) {
         if (mode === 'down') return route.fulfill({ status: 502, body: 'Bad Gateway', headers: { 'access-control-allow-origin': '*' } });
         const at = benchAt || off(2, 0);
-        const body = mode === 'problem' ? { elements: overpass.elements.concat([{ type: 'node', id: 99, lat: at.lat, lon: at.lon, tags: { amenity: 'bench' } }]) } : overpass;
+        const body = mode === 'problem' ? { elements: overpass.elements.concat([{ type: 'node', id: 99, lat: at.lat, lon: at.lon, tags: { amenity: 'bench' } }]) }
+          : mode === 'v14' ? { elements: overpass.elements.concat([   // v14: the council areas the start is in, and a level crossing
+            { type: 'area', id: 3600000001, tags: { boundary: 'administrative', admin_level: '10', name: 'South Brisbane' } },
+            { type: 'area', id: 3600000002, tags: { boundary: 'administrative', admin_level: '6', name: 'Brisbane City' } },
+            { type: 'node', id: 98, lat: off(-40, 60).lat, lon: off(-40, 60).lon, tags: { railway: 'level_crossing', 'crossing:barrier': 'full' } }]) }
+          : overpass;
         return route.fulfill({ body: JSON.stringify(body), contentType: 'application/json', headers: { 'access-control-allow-origin': '*' } });
       }
       if (u.includes('router.project-osrm.org')) return route.fulfill({ body: JSON.stringify({ code: 'NoRoute' }), contentType: 'application/json', headers: { 'access-control-allow-origin': '*' } });
@@ -84,6 +94,25 @@ const overpass = { elements: [
           return route.fulfill({ body: JSON.stringify({ query: { geosearch: near ? [{ title: 'File:Riverside.svg', dist: 3 }, { title: 'File:Streets Beach test.jpg', dist: 20 }] : [] } }), contentType: 'application/json', headers: cors });
         }
         return route.fulfill({ body: JSON.stringify({ query: { pages: { 1: { title: 'File:Streets Beach test.jpg', imageinfo: [{ url: 'http://img.test/full.jpg', thumburl: 'http://img.test/thumb.jpg', descriptionurl: 'https://commons.wikimedia.org/wiki/File:Streets_Beach_test.jpg', extmetadata: { LicenseShortName: { value: 'CC BY-SA 4.0' }, Artist: { value: '<a href="x">Tester</a>' } } }] } } } }), contentType: 'application/json', headers: cors });
+      }
+      if (u.includes('en.wikipedia.org/w/api.php')) {   // v14: notable places along the track
+        const q = new URL(u).searchParams, cors = { 'access-control-allow-origin': '*' };
+        if (q.get('list') === 'geosearch') return route.fulfill({ body: JSON.stringify({ query: { geosearch: [
+          { pageid: 11, title: 'Gallery of Modern Art', lat: off(65, 25).lat, lon: off(65, 25).lon },
+          { pageid: 12, title: 'Riverside Sculpture (Brisbane)', lat: off(-20, 50).lat, lon: off(-20, 50).lon },
+          { pageid: 13, title: 'South Brisbane', lat: off(0, 30).lat, lon: off(0, 30).lon }] } }), contentType: 'application/json', headers: cors });
+        return route.fulfill({ body: JSON.stringify({ query: { pages: {
+          11: { pageid: 11, description: 'art museum in Brisbane', pageprops: { wikibase_item: 'Q101' } },
+          12: { pageid: 12, description: 'public sculpture in Brisbane', pageprops: { wikibase_item: 'Q102' } },
+          13: { pageid: 13, description: 'suburb of Brisbane, Queensland, Australia' } } } }), contentType: 'application/json', headers: cors });
+      }
+      if (u.includes('www.wikidata.org/w/api.php') && new URL(u).searchParams.get('action') === 'wbgetentities') {
+        const q = new URL(u).searchParams, cors = { 'access-control-allow-origin': '*' }, m = 'http://www.wikidata.org/entity/Q11573';
+        const c = v => ({ rank: 'normal', mainsnak: { datavalue: { value: v } } });
+        const body = q.get('props') === 'labels' ? { entities: { Q860861: { labels: { en: { value: 'sculpture' } } } } }
+          : { entities: { Q101: { claims: { P2048: [c({ amount: '+25', unit: m })], P571: [c({ time: '+2006-12-02T00:00:00Z' })] } },
+                          Q102: { descriptions: { en: { value: 'steel sculpture' } }, claims: { P2048: [c({ amount: '+9', unit: m })], P31: [c({ id: 'Q860861' })], P571: [c({ time: '+1999-00-00T00:00:00Z' })] } } } };
+        return route.fulfill({ body: JSON.stringify(body), contentType: 'application/json', headers: cors });
       }
       if (u.includes('img.test')) return route.fulfill({ body: aerial, contentType: 'image/png' });
       if (/arcgisonline|tile|opentopomap/.test(u)) return route.fulfill({ body: tile, contentType: 'image/png' });
@@ -526,6 +555,35 @@ const overpass = { elements: [
     check('v13 crossing: Undo takes the pick back without a re-scan', !(await x.page.isDisabled('#exportBtn')) && await x.page.$eval('.xover.on', b => b.dataset.over) === '-1');
     check('v13 crossing: no script errors', x.errors.length === 0, x.errors.join('; '));
     await x.ctx.close();
+  }
+  if (V >= 14) {
+    // ---------- v14: place names, Overture shops, landmark facts ----------
+    const y = await openPage('v14');
+    const loop = [[-60, -20], [120, -20], [120, 100], [-60, 100]].map(([dx, dy]) => { const q = off(dx, dy); return [q.lat, q.lon]; });
+    await y.page.evaluate(w => localStorage.setItem('kartmap-v1', JSON.stringify({ waypoints: w, snap: false, loop: true, name: 'v14 test' })), loop);
+    await y.page.reload(); await y.page.waitForTimeout(1200);
+    check('v14 Overture Places option is there and on', await y.page.isChecked('#usePlaces'));
+    await y.page.click('#scanBtn');
+    await y.page.waitForFunction(() => !document.getElementById('exportBtn').disabled, null, { timeout: 15000 });
+    const ys = await y.page.textContent('#status');
+    check('v14 scan asks Overture Places once and says what it added', (await y.page.evaluate(() => window.__placesCalls)) === 1 && /1 shops added from Overture Places/.test(ys), ys);
+    check('v14 Landmark facts button enabled after scan', !(await y.page.isDisabled('#factsBtn')));
+    await y.page.click('#factsBtn');
+    await y.page.waitForFunction(() => /Landmark facts/.test(document.getElementById('status').textContent), null, { timeout: 15000 });
+    const fs1 = await y.page.textContent('#status');
+    check('v14 Landmark facts: 1 place added from Wikipedia, 2 landmarks with facts', /1 notable places added from Wikipedia, 2 landmarks got facts/.test(fs1), fs1);
+    const lst = await y.page.textContent('#stats');
+    check('v14 the landmark list shows the new sculpture with its description and year', /Riverside Sculpture/.test(lst) && /public sculpture in Brisbane/.test(lst) && /built 1999/.test(lst), lst.slice(-600));
+    const [yd] = await Promise.all([y.page.waitForEvent('download'), y.page.click('#exportBtn')]);
+    const yj = JSON.parse(fs.readFileSync(await yd.path(), 'utf8'));
+    const goma = yj.buildings.find(b => /Gallery/.test(b.name || '')), sc = yj.landmarks.find(l => /Riverside Sculpture/.test(l.name));
+    check('v14 export: suburb and city, the level crossing, and an Overture café sign on GOMA (no real name)', yj.meta.places && yj.meta.places.suburb === 'South Brisbane' && yj.meta.places.city === 'Brisbane City' &&
+      yj.markings.some(m => m.kind === 'level_crossing' && m.style === 'gates') && goma && (goma.shops || []).some(x => x.type === 'cafe'), JSON.stringify([yj.meta.places, goma && goma.shops]));
+    check('v14 export: GOMA keeps its OSM floors height, its landmark gets Wikidata facts', goma.heightSource === 'levels' && yj.landmarks.some(l => /Gallery/.test(l.name) && l.facts && l.facts.height === 25 && l.facts.built === 2006 && l.wikipedia === 'en:Gallery of Modern Art'), JSON.stringify(yj.landmarks.find(l => /Gallery/.test(l.name))));
+    check('v14 export: the Wikipedia sculpture with its facts, the suburb page left out', sc && sc.source === 'wikipedia' && sc.facts.type === 'sculpture' && sc.facts.height === 9 && !yj.landmarks.some(l => l.name === 'South Brisbane'), JSON.stringify(sc));
+    check('v14 export: credits name Overture places, Wikidata and Wikipedia', /CDLA/.test(yj.meta.attribution) && /Wikidata/.test(yj.meta.attribution) && /Wikipedia/.test(yj.meta.attribution) && yj.meta.landmarkFacts && yj.meta.landmarkFacts.placesAdded === 1, yj.meta.attribution);
+    check('v14 no script errors', y.errors.length === 0, y.errors.join('; '));
+    await y.ctx.close();
   }
   await browser.close();
   const failed = results.filter(r => !r.ok).length;
