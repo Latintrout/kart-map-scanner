@@ -132,6 +132,8 @@ function runScannerTests(lib) {
   else check('v12c functions present', false, 'minimapPlan not found (running against v12b?)');
   if (has('terrainGrid')) runV13(lib, check, same);
   else check('v13 functions present', false, 'terrainGrid not found (running against v12c?)');
+  if (has('placesSummary')) runV14(lib, check, same);
+  else check('v14 functions present', false, 'placesSummary not found (running against v13?)');
 
   return results;
 }
@@ -831,3 +833,59 @@ function runV12c(lib, check, same) {
   out.route.centerline.elevation = out.route.centerline.points.map(() => 0.3);
   check('v12c profile: a flat track is drawn at least 2 m tall (no fake drama)', lib.profileGeometry(out, 300, 90, 6).top === 2);
 }
+
+// v14: more free detail: extra OSM tags, place names, Wikipedia/Wikidata landmark facts, Overture places
+function runV14(lib, check, same) {
+  const la = -27.4705, lo = 153.0235, mLon = 111320 * Math.cos(la * Math.PI / 180);
+  const off = (dx, dy) => ({ lat: la + dy / 111320, lon: lo + dx / mLon });
+  const llOff = (dx, dy) => { const o = off(dx, dy); return [o.lat, o.lon]; };
+  const sq = (x, y, w, h) => [off(x, y), off(x + w, y), off(x + w, y + h), off(x, y + h), off(x, y)];
+  const route = [llOff(0, 0), llOff(400, 0)];
+  const els = [
+    { type: 'way', id: 1, tags: { highway: 'primary', name: 'Main Road', maxspeed: '60' }, geometry: [off(0, 0), off(150, 0)] },
+    { type: 'way', id: 2, tags: { highway: 'primary', bridge: 'yes', 'bridge:structure': 'truss', 'bridge:name': 'Big Steel Bridge', maxspeed: '40 mph', layer: '1' }, geometry: [off(150, 0), off(250, 0)] },
+    { type: 'way', id: 3, tags: { highway: 'footway', bridge: 'boardwalk' }, geometry: [off(0, 20), off(80, 20)] },
+    { type: 'way', id: 4, tags: { highway: 'residential', maxspeed: 'AU:urban' }, geometry: [off(250, 0), off(400, 0)] },
+    { type: 'way', id: 5, tags: { railway: 'rail', bridge: 'yes', 'bridge:structure': 'arch' }, geometry: [off(0, 60), off(400, 60)] },
+    { type: 'way', id: 6, tags: { natural: 'water', water: 'pond', name: 'Duck Pond' }, geometry: sq(20, -80, 30, 30) },
+    { type: 'way', id: 7, tags: { leisure: 'pitch', sport: 'cricket' }, geometry: sq(100, -90, 40, 40) },
+    { type: 'way', id: 8, tags: { building: 'church', name: 'Old Stone Church', start_date: '1885', heritage: '2', amenity: 'place_of_worship' }, geometry: sq(300, 10, 20, 20) },
+    { type: 'way', id: 9, tags: { railway: 'station', name: 'Southside Station', public_transport: 'station' }, geometry: sq(200, 70, 40, 15) },
+    { type: 'node', id: 20, lat: off(120, 60).lat, lon: off(120, 60).lon, tags: { railway: 'level_crossing', 'crossing:barrier': 'full' } },
+    { type: 'node', id: 21, lat: off(300, 60).lat, lon: off(300, 60).lon, tags: { railway: 'crossing' } },
+    { type: 'node', id: 22, lat: off(210, 75).lat, lon: off(210, 75).lon, tags: { railway: 'signal' } },
+    { type: 'node', id: 23, lat: off(30, 5).lat, lon: off(30, 5).lon, tags: { man_made: 'flagpole', height: '12' } },
+    { type: 'node', id: 24, lat: off(-900, 400).lat, lon: off(-900, 400).lon, tags: { place: 'suburb', name: 'West End', wikidata: 'Q1' } },
+    { type: 'node', id: 25, lat: off(600, -300).lat, lon: off(600, -300).lon, tags: { place: 'suburb', name: 'Woolloongabba' } },
+    { type: 'area', id: 3600000001, tags: { boundary: 'administrative', admin_level: '10', name: 'South Brisbane' } },
+    { type: 'area', id: 3600000002, tags: { boundary: 'administrative', admin_level: '6', name: 'Brisbane City' } },
+    { type: 'area', id: 3600000003, tags: { boundary: 'administrative', admin_level: '4', name: 'Queensland' } }
+  ];
+  const { out } = lib.buildOutput({ elements: els }, { route, waypoints: route, radius: 120, width: 8, loop: false, snapped: false, name: 'v14', now: 'X' });
+  const R = id => out.roads.find(r => r.id === id) || {};
+  check('v14 speed limits: 60 → 60 km/h, 40 mph → 64 km/h, codes like AU:urban left out', R('w1').speedLimit === 60 && R('w2').speedLimit === 64 && R('w4').speedLimit === undefined, JSON.stringify([R('w1').speedLimit, R('w2').speedLimit, R('w4').speedLimit]));
+  check('v14 bridges say what kind they are: truss with its name, boardwalk', R('w2').bridgeStructure === 'truss' && R('w2').bridgeName === 'Big Steel Bridge' && R('w3').bridgeType === 'boardwalk' && R('w3').bridge === true, JSON.stringify([R('w2'), R('w3')]));
+  check('v14 a plain road gets none of the bridge fields', R('w1').bridgeStructure === undefined && R('w1').bridgeType === undefined);
+  check('v14 railway bridges keep their structure too', out.railways[0].bridgeStructure === 'arch');
+  const lc = out.markings.filter(m => m.kind === 'level_crossing');
+  check('v14 level crossings: boom gates on the road one, footpath style on the path one', lc.length === 2 && lc.some(m => m.style === 'gates') && lc.some(m => m.style === 'footpath'), JSON.stringify(lc));
+  check('v14 railway signal is a prop (group railway)', out.points.some(p => p.kind === 'signal' && p.group === 'railway'));
+  check('v14 props keep a mapped height (12 m flagpole)', (out.points.find(p => p.kind === 'flagpole') || {}).height === 12);
+  const A = id => out.areas.find(a => a.id === id) || {};
+  check('v14 water areas say what kind of water, pitches say which sport', A('w6').waterType === 'pond' && A('w7').sport === 'cricket', JSON.stringify([A('w6'), A('w7')]));
+  const ch = out.buildings.find(b => b.id === 'w8');
+  check('v14 buildings: year built and heritage listed', ch.built === 1885 && ch.heritage === true, JSON.stringify(ch));
+  const lm = n => out.landmarks.find(l => l.name === n);
+  check('v14 landmarks carry year built and heritage', lm('Old Stone Church') && lm('Old Stone Church').built === 1885 && lm('Old Stone Church').heritage === true);
+  check('v14 a named station is a landmark (station area kind)', lm('Southside Station') && lm('Southside Station').kind === 'station' && A('w9').kind === 'station', JSON.stringify(lm('Southside Station')));
+  check('v14 suburb names are never landmarks or props, and don\'t stretch the map box', !lm('West End') && !out.points.some(p => p.name === 'West End') && out.meta.bbox.minX > -300, JSON.stringify(out.meta.bbox));
+  const pl = out.meta.places;
+  check('v14 places: suburb, city and state from the areas the start is in, nearest place labels listed', pl && pl.suburb === 'South Brisbane' && pl.city === 'Brisbane City' && pl.state === 'Queensland' && same(pl.nearby, ['Woolloongabba', 'West End']), JSON.stringify(pl));
+  check('v14 places: without council areas, the nearest suburb label is used', lib.placesSummary([], [{ name: 'Far', kind: 'suburb', pos: [3000, 0] }, { name: 'Near', kind: 'suburb', pos: [100, 0] }]).suburb === 'Near');
+  check('v14 places: nothing found → no places field', lib.placesSummary([], []) === null && lib.buildOutput({ elements: [] }, { route, waypoints: route, radius: 50, width: 8, name: 'x', now: 'X' }).out.meta.places === undefined);
+  const q = lib.buildQuery(route, 100);
+  check('v14 query asks for railway nodes, place names near the start and the council areas it is in', /node\.n\["railway"\]/.test(q) && /\["place"~/.test(q) && /is_in\(-27\.4705/.test(q) && /out tags;/.test(q));
+  check('v14 file with the new fields still passes the game-loader check', lib.loaderContractProblems(out).length === 0, JSON.stringify(lib.loaderContractProblems(out)));
+  check('v14 generator says v14', out.meta.generator === 'kart-map-scanner v14');
+}
+function has14(lib, k) { return typeof lib[k] === 'function'; }
