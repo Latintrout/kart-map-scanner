@@ -194,6 +194,7 @@
       <input id="radius" type="range" min="25" max="300" step="5" value="100"></label>
     <label>Track width (m) <input id="width" type="number" min="3" max="30" step="0.5" value="8"></label>
     <label class="inline"><input id="useOverture" type="checkbox" checked> Fill building gaps from Overture (recommended)</label>
+    <label class="inline"><input id="usePlaces" type="checkbox" checked> Add shops OSM is missing from Overture Places (more shop signs, made-up names)</label>
     <button id="scanBtn" class="primary" style="width:100%;margin-top:6px">Scan area</button>
     <div id="status">Hold and drag on the map to draw a route.</div>
     <details id="errLog" hidden style="margin-top:6px;font-size:12px">
@@ -1277,6 +1278,11 @@ function buildOutput(data, o) {
       if (el.lat == null) continue;
       const pos = P(el.lat, el.lon);
       if (t.place) { if (t.name) placeNodes.push({ name: t.name, kind: t.place, pos }); continue; }   // v14: names only, never drawn
+      if (t['overture:place']) {   // v14: an Overture shop: only its sign (no prop, no name)
+        const sk = shopKind(t);
+        if (sk) shopSpots.push({ id: String(el.id), type: sk, pos });
+        continue;
+      }
       const prop = propKind(t);
       if (prop) {
         grow(pos);
@@ -1492,7 +1498,7 @@ function buildOutput(data, o) {
       bbox: { minX: round2(bb.minX), minY: round2(bb.minY), maxX: round2(bb.maxX), maxY: round2(bb.maxY) },
       areasTrimmedTo: { minX: round2(clipBox.minX), minY: round2(clipBox.minY), maxX: round2(clipBox.maxX), maxY: round2(clipBox.maxY) },
       elevation: null,
-      attribution: attributionFor({ overture: !!o.overture }),
+      attribution: attributionFor({ overture: !!o.overture, places: !!(o.overture && o.overture.placesAdded) }),
       places: placesSummary(admin, placeNodes) || undefined,   // v14: suburb, city, state
       overture: o.overture || undefined,   // v8.3: { release, heightsFilled, added }
       counts: {
@@ -2780,6 +2786,76 @@ function creditsFor(meta, extra) {
   return attributionFor({ overture: !!meta.overture, places: !!(meta.overture && meta.overture.placesAdded), imagery: !!meta.imagery, elevation: !!meta.elevation,
     wikidata: !!lf.wikidata, wikipedia: !!lf.wikipedia, ...(extra || {}) });
 }
+// ======================================================================
+// v14: Overture Places: shops and cafés OSM is missing, for more shop signs. Free (CDLA
+// Permissive 2.0), read from the same kind of PMTiles file as the Overture buildings, no key.
+// Only the kind of shop is used: real names and brands never reach the file (each shop gets
+// a made-up sign name, like OSM shops do).
+// ======================================================================
+// One Overture place from a vector-tile feature: { id, category, confidence, lat, lon }.
+function overturePlace(props, coords) {
+  let cat = props['@category'] || props.basic_category || null;
+  if (!cat && props.categories) {
+    try { const c = typeof props.categories === 'string' ? JSON.parse(props.categories) : props.categories; cat = c && c.primary; } catch (e) { /* no category */ }
+  }
+  let c = coords;
+  while (Array.isArray(c) && Array.isArray(c[0])) c = c[0];   // MultiPoint: its first point
+  const conf = parseFloat(props.confidence);
+  return { id: String(props.id || ''), category: cat ? String(cat).toLowerCase() : null, confidence: isFinite(conf) ? conf : null, lat: c ? c[1] : null, lon: c ? c[0] : null };
+}
+// Overture categories → the OSM tags shopKind() understands (so the sign types stay the same).
+const OVERTURE_PLACE_TAGS = {
+  cafe: { amenity: 'cafe' }, coffee_shop: { amenity: 'cafe' }, coffee_roastery: { amenity: 'cafe' }, tea_room: { amenity: 'cafe' },
+  restaurant: { amenity: 'restaurant' }, fast_food_restaurant: { amenity: 'fast_food' }, food_court: { amenity: 'food_court' },
+  bar: { amenity: 'bar' }, cocktail_bar: { amenity: 'bar' }, wine_bar: { amenity: 'bar' }, sports_bar: { amenity: 'bar' }, pub: { amenity: 'pub' }, brewery: { amenity: 'pub' },
+  bakery: { shop: 'bakery' }, ice_cream_shop: { amenity: 'ice_cream' }, frozen_yoghurt_shop: { amenity: 'ice_cream' }, dessert_shop: { shop: 'confectionery' },
+  chocolatier: { shop: 'chocolate' }, candy_store: { shop: 'confectionery' }, donuts: { amenity: 'cafe', cuisine: 'donut' }, bubble_tea: { shop: 'tea' },
+  juice_bar: { amenity: 'cafe', cuisine: 'juice' }, smoothie_juice_bar: { amenity: 'cafe', cuisine: 'juice' },
+  supermarket: { shop: 'supermarket' }, grocery_store: { shop: 'supermarket' }, convenience_store: { shop: 'convenience' }, liquor_store: { shop: 'alcohol' },
+  butcher_shop: { shop: 'butcher' }, clothing_store: { shop: 'clothes' }, fashion: { shop: 'clothes' }, womens_clothing_store: { shop: 'clothes' }, mens_clothing_store: { shop: 'clothes' },
+  shoe_store: { shop: 'shoes' }, hair_salon: { shop: 'hairdresser' }, barber: { shop: 'hairdresser' }, beauty_salon: { shop: 'beauty' }, nail_salon: { shop: 'beauty' }, cosmetic_and_beauty_supply: { shop: 'beauty' },
+  pharmacy: { amenity: 'pharmacy' }, drugstore: { amenity: 'pharmacy' }, bookstore: { shop: 'books' }, newsstand: { shop: 'newsagent' },
+  electronics: { shop: 'electronics' }, mobile_phone_store: { shop: 'mobile_phone' }, computer_store: { shop: 'computer' }, jewelry_store: { shop: 'jewelry' },
+  florist: { shop: 'florist' }, flowers_and_gifts_shop: { shop: 'florist' }, hardware_store: { shop: 'hardware' }, pet_store: { shop: 'pet' },
+  optometrist: { shop: 'optician' }, eyewear_and_optician: { shop: 'optician' }, automotive_repair: { shop: 'car_repair' }, car_dealer: { shop: 'car' }, tire_shop: { shop: 'tyres' },
+  laundromat: { shop: 'laundry' }, dry_cleaning: { shop: 'dry_cleaning' }, toy_store: { shop: 'toys' }, sporting_goods: { shop: 'sports' }, bicycle_shop: { shop: 'bicycle' },
+  music_store: { shop: 'music' }, furniture_store: { shop: 'furniture' }, home_decor: { shop: 'interior_decoration' }, travel_agents: { shop: 'travel_agency' },
+  tattoo: { shop: 'tattoo' }, tattoo_and_piercing: { shop: 'tattoo' }, real_estate_agent: { shop: 'estate_agent' }, real_estate: { shop: 'estate_agent' },
+  bank_credit_union: { amenity: 'bank' }, bank: { amenity: 'bank' }, post_office: { amenity: 'post_office' }, gas_station: { amenity: 'fuel' },
+  dentist: { amenity: 'dentist' }, general_dentistry: { amenity: 'dentist' }, doctor: { amenity: 'doctors' }, medical_center: { amenity: 'clinic' },
+  gym: { leisure: 'fitness_centre' }, fitness_trainer: { leisure: 'fitness_centre' }
+};
+function placeTags(category) {
+  const c = String(category || '').toLowerCase();
+  if (!c) return null;
+  if (OVERTURE_PLACE_TAGS[c]) return { ...OVERTURE_PLACE_TAGS[c] };
+  const r = /^(.+)_restaurant$/.exec(c);   // pizza_restaurant, chinese_restaurant… → the cuisine picks the sign
+  if (r) return { amenity: 'restaurant', cuisine: r[1] };
+  if (/_(store|shop)$/.test(c)) return { shop: 'yes' };   // any other shop: a generic sign
+  return null;
+}
+// Adds Overture places as shop nodes to the raw scan data, returning a NEW copy. Skipped: places
+// with no shop type, low confidence (Overture's own score, 0-1), and ones within 25 m of an
+// OSM shop of the same sign type or within 8 m of any OSM shop (OSM always wins).
+function mergeOverturePlaces(data, places, minConfidence) {
+  const min = minConfidence == null ? 0.5 : minConfidence;
+  const els = (data.elements || []).slice();
+  const osm = els.filter(e => e.type === 'node' && e.tags && e.lat != null).map(e => ({ ll: [e.lat, e.lon], kind: shopKind(e.tags) })).filter(s => s.kind);
+  const stats = { placesAdded: 0, placesSkipped: 0 };
+  const seen = new Set();
+  for (const p of places || []) {
+    const tags = p && p.lat != null ? placeTags(p.category) : null;
+    const kind = tags && shopKind(tags);
+    if (!kind || (p.confidence != null && p.confidence < min) || seen.has(p.id)) { stats.placesSkipped++; continue; }
+    const ll = [p.lat, p.lon];
+    if (osm.some(s => { const d = dist(s.ll, ll); return d < 8 || (d < 25 && s.kind === kind); })) { stats.placesSkipped++; continue; }
+    seen.add(p.id);
+    osm.push({ ll, kind });
+    els.push({ type: 'node', id: 'ovp-' + (p.id ? p.id.slice(0, 12) : stats.placesAdded), lat: p.lat, lon: p.lon, tags: { ...tags, 'overture:place': 'yes' } });
+    stats.placesAdded++;
+  }
+  return { data: { ...data, elements: els }, stats };
+}
 // PURE-END
 // ======================================================================
 
@@ -3298,6 +3374,19 @@ async function scan() {
       overtureNote = ` (Overture skipped: ${e instanceof TypeError ? "couldn't reach it" : e.message})`;
     }
   }
+  // v14: shops OSM is missing, from Overture Places. If it fails, the scan carries on without them.
+  if ($('usePlaces').checked) {
+    setStatus('Adding shops from Overture Places…');
+    try {
+      const places = await Promise.race([fetchOverturePlaces(scanBox(routeLatLngs, radius)),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('no answer after 45 s')), 45000))]);
+      const m = mergeOverturePlaces(data, places);
+      data = m.data;
+      overture = { ...(overture || { release: CONFIG.overture.release }), placesAdded: m.stats.placesAdded };
+    } catch (e) {
+      overtureNote += ` (Overture places skipped: ${e instanceof TypeError ? "couldn't reach it" : e.message})`;
+    }
+  }
   els.scanBtn.disabled = false;
 
   const isLoop = els.loop.checked && waypoints.length >= 3;
@@ -3321,7 +3410,7 @@ async function scan() {
   const contract = loaderContractProblems(out);   // v8.2: would the game's loader choke on this file?
   if (partial) setStatus('Scan finished but the server warned the data may be incomplete: ' + data.remark, 'warn');
   else if (contract.length) setStatus(`Scan done, but ${contract.length} thing(s) in this file won't work in the game: ${contract.slice(0, 3).join('; ')}${contract.length > 3 ? '…' : ''}`, 'warn');
-  else setStatus('Scan done. Check the preview, then Export JSON.' + (overture ? ` Overture added ${overture.added} buildings and ${overture.heightsFilled} heights.` : '') + overtureNote, overtureNote ? 'warn' : 'ok');
+  else setStatus('Scan done. Check the preview, then Export JSON.' + (overture && overture.added != null ? ` Overture added ${overture.added} buildings and ${overture.heightsFilled} heights.` : '') + (overture && overture.placesAdded ? ` ${overture.placesAdded} shops added from Overture Places.` : '') + overtureNote, overtureNote ? 'warn' : 'ok');
 }
 els.scanBtn.onclick = scan;
 // ======================================================================
@@ -3353,6 +3442,31 @@ async function fetchOvertureBuildings(box) {
       const c = exactCentroid(feat.ring);
       if (c[0] < box.south || c[0] > box.north || c[1] < box.west || c[1] > box.east) continue;
       seen.set(feat.id || (x + '/' + y + '/' + i), feat);   // a building cut by a tile edge appears in both tiles
+    }
+  }
+  return [...seen.values()];
+}
+// v14: Overture places (shops, cafés) in the box. Tests replace it with window.__overturePlacesFetch.
+async function fetchOverturePlaces(box) {
+  if (window.__overturePlacesFetch) return window.__overturePlacesFetch(box);
+  const [{ PMTiles }, { VectorTile }, pbfMod] = await Promise.all(CONFIG.overture.libs.map(u => import(u)));
+  const Pbf = pbfMod.default || pbfMod;
+  const pm = new PMTiles(CONFIG.overture.base + CONFIG.overture.release + '/places.pmtiles');
+  const z = Math.min(14, (await pm.getHeader()).maxZoom || 14);
+  const tx = lon => Math.floor((lon + 180) / 360 * 2 ** z);
+  const ty = lat => { const r = lat * Math.PI / 180; return Math.floor((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * 2 ** z); };
+  const jobs = [], seen = new Map();
+  for (let x = tx(box.west); x <= tx(box.east); x++) for (let y = ty(box.north); y <= ty(box.south); y++) jobs.push([x, y]);
+  if (jobs.length > 64) throw new Error(`area too big for Overture places (${jobs.length} tiles)`);
+  for (const [x, y] of jobs) {
+    const t = await pm.getZxy(z, x, y);
+    if (!t) continue;
+    const layer = new VectorTile(new Pbf(new Uint8Array(t.data))).layers.place;
+    if (!layer) continue;
+    for (let i = 0; i < layer.length; i++) {
+      const f = layer.feature(i), p = overturePlace(f.properties, f.toGeoJSON(x, y, z).geometry.coordinates);
+      if (p.lat == null || p.lat < box.south || p.lat > box.north || p.lon < box.west || p.lon > box.east) continue;
+      seen.set(p.id || (x + '/' + y + '/' + i), p);
     }
   }
   return [...seen.values()];

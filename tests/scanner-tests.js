@@ -889,6 +889,8 @@ function runV14(lib, check, same) {
   check('v14 generator says v14', out.meta.generator === 'kart-map-scanner v14');
   if (has14(lib, 'applyLandmarkFacts')) runV14Facts(lib, check, same, out, off, llOff);
   else check('v14 landmark facts functions present', false, 'applyLandmarkFacts not found');
+  if (has14(lib, 'mergeOverturePlaces')) runV14Places(lib, check, same, off, llOff, sq);
+  else check('v14 Overture places functions present', false, 'mergeOverturePlaces not found');
 }
 function has14(lib, k) { return typeof lib[k] === 'function'; }
 function runV14Facts(lib, check, same, base, off, llOff) {
@@ -939,4 +941,37 @@ function runV14Facts(lib, check, same, base, off, llOff) {
   const long = lib.wikiCircles(Array.from({ length: 200 }, (_, i) => llOff(i * 100, 0)), 100);
   check('v14 Wikipedia search circles cover the corridor (every 100 m, 150 m wide) and are capped', circ.length >= 10 && circ.length <= 12 && circ.every(c => c.r === 150) && long.length === 25, circ.length + ' / ' + long.length);
   check('v14 file with landmark facts still passes the game-loader check', lib.loaderContractProblems(out).length === 0, JSON.stringify(lib.loaderContractProblems(out)));
+}
+function runV14Places(lib, check, same, off, llOff, sq) {
+  const pt = (dx, dy) => { const o = off(dx, dy); return [o.lon, o.lat]; };
+  const op = lib.overturePlace({ id: 'abc123456789xyz', '@category': 'Pizza_Restaurant', '@name': 'Real Pizza Brand', confidence: 0.9 }, pt(10, 10));
+  check('v14 Overture place: id, category (lowercase), confidence, position; the name is not kept', op.category === 'pizza_restaurant' && op.confidence === 0.9 && Math.abs(op.lat - off(10, 10).lat) < 1e-9 && !('name' in op), JSON.stringify(op));
+  check('v14 Overture place: category read from a categories JSON string too', lib.overturePlace({ categories: '{"primary":"coffee_shop","alternate":["cafe"]}' }, [pt(0, 0)]).category === 'coffee_shop');
+  check('v14 Overture categories map to the same sign types as OSM shops',
+    lib.shopKind(lib.placeTags('pizza_restaurant')) === 'pizza' && lib.shopKind(lib.placeTags('coffee_shop')) === 'cafe' && lib.shopKind(lib.placeTags('hair_salon')) === 'hairdresser' &&
+    lib.shopKind(lib.placeTags('vintage_record_store')) === 'shop' && lib.placeTags('park') === null && lib.placeTags('') === null);
+  const data = { elements: [
+    { type: 'way', id: 1, tags: { highway: 'residential' }, geometry: [off(0, 0), off(300, 0)] },
+    { type: 'way', id: 2, tags: { building: 'yes' }, geometry: sq(20, 8, 20, 15) },
+    { type: 'way', id: 3, tags: { building: 'yes' }, geometry: sq(100, 8, 20, 15) },
+    { type: 'way', id: 4, tags: { building: 'yes' }, geometry: sq(200, 8, 20, 15) },
+    { type: 'node', id: 10, ...off(110, 15), tags: { amenity: 'cafe', name: 'Real OSM Cafe' } }
+  ] };
+  const places = [
+    { id: 'p1', category: 'pizza_restaurant', confidence: 0.9, ...off(30, 15) },   // new: building w2
+    { id: 'p2', category: 'coffee_shop', confidence: 0.9, ...off(112, 16) },       // same type as the OSM cafe beside it: skip
+    { id: 'p3', category: 'hair_salon', confidence: 0.2, ...off(210, 15) },        // low confidence: skip
+    { id: 'p4', category: 'park', confidence: 0.99, ...off(210, 14) },             // not a shop: skip
+    { id: 'p5', category: 'bookstore', confidence: 0.8, ...off(205, 12) },         // new: building w4
+    { id: 'p5', category: 'bookstore', confidence: 0.8, ...off(205, 12) }          // same place twice (two tiles): once
+  ].map(p => ({ ...p, lat: p.lat, lon: p.lon }));
+  const m = lib.mergeOverturePlaces(data, places);
+  check('v14 Overture places: 2 new shops, OSM duplicates, low confidence, non-shops and repeats skipped; original untouched', m.stats.placesAdded === 2 && m.stats.placesSkipped === 4 && data.elements.length === 5, JSON.stringify(m.stats));
+  const route = [llOff(0, 0), llOff(300, 0)];
+  const { out } = lib.buildOutput(m.data, { route, waypoints: route, radius: 80, width: 8, loop: false, snapped: false, name: 'shops', now: 'X', overture: { release: 'r', placesAdded: 2 } });
+  const B = id => out.buildings.find(b => b.id === id) || {};
+  check('v14 Overture shops become made-up signs on their buildings', (B('w2').shops || [])[0] && B('w2').shops[0].type === 'pizza' && lib.signNames().pizza.includes(B('w2').shops[0].sign) && (B('w4').shops || [])[0].type === 'books', JSON.stringify([B('w2').shops, B('w4').shops]));
+  check('v14 Overture shops are not props and add no names', !out.points.some(p => /^ovp/.test(p.id)) && !/Real Pizza|Real OSM Cafe/.test(JSON.stringify(out)));
+  check('v14 credits name Overture places when shops were added', /CDLA Permissive 2\.0/.test(out.meta.attribution) && out.meta.overture.placesAdded === 2);
+  check('v14 file with Overture shops still passes the game-loader check', lib.loaderContractProblems(out).length === 0);
 }
