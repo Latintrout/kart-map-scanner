@@ -887,5 +887,56 @@ function runV14(lib, check, same) {
   check('v14 query asks for railway nodes, place names near the start and the council areas it is in', /node\.n\["railway"\]/.test(q) && /\["place"~/.test(q) && /is_in\(-27\.4705/.test(q) && /out tags;/.test(q));
   check('v14 file with the new fields still passes the game-loader check', lib.loaderContractProblems(out).length === 0, JSON.stringify(lib.loaderContractProblems(out)));
   check('v14 generator says v14', out.meta.generator === 'kart-map-scanner v14');
+  if (has14(lib, 'applyLandmarkFacts')) runV14Facts(lib, check, same, out, off, llOff);
+  else check('v14 landmark facts functions present', false, 'applyLandmarkFacts not found');
 }
 function has14(lib, k) { return typeof lib[k] === 'function'; }
+function runV14Facts(lib, check, same, base, off, llOff) {
+  const out = JSON.parse(JSON.stringify(base));
+  const P = lib.makeProjector(out.meta.origin.lat, out.meta.origin.lon);
+  const church = out.landmarks.find(l => l.name === 'Old Stone Church');
+  church.wikidata = 'Q100';
+  const before = out.buildings.find(b => b.id === 'w8');
+  const pages = [
+    { pageid: 1, title: 'Old Stone Church', ...off(310, 20), wikidata: 'Q100', description: 'church in Brisbane, Queensland, Australia' },
+    { pageid: 2, title: 'Clock Tower (Southside)', ...off(100, 30), wikidata: 'Q200', description: 'heritage-listed clock tower in Brisbane, Australia' },
+    { pageid: 3, title: 'South Brisbane', ...off(50, 40), description: 'suburb of Brisbane, Queensland, Australia' },
+    { pageid: 4, title: 'Some Burger Co', ...off(60, 10), description: 'fast food restaurant chain' },
+    { pageid: 5, title: 'Far Monument', ...off(100, 2000), description: 'monument' },
+    { pageid: 6, title: 'List of places in Southside', ...off(10, 10) },
+    { pageid: 7, title: 'Grey Street, Brisbane', ...off(20, 10), description: 'street in Brisbane' }
+  ];
+  const st = lib.addWikiPlaces(out, pages, P);
+  const tower = out.landmarks.find(l => l.name === 'Clock Tower');
+  check('v14 Wikipedia: the church page only adds its link and description to the landmark already there', st.matched === 1 && church.wikipedia === 'en:Old Stone Church' && /church in Brisbane/.test(church.description) && out.landmarks.filter(l => /Old Stone Church/.test(l.name)).length === 1, JSON.stringify(church));
+  check('v14 Wikipedia: a notable place OSM missed becomes a landmark (name without the bracket, source wikipedia)', st.added === 1 && tower && tower.source === 'wikipedia' && tower.wikidata === 'Q200' && tower.kind === 'building' && /^L\d+$/.test(tower.id) && out.meta.counts.landmarks === out.landmarks.length, JSON.stringify(tower));
+  check('v14 Wikipedia: suburbs, chains, far places, lists and streets are left out', !out.landmarks.some(l => /South Brisbane|Burger|Far Monument|List of|Grey Street/.test(l.name)) && st.skipped === 5, JSON.stringify(st));
+  check('v14 Wikipedia: ids stay unique', new Set(out.landmarks.map(l => l.id)).size === out.landmarks.length);
+  const metre = 'http://www.wikidata.org/entity/Q11573';
+  const claim = (v, rank) => ({ rank: rank || 'normal', mainsnak: { datavalue: { value: v } } });
+  const entities = {
+    Q100: { descriptions: { en: { value: 'heritage-listed church in Brisbane' } }, claims: {
+      P2048: [claim({ amount: '+99', unit: metre }, 'deprecated'), claim({ amount: '+31.5', unit: metre })],
+      P571: [claim({ time: '+1885-00-00T00:00:00Z' })], P31: [claim({ id: 'Q16970' })] } },
+    Q200: { claims: { P1101: [claim({ amount: '+4', unit: '1' })], P2048: [claim({ amount: '+120', unit: 'http://www.wikidata.org/entity/Q3710' }, 'preferred'), claim({ amount: '+10', unit: metre })] } }
+  };
+  const f200 = lib.wikidataFacts(entities.Q200);
+  check('v14 Wikidata: preferred value wins, feet turned into metres, floors read', f200.height === 36.58 && f200.floors === 4, JSON.stringify(f200));
+  const guessed = !/^(osm|levels|overture|lidar)$/.test(before.heightSource);
+  const wd = lib.applyLandmarkFacts(out, entities, { Q16970: 'church building' });
+  const b8 = out.buildings.find(b => b.id === 'w8');
+  check('v14 Wikidata: the church gets its facts (deprecated height ignored) and type label', church.facts && church.facts.height === 31.5 && church.facts.built === 1885 && church.facts.type === 'church building' && church.facts.description === 'heritage-listed church in Brisbane', JSON.stringify(church.facts));
+  check('v14 Wikidata: a guessed building height becomes the real one, labelled wikidata', guessed && b8.height === 31.5 && b8.heightSource === 'wikidata' && b8.heightGuess === undefined && wd.heights === 1, JSON.stringify([before.height, before.heightSource, b8.height, b8.heightSource]));
+  check('v14 Wikidata: the quality report counts it as measured', out.meta.counts.buildingsWithRealHeight === base.meta.counts.buildingsWithRealHeight + 1 && out.meta.quality.heights.measured > base.meta.quality.heights.measured);
+  check('v14 Wikidata: a landmark with no building still keeps its facts (floors)', tower.facts && tower.facts.floors === 4 && tower.facts.height === 36.58);
+  const out2 = JSON.parse(JSON.stringify(base)); const l2 = out2.landmarks.find(l => l.name === 'Old Stone Church'); l2.wikidata = 'Q100';
+  const b2 = out2.buildings.find(b => b.id === 'w8'); b2.height = 18; b2.heightSource = 'osm';
+  lib.applyLandmarkFacts(out2, entities, {});
+  check('v14 Wikidata: a real OSM height is never replaced', b2.height === 18 && b2.heightSource === 'osm' && l2.facts.height === 31.5);
+  check('v14 Wikidata: a wrong or missing item is skipped quietly', lib.applyLandmarkFacts(JSON.parse(JSON.stringify(base)), {}, {}).facts === 0);
+  check('v14 credits name Wikidata and Wikipedia once used', /Wikidata \(CC0\)/.test(lib.creditsFor({ landmarkFacts: { wikidata: 1, wikipedia: 2 } })) && /Wikipedia \(CC BY-SA\)/.test(lib.creditsFor({ landmarkFacts: { wikidata: 1, wikipedia: 2 } })) && !/Wiki/.test(lib.creditsFor({})));
+  const circ = lib.wikiCircles([llOff(0, 0), llOff(1000, 0)], 100);
+  const long = lib.wikiCircles(Array.from({ length: 200 }, (_, i) => llOff(i * 100, 0)), 100);
+  check('v14 Wikipedia search circles cover the corridor (every 100 m, 150 m wide) and are capped', circ.length >= 10 && circ.length <= 12 && circ.every(c => c.r === 150) && long.length === 25, circ.length + ' / ' + long.length);
+  check('v14 file with landmark facts still passes the game-loader check', lib.loaderContractProblems(out).length === 0, JSON.stringify(lib.loaderContractProblems(out)));
+}

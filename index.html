@@ -229,6 +229,7 @@
   <section>
     <h2>5. Extras (optional)</h2>
     <button id="sampleBtn" style="width:100%" disabled>Sample colours from aerial photo</button>
+    <button id="factsBtn" style="width:100%;margin-top:6px" disabled title="Finds notable places along the track on Wikipedia, and real heights and build years for famous buildings on Wikidata (free, no login)">📚 Landmark facts (Wikipedia + Wikidata)</button>
     <button id="photosBtn" style="width:100%;margin-top:6px" disabled>Find landmark photos</button>
     <button id="groundBtn" style="width:100%;margin-top:6px" disabled>Export ground image (PNG)</button>
     <button id="heightsBtn" style="width:100%;margin-top:6px" disabled>⛰ Get ground heights (QLD LiDAR)</button>
@@ -988,6 +989,9 @@ function attributionFor(used) {
   const parts = ['© OpenStreetMap contributors, ODbL'];
   if (used && used.overture) parts.push('Overture Maps Foundation (ODbL), including Microsoft ML Buildings');
   if (used && used.imagery) parts.push('Includes material © State of Queensland (DNRMMRRD), CC BY-SA; © Planet Labs Netherlands');
+  if (used && used.places) parts.push('Overture Maps Foundation places (CDLA Permissive 2.0)');   // v14
+  if (used && used.wikidata) parts.push('Landmark facts: Wikidata (CC0)');   // v14
+  if (used && used.wikipedia) parts.push('Place descriptions: Wikipedia (CC BY-SA)');   // v14
   if (used && used.elevation) parts.push('Ground heights: Includes material © State of Queensland (DNRMMRRD); © Commonwealth of Australia (Geoscience Australia, The Australian Hydrographic Office); © www.deepreef.org 2025, CC BY-SA');
   return parts.join('; ');
 }
@@ -1117,7 +1121,7 @@ function applyColourSamples(out, tiles, unprojFactory, info) {
     vintage: '2022 or older (urban areas mostly 2021)', noWarranty: 'The State of Queensland makes no warranty about this data.',
     metresPerPixel: (info && info.metresPerPixel) || null, sampled: counts
   };
-  out.meta.attribution = attributionFor({ overture: !!out.meta.overture, imagery: true, elevation: !!out.meta.elevation });
+  out.meta.attribution = creditsFor(out.meta, { imagery: true });
   return counts;
 }
 
@@ -1865,7 +1869,7 @@ function applyElevation(out, grids, unprojFactory, info) {
     climb: Math.round(climb * 10) / 10, descent: Math.round(descent * 10) / 10, steepest: steep,
     bridgedPoints: bridged, bridgedNote: bridged ? 'Track points on bridges/in tunnels use a straight line between the two ends (the terrain model has no bridges).' : undefined,
     counts: grounds, grid: terrainGrid(out, grids, unprojFactory, base, 10) };
-  out.meta.attribution = attributionFor({ overture: !!out.meta.overture, imagery: !!out.meta.imagery, elevation: true });
+  out.meta.attribution = creditsFor(out.meta, { elevation: true });
   const q = out.meta.quality;
   if (q && Array.isArray(q.notes)) {
     q.notes = q.notes.filter(n => !/^Hills:/.test(n));
@@ -2622,6 +2626,160 @@ function raceCheck(out, g) {
   return { problems: probs, lap: Math.round(lap), seconds: secs, minRadius: Math.round(minR), steepest: Math.round(steep.grade * 10) / 10, crossings: crossList, doubled };
 }
 // ======================================================================
+// ======================================================================
+// v14: landmark facts from Wikipedia and Wikidata (both free, no key or login)
+// Wikipedia "nearby" finds notable places along the track that OSM doesn't flag as landmarks;
+// Wikidata gives real heights, floors and the year built for famous buildings (so the most
+// recognisable buildings stop being guesses). Wikidata is CC0; Wikipedia text is CC BY-SA.
+// ======================================================================
+// Circles that cover the scan corridor for Wikipedia's geosearch (it searches circles of at most
+// 10 km): one every `radius` metres along the route, each 1.5 × radius wide. At most `max`.
+function wikiCircles(latlngs, radius, max) {
+  const step = Math.max(50, radius);
+  let pts = [latlngs[0]];
+  for (let i = 1; i < latlngs.length; i++) {   // a point every `step` metres, along long straight bits too
+    const a = latlngs[i - 1], b = latlngs[i], n = Math.max(1, Math.round(dist(a, b) / step));
+    for (let k = 1; k <= n; k++) pts.push([a[0] + (b[0] - a[0]) * k / n, a[1] + (b[1] - a[1]) * k / n]);
+  }
+  pts = downsample(pts, step * 0.75);
+  const cap = max || 25;
+  if (pts.length > cap) pts = Array.from({ length: cap }, (_, i) => pts[Math.round(i * (pts.length - 1) / (cap - 1))]);
+  return pts.map(p => ({ lat: +p[0].toFixed(6), lon: +p[1].toFixed(6), r: Math.min(10000, Math.max(50, Math.round(radius * 1.5))) }));
+}
+// Wikipedia pages that aren't a thing you could drive past and model: suburbs, councils, events,
+// companies, streets, rivers, lists, and shops/eateries/hotels (real business names stay out).
+const WIKI_SKIP = /\b(suburb|locality|electoral|division|district|ward|parish|county|region|municipality|council|company|corporation|business|brand|chain|retailer|franchise|restaurant|caf[eé]|pub|hotel|bar|shop|store|shopping|mall|supermarket|event|festival|incident|disaster|flood|fire|massacre|battle|murder|crash|shooting|protest|election|newspaper|radio|television|tv|band|album|song|film|sports team|club|road|street|lane|highway|motorway|freeway|route|railway line|bus|river|creek|stream)\b/i;
+// What a Wikipedia place probably is, from its short description (the game picks a model by kind).
+function wikiKind(desc) {
+  const d = String(desc || '').toLowerCase();
+  const k = [['bridge', /bridge/], ['station', /station/], ['place_of_worship', /church|cathedral|chapel|temple|mosque|synagogue/], ['museum', /museum|gallery/],
+    ['memorial', /memorial|monument|statue|sculpture|cenotaph/], ['park', /park|garden|reserve/], ['stadium', /stadium|arena|ground|oval/],
+    ['theatre', /theatre|theater|concert|cinema/], ['building', /building|tower|house|hall|office|centre|center|library|school|hospital|university|college/]];
+  for (const [kind, re] of k) if (re.test(d)) return kind;
+  return 'notable';
+}
+// Adds Wikipedia's notable places to out.landmarks (changes `out`). `pages`: [{ pageid, title, lat,
+// lon, description?, wikidata? }]. A page that matches a landmark already in the file (same
+// Wikidata item, same name within 300 m, or the same building) only adds its description and link.
+// Others within the scan radius of the track become new landmarks with source: 'wikipedia'.
+function addWikiPlaces(out, pages, P) {
+  const route = out.route.points, R = out.meta.scanRadius || 100;
+  const trackDist = p => { let d = Infinity; for (let i = 1; i < route.length; i++) d = Math.min(d, distPointSeg(p, route[i - 1], route[i])); return route.length === 1 ? Math.hypot(p[0] - route[0][0], p[1] - route[0][1]) : d; };
+  const places = out.meta.places || {};
+  const placeNames = new Set([places.suburb, places.city, places.state, ...(places.nearby || [])].filter(Boolean).map(s => s.toLowerCase()));
+  const wholes = out.buildings.filter(b => !b.part);
+  const lms = out.landmarks;
+  let n = lms.reduce((m, l) => Math.max(m, parseInt(String(l.id).slice(1), 10) || 0), 0);
+  const stats = { matched: 0, added: 0, skipped: 0 };
+  const seen = new Set(), fresh = [];
+  for (const pg of pages || []) {
+    if (!pg || seen.has(pg.pageid) || pg.lat == null) continue;
+    seen.add(pg.pageid);
+    const pos = P(pg.lat, pg.lon), title = String(pg.title || ''), desc = pg.description ? String(pg.description) : '';
+    const plain = title.replace(/\s*\(.*\)$/, '');
+    const host = wholes.find(b => pointInPoly(pos, b.footprint));
+    const same = lms.find(l => (pg.wikidata && l.wikidata === pg.wikidata) || (l.name && l.name.toLowerCase() === plain.toLowerCase() && Math.hypot(l.pos[0] - pos[0], l.pos[1] - pos[1]) < 300) || (host && l.ref === host.id));
+    if (same) {
+      if (!same.wikipedia) same.wikipedia = 'en:' + title;
+      if (!same.wikidata && pg.wikidata) same.wikidata = pg.wikidata;
+      if (desc && !same.description) same.description = desc;
+      stats.matched++; continue;
+    }
+    if (/^list of /i.test(title) || WIKI_SKIP.test(desc) || placeNames.has(plain.toLowerCase()) || trackDist(pos) > R) { stats.skipped++; continue; }
+    const l = { name: plain, kind: wikiKind(desc), pos, source: 'wikipedia', wikipedia: 'en:' + title };
+    if (host) l.ref = host.id;
+    if (pg.wikidata) l.wikidata = pg.wikidata;
+    if (desc) l.description = desc;
+    fresh.push({ l, d: trackDist(pos) });
+  }
+  for (const { l } of fresh.sort((a, b) => a.d - b.d).slice(0, 40)) { l.id = 'L' + (++n); lms.push(l); stats.added++; }
+  out.meta.counts.landmarks = lms.length;
+  return stats;
+}
+// The best statement for a Wikidata property (preferred rank first, never deprecated).
+function wdBest(claims, prop) {
+  const list = ((claims || {})[prop] || []).filter(c => c && c.rank !== 'deprecated' && c.mainsnak && c.mainsnak.datavalue);
+  return list.find(c => c.rank === 'preferred') || list[0] || null;
+}
+const WD_UNITS = { Q11573: 1, Q3710: 0.3048, Q174728: 0.01, Q828224: 1000 };   // metre, foot, centimetre, kilometre
+function wdAmount(claims, prop, plain) {
+  const c = wdBest(claims, prop); if (!c) return null;
+  const v = c.mainsnak.datavalue.value || {}, unit = String(v.unit || '1').split('/').pop();
+  const k = plain ? (unit === '1' ? 1 : null) : WD_UNITS[unit];
+  const n = parseFloat(v.amount);
+  return k && isFinite(n) ? round2(n * k) : null;
+}
+function wdYear(claims, prop) {
+  const c = wdBest(claims, prop); if (!c) return null;
+  const m = /^([+-]?\d+)-/.exec((c.mainsnak.datavalue.value || {}).time || '');
+  return m ? parseInt(m[1], 10) : null;
+}
+// The facts the game can use from one Wikidata item: { description, height, floors, built, opened, types }.
+function wikidataFacts(entity) {
+  const cl = (entity && entity.claims) || {};
+  const f = {
+    description: entity && entity.descriptions && entity.descriptions.en ? entity.descriptions.en.value : undefined,
+    height: wdAmount(cl, 'P2048'),            // height (metres)
+    floors: wdAmount(cl, 'P1101', true),      // floors above ground
+    built: wdYear(cl, 'P571'),                // inception
+    opened: wdYear(cl, 'P1619'),              // official opening
+    types: (cl.P31 || []).filter(c => c.rank !== 'deprecated' && c.mainsnak && c.mainsnak.datavalue).map(c => c.mainsnak.datavalue.value.id).slice(0, 3)
+  };
+  for (const k of Object.keys(f)) if (f[k] == null || (Array.isArray(f[k]) && !f[k].length)) delete f[k];
+  return f;
+}
+// Height statistics for the quality report (parts are pieces of buildings, so left out).
+function heightQuality(buildings) {
+  const measured = h => h === 'osm' || h === 'levels' || h === 'lidar' || h === 'overture' || h === 'wikidata';
+  const wholes = buildings.filter(b => !b.part && b.source !== 'manual'), nb = wholes.length;   // same buildings as the scan's report
+  const pct = n => nb ? Math.round(1000 * n / nb) / 10 : 0;
+  const m = wholes.filter(b => measured(b.heightSource)).length;
+  const e = wholes.filter(b => /^(estimated|ml-estimate|guess)$/.test(b.heightSource)).length;
+  return { real: m, heights: { measured: pct(m), estimated: pct(e), default: Math.round((100 - pct(m) - pct(e)) * 10) / 10 } };
+}
+// Puts Wikidata facts on the landmarks (changes `out`). `entities` = { Q123: <Wikidata entity> },
+// `labels` = { Q456: 'church' } for the "instance of" types. A landmark's building whose height is
+// only a guess takes Wikidata's real height (or floors × 3 m), labelled heightSource 'wikidata'.
+// Real heights (OSM, floors, Overture, typed in) are never replaced.
+function applyLandmarkFacts(out, entities, labels) {
+  const stats = { facts: 0, heights: 0 };
+  const guess = h => /^(default|estimated|guess|ml-estimate)$/.test(h || '');
+  for (const l of out.landmarks || []) {
+    const e = l.wikidata && entities && entities[l.wikidata];
+    if (!e) continue;
+    const f = wikidataFacts(e);
+    const facts = {};
+    if (f.description) facts.description = f.description;
+    if (f.height && f.height >= 2 && f.height <= 1000) facts.height = f.height;
+    if (f.floors && f.floors >= 1 && f.floors <= 200) facts.floors = f.floors;
+    if (f.built) facts.built = f.built;
+    if (f.opened) facts.opened = f.opened;
+    const types = (f.types || []).map(q => labels && labels[q]).filter(Boolean);
+    if (types.length) facts.type = types.join(', ');
+    if (!Object.keys(facts).length) continue;
+    l.facts = facts; stats.facts++;
+    if (!l.description && facts.description) l.description = facts.description;
+    if (!l.built && (facts.built || facts.opened)) l.built = facts.built || facts.opened;
+    const b = l.ref && out.buildings.find(x => x.id === l.ref);
+    if (!b || b.part || b.hasParts || !guess(b.heightSource) || !(facts.height || facts.floors)) continue;
+    b.height = facts.height || round2(facts.floors * 3); b.heightSource = 'wikidata';
+    if (facts.height) delete b.heightNote; else b.heightNote = 'floors × 3 m';
+    delete b.heightGuess;
+    if (b.roofShapeSource === 'guess') b.roofShape = guessRoof(b.kind, polygonArea(b.footprint), b.height);
+    if (!b.built && l.built) b.built = l.built;
+    stats.heights++;
+  }
+  const q = heightQuality(out.buildings);
+  if (out.meta.quality) out.meta.quality.heights = q.heights;
+  if (out.meta.counts) out.meta.counts.buildingsWithRealHeight = q.real;
+  return stats;
+}
+// Credits for a file, from what its meta says was used.
+function creditsFor(meta, extra) {
+  const lf = meta.landmarkFacts || {};
+  return attributionFor({ overture: !!meta.overture, places: !!(meta.overture && meta.overture.placesAdded), imagery: !!meta.imagery, elevation: !!meta.elevation,
+    wikidata: !!lf.wikidata, wikipedia: !!lf.wikipedia, ...(extra || {}) });
+}
 // PURE-END
 // ======================================================================
 
@@ -2790,6 +2948,7 @@ function invalidateScan() {
   featureLayer.clearLayers(); crossLayer.clearLayers();
   els.exportBtn.disabled = true;
   els.sampleBtn.disabled = els.photosBtn.disabled = els.groundBtn.disabled = true;
+  $('factsBtn').disabled = true;
   $('view3dBtn').disabled = true;
   $('minimapBtn').disabled = $('cardBtn').disabled = $('gameZipBtn').disabled = true;
   $('heightsBtn').disabled = $('terrainBtn').disabled = true;
@@ -3154,6 +3313,7 @@ async function scan() {
   els.exportBtn.disabled = false;
   els.sampleBtn.disabled = els.groundBtn.disabled = false;
   els.photosBtn.disabled = !out.landmarks.length;
+  $('factsBtn').disabled = false;
   $('view3dBtn').disabled = false;
   $('minimapBtn').disabled = $('cardBtn').disabled = $('gameZipBtn').disabled = false;
   demGrids = null; $('heightsBtn').disabled = false; $('terrainBtn').disabled = true;
@@ -3314,6 +3474,63 @@ async function findLandmarkPhotos() {
 
 els.sampleBtn.onclick = sampleColours;
 els.photosBtn.onclick = findLandmarkPhotos;
+
+// ---- v14: landmark facts (Wikipedia nearby + Wikidata) ----
+// Both are free MediaWiki APIs that allow browser requests with origin=*; no key or login.
+async function landmarkFacts() {
+  if (!scanResult) return;
+  const out = scanResult, btn = $('factsBtn');
+  const api = (base, params) => fetch(base + '?' + new URLSearchParams({ format: 'json', origin: '*', ...params })).then(r => { if (!r.ok) throw new Error('replied ' + r.status); return r.json(); });
+  const WP = 'https://en.wikipedia.org/w/api.php', WD = 'https://www.wikidata.org/w/api.php';
+  const chunks = (list, n) => { const c = []; for (let i = 0; i < list.length; i += n) c.push(list.slice(i, i + n)); return c; };
+  btn.disabled = true;
+  try {
+    // 1. Wikipedia pages geotagged along the track
+    const circles = wikiCircles(routeLatLngs.length >= 2 ? routeLatLngs : [[out.meta.origin.lat, out.meta.origin.lon]], out.meta.scanRadius || 100);
+    const hits = new Map();
+    for (let i = 0; i < circles.length; i++) {
+      setStatus(`Looking for notable places on Wikipedia… ${i + 1} of ${circles.length}`);
+      const c = circles[i];
+      const j = await api(WP, { action: 'query', list: 'geosearch', gscoord: c.lat + '|' + c.lon, gsradius: c.r, gslimit: 100 });
+      for (const g of (j.query && j.query.geosearch) || []) hits.set(g.pageid, { pageid: g.pageid, title: g.title, lat: g.lat, lon: g.lon });
+    }
+    for (const ids of chunks([...hits.keys()], 50)) {
+      const j = await api(WP, { action: 'query', prop: 'description|pageprops', ppprop: 'wikibase_item', pageids: ids.join('|') });
+      for (const pg of Object.values((j.query && j.query.pages) || {})) {
+        const h = hits.get(pg.pageid); if (!h) continue;
+        if (pg.description) h.description = pg.description;
+        if (pg.pageprops && pg.pageprops.wikibase_item) h.wikidata = pg.pageprops.wikibase_item;
+      }
+    }
+    // 2. Wikidata facts for every landmark and Wikipedia place with a Wikidata item
+    const qids = [...new Set([...out.landmarks.map(l => l.wikidata), ...[...hits.values()].map(h => h.wikidata)].filter(q => /^Q\d+$/.test(q || '')))];
+    const entities = {}, labels = {};
+    for (const ids of chunks(qids, 50)) {
+      setStatus(`Reading landmark facts from Wikidata… ${Object.keys(entities).length} of ${qids.length}`);
+      const j = await api(WD, { action: 'wbgetentities', ids: ids.join('|'), props: 'claims|descriptions', languages: 'en' });
+      Object.assign(entities, j.entities || {});
+    }
+    const typeIds = [...new Set(Object.values(entities).flatMap(e => wikidataFacts(e).types || []))];
+    for (const ids of chunks(typeIds, 50)) {
+      const j = await api(WD, { action: 'wbgetentities', ids: ids.join('|'), props: 'labels', languages: 'en' });
+      for (const [q, e] of Object.entries(j.entities || {})) if (e.labels && e.labels.en) labels[q] = e.labels.en.value;
+    }
+    // Everything is downloaded: only now change the scan, so a failure part-way leaves it as it was.
+    const before = new Set(out.landmarks.map(l => l.id));
+    const wp = addWikiPlaces(out, [...hits.values()], makeProjector(out.meta.origin.lat, out.meta.origin.lon));
+    const wd = applyLandmarkFacts(out, entities, labels);
+    out.meta.landmarkFacts = { wikipedia: wp.added + wp.matched, wikidata: wd.facts, placesAdded: wp.added, heightsFilled: wd.heights, checked: new Date().toISOString().slice(0, 10) };
+    out.meta.attribution = creditsFor(out.meta);
+    for (const l of out.landmarks) if (!before.has(l.id)) scanPreview.push({ cat: 'landmark', name: l.name, kind: l.kind, xy: l.pos });
+    drawPreview(scanPreview); showStats();
+    els.photosBtn.disabled = !out.landmarks.length;
+    setStatus(`Landmark facts: ${wp.added} notable places added from Wikipedia, ${wd.facts} landmarks got facts from Wikidata, ${wd.heights} building heights are now real. Export JSON to save them.`, 'ok');
+  } catch (e) {
+    const why = e instanceof TypeError ? "couldn't reach Wikipedia or Wikidata (offline or blocked)" : e.message;
+    setStatus('Landmark facts failed: ' + why + '. Your scan is unchanged.', 'err');
+  } finally { btn.disabled = false; }
+}
+$('factsBtn').onclick = landmarkFacts;
 els.groundBtn.onclick = exportGroundImage;
 
 // Preview colours by area type. Anything not listed is drawn as generic green.
@@ -3416,7 +3633,17 @@ function showStats() {
   const probHtml = probs.length ? `<button id="nextProblemBtn" style="width:100%;margin-top:6px">Show problem on the map (${probs.length})</button>` : '';
   els.stats.innerHTML = rows.map(([k, v]) => `<div><span>${k}</span><b>${v}</b></div>`).join('') + profileHtml(out) + raceHtml(out, esc) + qHtml + probHtml +
     (lm.length ? `<details style="margin-top:6px"><summary>Landmarks to model by hand (${lm.length})</summary>` +
-      `<ul style="margin:4px 0 0;padding-left:18px">${lm.map(l => `<li>${esc(l.name)} <span class="hint">(${esc(l.kind)})</span>${photoHtml(l, esc)}</li>`).join('')}</ul></details>` : '');
+      `<ul style="margin:4px 0 0;padding-left:18px">${lm.map(l => `<li>${esc(l.name)} <span class="hint">(${esc(l.kind)})</span>${factsHtml(l, esc)}${photoHtml(l, esc)}</li>`).join('')}</ul></details>` : '');
+}
+// v14: a landmark's description, height and year, after "Landmark facts".
+function factsHtml(l, esc) {
+  const f = l.facts || {}, bits = [];
+  if (f.height) bits.push(f.height + ' m tall'); else if (f.floors) bits.push(f.floors + ' floors');
+  if (l.built) bits.push('built ' + l.built);
+  if (l.heritage) bits.push('heritage');
+  const d = l.description || f.description;
+  if (!d && !bits.length) return '';
+  return `<div class="hint">${d ? esc(d) : ''}${d && bits.length ? ' · ' : ''}${esc(bits.join(', '))}${l.source === 'wikipedia' ? ' · from Wikipedia' : ''}</div>`;
 }
 // v13: "Will it race well?" in the game: the race check, red first. Green when nothing is wrong.
 function raceHtml(out, esc) {
